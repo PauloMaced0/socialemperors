@@ -600,6 +600,32 @@ def do_command(USERID, cmd, args):
 
         print(f"Ended quest {quest_id}.", "WIN" if win else "loss", f"difficulty {difficulty}")
 
+    elif cmd == Constant.CMD_UNIT_COLLECTION_COMPLETED:
+        collection_id = args[0]
+        print("Unit collection completed:", collection_id)
+        pState = save["privateState"]
+        if not isinstance(pState.get("unitCollectionsCompleted"), list):
+            pState["unitCollectionsCompleted"] = []
+        # +1 cash reward, but only the first time this collection is completed
+        # (the client shows sendCommand=false, so no apply_rewards_ranking fires
+        # for collections; the cash must be granted here or it is lost).
+        if collection_id not in pState["unitCollectionsCompleted"]:
+            pState["unitCollectionsCompleted"].append(collection_id)
+            save["playerInfo"]["cash"] = save["playerInfo"]["cash"] + 1
+
+    elif cmd == Constant.CMD_APPLY_REWARDS_RANKING:
+        level = args[0]
+        cash = int(args[1]) if len(args) > 1 else 0
+        items = json.loads(args[2]) if len(args) > 2 and args[2] else []
+        print("Apply ranking reward: +", cash, "cash,", len(items), "items")
+        save["playerInfo"]["cash"] = save["playerInfo"]["cash"] + cash
+        gifts = save["privateState"]["gifts"]
+        for raw_id in items:
+            item_id = int(raw_id)
+            while len(gifts) <= item_id:
+                gifts.append(0)
+            gifts[item_id] += 1
+
     elif cmd == Constant.CMD_END_ATTACK:
         data = json.loads(args[0])
         win = data.get("win") == 1

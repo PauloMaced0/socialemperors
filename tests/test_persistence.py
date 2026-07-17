@@ -257,7 +257,38 @@ def test_darts_new_free_stamps_claim(tmp):
     assert now - 10 <= ts <= now, f"free-claim timestamp not set: {ts}"
 
 
+def test_unit_collection_completed_grants_cash_once(tmp):
+    """Completing a unit collection marks it done and grants +1 cash, once."""
+    ps = sessions.session(UID)["privateState"]
+    ps["unitCollectionsCompleted"] = []
+    sessions.session(UID)["playerInfo"]["cash"] = 0
+    command.command(UID, _batch([{"cmd": Constant.CMD_UNIT_COLLECTION_COMPLETED, "args": [5]}]))
+    disk = json.load(open(os.path.join(tmp, f"{UID}.save.json")))
+    assert 5 in disk["privateState"]["unitCollectionsCompleted"], "collection not marked done"
+    assert disk["playerInfo"]["cash"] == 1, f"cash reward not granted: {disk['playerInfo']['cash']}"
+    # re-sending the same collection must not grant cash again
+    command.command(UID, _batch([{"cmd": Constant.CMD_UNIT_COLLECTION_COMPLETED, "args": [5]}]))
+    assert sessions.session(UID)["playerInfo"]["cash"] == 1, "cash double-granted"
+    command.command(UID, _batch([{"cmd": Constant.CMD_UNIT_COLLECTION_COMPLETED, "args": [6]}]))
+    assert sessions.session(UID)["playerInfo"]["cash"] == 2, "second collection cash missing"
+
+
+def test_apply_rewards_ranking_grants_cash_and_items(tmp):
+    """Island ranking reward adds cash and drops item rewards into storage."""
+    sessions.session(UID)["playerInfo"]["cash"] = 10
+    sessions.session(UID)["privateState"]["gifts"] = []
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_APPLY_REWARDS_RANKING, "args": [3, 50, json.dumps([176, 180])]},
+    ]))
+    disk = json.load(open(os.path.join(tmp, f"{UID}.save.json")))
+    assert disk["playerInfo"]["cash"] == 60, f"ranking cash not added: {disk['playerInfo']['cash']}"
+    g = disk["privateState"]["gifts"]
+    assert g[176] == 1 and g[180] == 1, "ranking items not stored"
+
+
 TESTS = [
+    test_unit_collection_completed_grants_cash_once,
+    test_apply_rewards_ranking_grants_cash_and_items,
     test_darts_flow_persists,
     test_darts_new_free_stamps_claim,
     test_store_item_frombug_moves_item_to_storage,
