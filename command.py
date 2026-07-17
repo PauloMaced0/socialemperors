@@ -1,9 +1,44 @@
 import json
+import os
 
 from sessions import session, save_session
 from get_game_config import get_game_config, get_level_from_xp, get_name_from_item_id, get_attribute_from_mission_id, get_xp_from_level, get_attribute_from_item_id, get_item_from_subcat_functional
 from constants import Constant
 from engine import apply_cost, apply_collect, apply_collect_xp, timestamp_now
+from bundle import SAVES_DIR
+
+DARTS_DAILY_SECONDS = 86400  # one darts throw per 24h
+DAILY_BONUS_SECONDS = 86400  # daily login bonus claimable once per 24h
+
+
+def _grant_resource(save, rtype, amount):
+    """Add `amount` of a resource identified by its config type code
+    (s=stone, w=wood, f=food, g=gold/coins, c=cash) to the default map /
+    player. No-op for unknown types or non-positive amounts."""
+    amount = int(amount)
+    if amount <= 0 or not rtype:
+        return
+    m = save["maps"][0]
+    if rtype == "s":
+        m["stone"] = int(m.get("stone", 0)) + amount
+    elif rtype == "w":
+        m["wood"] = int(m.get("wood", 0)) + amount
+    elif rtype == "f":
+        m["food"] = int(m.get("food", 0)) + amount
+    elif rtype == "g":
+        m["coins"] = int(m.get("coins", 0)) + amount
+    elif rtype == "c":
+        save["playerInfo"]["cash"] = int(save["playerInfo"]["cash"]) + amount
+
+
+def _log_unhandled(USERID, cmd, args):
+    "Append an unimplemented command's payload for later implementation."
+    try:
+        line = json.dumps({"userid": USERID, "cmd": cmd, "args": args})
+        with open(os.path.join(SAVES_DIR, "unhandled_commands.log"), "a") as f:
+            f.write(line + "\n")
+    except Exception as e:
+        print(f" [!] Could not log unhandled command '{cmd}': {e}")
 
 def get_strategy_type(id):
     if id == 8:
@@ -24,11 +59,17 @@ def command(USERID, data):
     publishActions = data["publishActions"]
     commands = data["commands"]
     
-    for i, comm in enumerate(commands):
-        cmd = comm["cmd"]
-        args = comm["args"]
-        do_command(USERID, cmd, args)
-    save_session(USERID) # Save session
+    try:
+        for i, comm in enumerate(commands):
+            cmd = comm["cmd"]
+            args = comm["args"]
+            try:
+                do_command(USERID, cmd, args)
+            except Exception as e:
+                # One bad command must not discard the rest of the batch.
+                print(f" [!] Command '{cmd}' failed: {type(e).__name__}: {e}. Skipping.")
+    finally:
+        save_session(USERID) # Always persist successful mutations
 
 def do_command(USERID, cmd, args):
     save = session(USERID)
@@ -94,7 +135,13 @@ def do_command(USERID, cmd, args):
         map = save["maps"][town_id]
         apply_collect(save["playerInfo"], map, id, resource_multiplier)
         save["playerInfo"]["cash"] = max(save["playerInfo"]["cash"] - cash_to_substract, 0)
-    
+        # Advance the item's collect timestamp so it enters cooldown and is not
+        # re-offered after a reload (client computes "ready" from serverTime - item[4]).
+        for item in map["items"]:
+            if item[0] == id and item[1] == x and item[2] == y:
+                item[4] = timestamp_now()
+                break
+
     elif cmd == Constant.CMD_SELL:
         x = args[0]
         y = args[1]
@@ -195,13 +242,25 @@ def do_command(USERID, cmd, args):
             map["items"] += [[unit_id, unit_x, unit_y, orientation, collected_at_timestamp, level]]
     
     elif cmd == Constant.CMD_RT_LEVEL_UP:
-        new_level = args[0]
-        print("Level Up!:", new_level)
+        new_level = int(args[0])
         map = save["maps"][0] # TODO : xp must be general, since theres no given town_id
-        map["level"] = args[0]
+        old_level = int(map.get("level", 0) or 0)
+        print("Level Up!:", new_level)
+        map["level"] = new_level
         current_xp = map["xp"]
         min_expected_xp = get_xp_from_level(max(0, new_level - 1))
         map["xp"] = max(min_expected_xp, current_xp) # try to fix problems with not counting XP... by keeping up with client-side level counting
+        # Grant each newly-crossed level's configured reward exactly once.
+        # Level N's reward lives at levels[N-1] (e.g. level 5 -> 1 cash). Using
+        # the stored old_level as the baseline makes repeated calls idempotent
+        # and covers multi-level jumps in a single XP change.
+        levels = get_game_config()["levels"]
+        for lvl in range(old_level + 1, new_level + 1):
+            idx = lvl - 1
+            if 0 <= idx < len(levels):
+                r = levels[idx]
+                _grant_resource(save, r.get("reward_type"), r.get("reward_amount", 0))
+                print(f"  level {lvl} reward: {r.get('reward_amount')} '{r.get('reward_type')}'")
 
     elif cmd == Constant.CMD_RT_PUBLISH_SCORE:
         new_xp = args[0]
@@ -242,7 +301,11 @@ def do_command(USERID, cmd, args):
         save["playerInfo"]["cash"] = max(save["playerInfo"]["cash"] - 5, 0)#maybe make function for editing resources
         save["maps"][town_id]["coins"] += 2500
 
-    elif cmd == Constant.CMD_STORE_ITEM:
+    elif cmd == Constant.CMD_STORE_ITEM or cmd == Constant.CMD_STORE_ITEM_FROMBUG:
+        # store_item_frombug is the client relocating a colliding/out-of-bounds
+        # item to storage; it uses the same [x, y, town, id] args as store_item.
+        # If not persisted, the item stays on the map and the client re-sends this
+        # every single load.
         x = args[0]
         y = args[1]
         town_id = int(args[2])
@@ -258,6 +321,67 @@ def do_command(USERID, cmd, args):
             for i in range(item_id - length + 1):
                 save["privateState"]["gifts"].append(0)
         save["privateState"]["gifts"][item_id] += 1
+
+    elif cmd == Constant.CMD_STORE_ADD_ITEMS:
+        # A batch of item ids to drop into storage (gifts). Used by darts prizes,
+        # offer packs, etc. args[0] is a JSON-encoded array of item ids.
+        item_ids = json.loads(args[0]) if args and args[0] else []
+        gifts = save["privateState"]["gifts"]
+        for raw_id in item_ids:
+            item_id = int(raw_id)
+            while len(gifts) <= item_id:
+                gifts.append(0)
+            gifts[item_id] += 1
+        print("Store add items:", item_ids)
+
+    elif cmd == Constant.CMD_DARTS_NEW_FREE:
+        pState = save["privateState"]
+        now = timestamp_now()
+        last_dart = int(pState.get("timeStampLastDart", 0) or 0)
+        # One darts throw per 24h. Reject the free claim if already thrown today.
+        if now - last_dart < DARTS_DAILY_SECONDS:
+            print("Darts: already thrown today - free claim rejected.")
+            return
+        print("Darts: claim daily free.")
+        pState["timeStampDartsNewFree"] = now
+        pState["dartsHasFree"] = False   # consume the once-per-day free game
+        pState["dartsBalloonsShot"] = [] # fresh board for this play
+
+    elif cmd == Constant.CMD_DARTS_RESET:
+        print("Darts: reset board.")
+        pState = save["privateState"]
+        pState["timeStampDartsReset"] = timestamp_now()
+        pState["timeStampDartsNewFree"] = timestamp_now()
+        pState["dartsBalloonsShot"] = []
+        pState["dartsRandomSeed"] = int(args[0]) if args else 0
+
+    elif cmd == Constant.CMD_DARTS_SHOOT_BALLOON:
+        # One FREE throw per 24h; every further throw is billed the configured
+        # DART_COST_CASH ("Play again for 20"). The client only deducts that
+        # cash locally and never sends the payment, so the server must charge
+        # it here or a reload restores the cash and throws become infinite.
+        # Once the persisted cash drops below the price, the client's own
+        # canAfford() check blocks the board, so the daily limit holds.
+        pState = save["privateState"]
+        now = timestamp_now()
+        last_free = int(pState.get("timeStampLastDart", 0) or 0)
+        if now - last_free >= DARTS_DAILY_SECONDS:
+            # Today's free throw. Paid throws do not move this clock.
+            pState["timeStampLastDart"] = now
+            print("Darts: free daily throw.")
+        else:
+            price = int(get_game_config()["globals"].get("DART_COST_CASH", 20))
+            cash = int(save["playerInfo"]["cash"])
+            if cash < price:
+                print(f"Darts: extra throw rejected - needs {price} cash, has {cash}.")
+                return
+            save["playerInfo"]["cash"] = cash - price
+            print(f"Darts: extra throw billed {price} cash ({cash} -> {cash - price}).")
+        balloon_index = int(args[0])
+        print("Darts: shoot balloon", balloon_index)
+        if not isinstance(pState.get("dartsBalloonsShot"), list):
+            pState["dartsBalloonsShot"] = []
+        pState["dartsBalloonsShot"].append(balloon_index)
 
     elif cmd == Constant.CMD_PLACE_GIFT:
         item_id = args[0]
@@ -405,34 +529,41 @@ def do_command(USERID, cmd, args):
         pState["timeStampTakeCareMonster"] = -1 # remove timer
 
     elif cmd == Constant.CMD_WIN_BONUS:
-        coins = args[0]
-        town_id = args[1]
-        hero = args[2]
-        claimId = args[3]
-        cash = args[4]
-
-        print("Claiming Win Bonus")
-        map = save["maps"][town_id]
-
-        if cash != 0:
-            save["playerInfo"]["cash"] = save["playerInfo"]["cash"] + cash
-            print("Added " + str(cash) + " Cash to players balance")
-
-        if coins != 0:
-            map["coins"] = map["coins"] + coins
-            print("Added " + str(coins) + " Gold to players balance")
-
-        if hero != 0:
-            length = len(save["privateState"]["gifts"])
-            if length <= hero:
-                for i in range(hero - length + 1):
-                    save["privateState"]["gifts"].append(0)
-            save["privateState"]["gifts"][hero] += 1
-            print("Added Hero ID=" + str(hero))
-
+        # Daily login bonus. The reward is chosen SERVER-SIDE from
+        # DAILY_BONUS_CONFIG by streak position and gated to once per 24h; the
+        # client-submitted coins/cash/hero/claimId are ignored (they were the
+        # infinite-cash exploit).
+        town_id = int(args[1]) if len(args) > 1 else 0
         pState = save["privateState"]
-        pState["bonusNextId"] = claimId + 1
-        pState["timestampLastBonus"] = timestamp_now()
+        now = timestamp_now()
+        last = int(pState.get("timestampLastBonus", 0) or 0)
+        if last and now - last < DAILY_BONUS_SECONDS:
+            print("Daily bonus already claimed today - rejected.")
+            return
+
+        cfg = get_game_config()["globals"]["DAILY_BONUS_CONFIG"]
+        idx = int(pState.get("bonusNextId", 0) or 0) % len(cfg)
+        reward = cfg[idx]
+        qty = int(reward.get("qty", 0) or 0)
+        rtype = reward.get("type")
+        print(f"Claiming daily bonus [{idx}]: {qty} '{rtype}'")
+
+        map = save["maps"][town_id]
+        if rtype == "g":
+            map["coins"] = int(map["coins"]) + qty
+        elif rtype == "c":
+            save["playerInfo"]["cash"] = int(save["playerInfo"]["cash"]) + qty
+        elif rtype == "hero":
+            heroes = get_game_config()["globals"]["DAILY_BONUS_CONFIG_HEROES"]
+            hero_id = int(heroes[idx % len(heroes)])
+            gifts = pState["gifts"]
+            while len(gifts) <= hero_id:
+                gifts.append(0)
+            gifts[hero_id] += qty
+            print(f"  daily bonus hero ID={hero_id} x{qty}")
+
+        pState["bonusNextId"] = idx + 1
+        pState["timestampLastBonus"] = now
 
     elif cmd == Constant.CMD_ADMIN_ADD_ANIMAL:
         subcatFunc = str(args[0])
@@ -525,18 +656,107 @@ def do_command(USERID, cmd, args):
 
         # Update quests data
         save["privateState"]["unlockedQuestIndex"] = max(quest_id + 1, save["privateState"]["unlockedQuestIndex"], 0)
-        # save["privateState"]["questsRank"] = TODO 
+        # Star rank: questsRank is keyed by the quest id string (matches the
+        # client's ISLE_ORDER lookup) and holds the best difficulty cleared. The
+        # island shows that many stars, so it must persist on a win.
+        if win:
+            quest_key = str(data["quest_id"])
+            ranks = save["privateState"].get("questsRank")
+            if not isinstance(ranks, dict):
+                ranks = {}
+            ranks[quest_key] = max(int(ranks.get(quest_key, 0)), int(difficulty))
+            save["privateState"]["questsRank"] = ranks
         # save["maps"]["questTimes"] [quest_id] = TODO min (... , duration_sec)
         # save["maps"]["lastQuestTimes"] [quest_id] = TODO min (... , duration_sec)
 
-        print(f"Ended quest {quest_id}.")
+        print(f"Ended quest {quest_id}.", "WIN" if win else "loss", f"difficulty {difficulty}")
+
+    elif cmd == Constant.CMD_UNIT_COLLECTION_COMPLETED:
+        collection_id = args[0]
+        print("Unit collection completed:", collection_id)
+        pState = save["privateState"]
+        if not isinstance(pState.get("unitCollectionsCompleted"), list):
+            pState["unitCollectionsCompleted"] = []
+        # +1 cash reward, but only the first time this collection is completed
+        # (the client shows sendCommand=false, so no apply_rewards_ranking fires
+        # for collections; the cash must be granted here or it is lost).
+        if collection_id not in pState["unitCollectionsCompleted"]:
+            pState["unitCollectionsCompleted"].append(collection_id)
+            save["playerInfo"]["cash"] = save["playerInfo"]["cash"] + 1
+
+    elif cmd == Constant.CMD_APPLY_REWARDS_RANKING:
+        level = args[0]
+        cash = int(args[1]) if len(args) > 1 else 0
+        items = json.loads(args[2]) if len(args) > 2 and args[2] else []
+        print("Apply ranking reward: +", cash, "cash,", len(items), "items")
+        save["playerInfo"]["cash"] = save["playerInfo"]["cash"] + cash
+        gifts = save["privateState"]["gifts"]
+        for raw_id in items:
+            item_id = int(raw_id)
+            while len(gifts) <= item_id:
+                gifts.append(0)
+            gifts[item_id] += 1
+
+    elif cmd == Constant.CMD_END_ATTACK:
+        data = json.loads(args[0])
+        win = data.get("win") == 1
+        resources = data.get("resources", {})
+        gold_gained = int(resources.get("g", 0))
+        xp_gained = int(resources.get("x", 0))
+        town_id = save["playerInfo"].get("default_map", 0)
+        if town_id >= len(save["maps"]):
+            town_id = 0
+        map = save["maps"][town_id]
+        map["coins"] += gold_gained
+        map["xp"] += xp_gained
+        print("End attack.", "WIN" if win else "loss", f"(+{gold_gained}g, +{xp_gained}xp)")
+        # On a win, record the conquered island position so the PvP map shows it
+        # complete. The client reads map["universAttackWin"] to mark conquered slots.
+        if win:
+            victim = data.get("victim") or {}
+            posicion = victim.get("posicion")
+            if posicion is not None:
+                if not isinstance(map.get("universAttackWin"), list):
+                    map["universAttackWin"] = []
+                if int(posicion) not in map["universAttackWin"]:
+                    map["universAttackWin"].append(int(posicion))
 
     elif cmd == Constant.CMD_ADD_COLLECTABLE:
         collection_id = args[0]
         collectible_id = args[1]
-        # TODO 
+        # TODO
+
+    elif cmd == Constant.CMD_ACTIVATE:
+        x = args[0]
+        y = args[1]
+        town_id = args[2]
+        item_id = args[3]
+        time_option = args[4] if len(args) > 4 else 0
+        print("Activate", str(get_name_from_item_id(item_id)), "at", f"({x},{y})", "option", time_option)
+        map = save["maps"][town_id]
+        for item in map["items"]:
+            if item[0] == item_id and item[1] == x and item[2] == y:
+                # An item is [id, x, y, orient, collected_at, level, units, attrs].
+                # The client shows a producer as "working" only when attrs.cp is a
+                # nonzero time option (1..4), and derives the production duration and
+                # remaining time from attrs.cp + collected_at. Persist both so the
+                # timer keeps running across reloads.
+                while len(item) < 6:
+                    item.append(0)          # level
+                if len(item) < 7:
+                    item.append([])         # units
+                if len(item) < 8 or not isinstance(item[7], dict):
+                    if len(item) < 8:
+                        item.append({})     # attrs
+                    else:
+                        item[7] = {}
+                item[7]["cp"] = time_option
+                if time_option:
+                    item[4] = timestamp_now()   # production start
+                break
 
     else:
         print(f"Unhandled command '{cmd}' -> args", args)
+        _log_unhandled(USERID, cmd, args)
         return
     

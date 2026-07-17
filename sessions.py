@@ -239,10 +239,14 @@ def backup_session(USERID: str):
     return
 
 def save_session(USERID: str):
-    # TODO 
     file = f"{USERID}.save.json"
     print(f" * Saving village at {file}... ", end='')
     village = session(USERID)
-    with open(os.path.join(SAVES_DIR, file), 'w') as f:
+    # Atomic write: dump to a temp file in the same dir, then replace the target.
+    # A crash mid-write cannot corrupt an existing save.
+    target = os.path.join(SAVES_DIR, file)
+    tmp = target + ".tmp"
+    with open(tmp, 'w') as f:
         json.dump(village, f, indent=4)
+    os.replace(tmp, target)
     print("Done.")

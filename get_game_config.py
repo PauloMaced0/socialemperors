@@ -1,5 +1,6 @@
 import json
 import os
+import datetime
 import jsonpatch
 from bundle import MODS_DIR, CONFIG_DIR, CONFIG_PATCH_DIR
 
@@ -68,6 +69,35 @@ def patch_game_config():
 
 print (" [+] Applying config patches and mods...")
 patch_game_config()
+
+def refresh_darts_schedule() -> None:
+    """Repoint the most recent weekly darts prize set to the current week.
+
+    The bundled darts_items schedule runs out in 2012, so the client can find
+    no darts set for "this week" and shows "Come back next week for new
+    prizes!", making the daily darts unplayable. Anchoring the latest set to
+    today keeps a darts game permanently available; player progress lives in
+    privateState (dartsBalloonsShot), not here, so this does not wipe it.
+    """
+    darts = __game_config.get("darts_items")
+    if not darts:
+        return
+    # Index of the last set that actually carries prizes (set 33 is an empty
+    # terminator with no items).
+    playable_idx = [i for i, e in enumerate(darts) if e.get("items")]
+    if not playable_idx:
+        return
+    last_real = playable_idx[-1]
+    # Rebase the ENTIRE weekly schedule onto real dates, anchoring the last
+    # real prize set to the current week. Past sets fall on prior weeks and any
+    # trailing (empty) set lands next week. This keeps a darts game available
+    # regardless of whether the client selects "this week" by latest
+    # start_date <= now or by weeks elapsed since the first set.
+    today = datetime.date.today()
+    monday = today - datetime.timedelta(days=today.weekday())
+    for i, e in enumerate(darts):
+        wk = monday + datetime.timedelta(weeks=(i - last_real))
+        e["start_date"] = wk.strftime("%Y-%m-%d 00:00:00")
 
 def get_game_config() -> dict:
     return __game_config

@@ -1,0 +1,4 @@
+[
+    {"op": "add", "path": "/localization_strings/-", "value": {"id": 1548, "name": "POPUP_STORAGE_USE", "text": "Place"}},
+    {"op": "add", "path": "/localization_strings/-", "value": {"id": 1549, "name": "POPUP_STORAGE_SELL", "text": "Sell"}}
+]

@@ -1,0 +1,10 @@
+[
+    {"op": "replace", "path": "/expansion_prices/0/neighbors", "value": 0},
+    {"op": "replace", "path": "/expansion_prices/1/neighbors", "value": 0},
+    {"op": "replace", "path": "/expansion_prices/2/neighbors", "value": 0},
+    {"op": "replace", "path": "/expansion_prices/3/neighbors", "value": 0},
+    {"op": "replace", "path": "/expansion_prices/4/neighbors", "value": 0},
+    {"op": "replace", "path": "/expansion_prices/5/neighbors", "value": 0},
+    {"op": "replace", "path": "/expansion_prices/6/neighbors", "value": 0},
+    {"op": "replace", "path": "/expansion_prices/7/neighbors", "value": 0}
+]
