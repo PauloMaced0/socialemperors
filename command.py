@@ -1,9 +1,21 @@
 import json
+import os
 
 from sessions import session, save_session
 from get_game_config import get_game_config, get_level_from_xp, get_name_from_item_id, get_attribute_from_mission_id, get_xp_from_level, get_attribute_from_item_id, get_item_from_subcat_functional
 from constants import Constant
 from engine import apply_cost, apply_collect, apply_collect_xp, timestamp_now
+from bundle import SAVES_DIR
+
+
+def _log_unhandled(USERID, cmd, args):
+    "Append an unimplemented command's payload for later implementation."
+    try:
+        line = json.dumps({"userid": USERID, "cmd": cmd, "args": args})
+        with open(os.path.join(SAVES_DIR, "unhandled_commands.log"), "a") as f:
+            f.write(line + "\n")
+    except Exception as e:
+        print(f" [!] Could not log unhandled command '{cmd}': {e}")
 
 def get_strategy_type(id):
     if id == 8:
@@ -24,11 +36,17 @@ def command(USERID, data):
     publishActions = data["publishActions"]
     commands = data["commands"]
     
-    for i, comm in enumerate(commands):
-        cmd = comm["cmd"]
-        args = comm["args"]
-        do_command(USERID, cmd, args)
-    save_session(USERID) # Save session
+    try:
+        for i, comm in enumerate(commands):
+            cmd = comm["cmd"]
+            args = comm["args"]
+            try:
+                do_command(USERID, cmd, args)
+            except Exception as e:
+                # One bad command must not discard the rest of the batch.
+                print(f" [!] Command '{cmd}' failed: {type(e).__name__}: {e}. Skipping.")
+    finally:
+        save_session(USERID) # Always persist successful mutations
 
 def do_command(USERID, cmd, args):
     save = session(USERID)
@@ -94,7 +112,13 @@ def do_command(USERID, cmd, args):
         map = save["maps"][town_id]
         apply_collect(save["playerInfo"], map, id, resource_multiplier)
         save["playerInfo"]["cash"] = max(save["playerInfo"]["cash"] - cash_to_substract, 0)
-    
+        # Advance the item's collect timestamp so it enters cooldown and is not
+        # re-offered after a reload (client computes "ready" from serverTime - item[4]).
+        for item in map["items"]:
+            if item[0] == id and item[1] == x and item[2] == y:
+                item[4] = timestamp_now()
+                break
+
     elif cmd == Constant.CMD_SELL:
         x = args[0]
         y = args[1]
@@ -538,5 +562,6 @@ def do_command(USERID, cmd, args):
 
     else:
         print(f"Unhandled command '{cmd}' -> args", args)
+        _log_unhandled(USERID, cmd, args)
         return
     
