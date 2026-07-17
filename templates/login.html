@@ -29,6 +29,9 @@
 			<div class="phl ptm uiInterstitialContent" style="overflow: auto; display: inblock;">
 				<br>
 				<div style="margin-left:20px; font-size:13px; float: left;">
+					{% if error %}
+					<p style="color: #b00; font-weight: bold;">{{ error }}</p>
+					{% endif %}
 					{% if saves_info %}
 					<form method="post">
 						<!-- VILLAGE SELECTION -->
@@ -45,6 +48,16 @@
 							</select>
 						</div>
 						<br><br>
+						<!-- PASSWORD -->
+						<b>Password</b>
+						<br><br>
+						<div style="float: left; margin-right: 4px;">
+							<img src="img/sword.png" style="height: 27px; margin-top: 0px;">
+						</div>
+						<div style="float: left">
+							<input type="password" id="password" name="password" style="height: 23px; min-width: 322px;" placeholder="Password (set on first login)">
+						</div>
+						<br><br>
 						<br>
 						<!-- RELEASE SELECTION -->
 						<b>Game version</b>
@@ -57,8 +70,6 @@
 								<div style="float: left">
 									<select id="GAMEVERSION" name="GAMEVERSION" style="height: 24px;" required>
 										<option value="SocialEmpires0926bsec.swf">0.9.26b (Working)</option>
-										<option value="SocialEmpires1.1.5sec.swf">1.1.5 (Experimental)</option>
-										<option value="SocialEmpires1.4.07sec.swf">1.4.07 (Broken)</option>
 									</select>
 								</div>
 								<br><br> <i>Tip: 0.9.26b Contains legacy Troll Missions!</i>
@@ -76,6 +87,11 @@
 					<p style="font-size:13px; display: inline;">
 						<b><a href="/new.html">Create a new empire</a></b>
 					</p>
+					{% if saves_info %}
+					<p style="font-size:13px;">
+						<a href="/change-password">Change a village's password</a>
+					</p>
+					{% endif %}
 				</div>
 			</div>
 		</div>
