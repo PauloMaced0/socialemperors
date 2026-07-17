@@ -26,8 +26,8 @@ OLD_TS = 1000000000   # year 2001, safely in the past
 
 
 def _template_save():
-    """A minimal valid save built from a shipped throwaway save."""
-    src = os.path.join("saves", "d609236a-80d6-4bf5-9602-ab6d699fb6e0.save.json")
+    """A minimal valid save built from the shipped initial village."""
+    src = os.path.join("villages", "initial.json")
     save = json.load(open(src))
     save["playerInfo"]["pid"] = UID
     m = save["maps"][0]
@@ -224,7 +224,42 @@ def test_store_item_frombug_moves_item_to_storage(tmp):
     assert disk["privateState"]["gifts"][ITEM_ID] == 1, "item not added to storage"
 
 
+def test_darts_flow_persists(tmp):
+    """Daily darts: reset clears the board + seeds it, each throw records the
+    balloon, and prizes (store_add_items) land in storage."""
+    ps = sessions.session(UID)["privateState"]
+    ps["gifts"] = []
+    ps["dartsBalloonsShot"] = [9]
+    # reset: clears board, stamps timestamps, stores seed
+    command.command(UID, _batch([{"cmd": Constant.CMD_DARTS_RESET, "args": [4242]}]))
+    ps = sessions.session(UID)["privateState"]
+    now = engine.timestamp_now()
+    assert ps["dartsBalloonsShot"] == [], "board not cleared on reset"
+    assert ps["dartsRandomSeed"] == 4242, "seed not stored"
+    assert now - 10 <= ps["timeStampDartsReset"] <= now, "reset timestamp wrong"
+    # throw at balloon 3 (free throw)
+    command.command(UID, _batch([{"cmd": Constant.CMD_DARTS_SHOOT_BALLOON, "args": [3, 0, 0]}]))
+    assert 3 in sessions.session(UID)["privateState"]["dartsBalloonsShot"], "throw not recorded"
+    # prize goes to storage via store_add_items([ids])
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_STORE_ADD_ITEMS, "args": [json.dumps([176, 176, 180])]},
+    ]))
+    disk = json.load(open(os.path.join(tmp, f"{UID}.save.json")))
+    gifts = disk["privateState"]["gifts"]
+    assert gifts[176] == 2 and gifts[180] == 1, f"prizes not stored: 176={gifts[176]}, 180={gifts[180]}"
+
+
+def test_darts_new_free_stamps_claim(tmp):
+    """Claiming the daily free stamps timeStampDartsNewFree so it can't be reclaimed."""
+    command.command(UID, _batch([{"cmd": Constant.CMD_DARTS_NEW_FREE, "args": []}]))
+    now = engine.timestamp_now()
+    ts = sessions.session(UID)["privateState"]["timeStampDartsNewFree"]
+    assert now - 10 <= ts <= now, f"free-claim timestamp not set: {ts}"
+
+
 TESTS = [
+    test_darts_flow_persists,
+    test_darts_new_free_stamps_claim,
     test_store_item_frombug_moves_item_to_storage,
     test_end_quest_win_saves_star_rank,
     test_end_attack_win_marks_conquered_and_rewards,

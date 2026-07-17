@@ -287,6 +287,38 @@ def do_command(USERID, cmd, args):
                 save["privateState"]["gifts"].append(0)
         save["privateState"]["gifts"][item_id] += 1
 
+    elif cmd == Constant.CMD_STORE_ADD_ITEMS:
+        # A batch of item ids to drop into storage (gifts). Used by darts prizes,
+        # offer packs, etc. args[0] is a JSON-encoded array of item ids.
+        item_ids = json.loads(args[0]) if args and args[0] else []
+        gifts = save["privateState"]["gifts"]
+        for raw_id in item_ids:
+            item_id = int(raw_id)
+            while len(gifts) <= item_id:
+                gifts.append(0)
+            gifts[item_id] += 1
+        print("Store add items:", item_ids)
+
+    elif cmd == Constant.CMD_DARTS_NEW_FREE:
+        print("Darts: claim daily free.")
+        save["privateState"]["timeStampDartsNewFree"] = timestamp_now()
+
+    elif cmd == Constant.CMD_DARTS_RESET:
+        print("Darts: reset board.")
+        pState = save["privateState"]
+        pState["timeStampDartsReset"] = timestamp_now()
+        pState["timeStampDartsNewFree"] = timestamp_now()
+        pState["dartsBalloonsShot"] = []
+        pState["dartsRandomSeed"] = int(args[0]) if args else 0
+
+    elif cmd == Constant.CMD_DARTS_SHOOT_BALLOON:
+        balloon_index = int(args[0])
+        print("Darts: shoot balloon", balloon_index)
+        pState = save["privateState"]
+        if not isinstance(pState.get("dartsBalloonsShot"), list):
+            pState["dartsBalloonsShot"] = []
+        pState["dartsBalloonsShot"].append(balloon_index)
+
     elif cmd == Constant.CMD_PLACE_GIFT:
         item_id = args[0]
         x = args[1]
