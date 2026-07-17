@@ -10,7 +10,7 @@ else:
     sys.stdout.write("\x1b]2;Social Empires Server\x07")
 
 print (" [+] Loading game config...")
-from get_game_config import get_game_config, patch_game_config
+from get_game_config import get_game_config, patch_game_config, refresh_darts_schedule
 
 print (" [+] Loading players...")
 from get_player_info import get_player_info, get_neighbor_info
@@ -181,6 +181,8 @@ def get_game_config_response():
     language = request.values['language']
 
     print(f"get_game_config: USERID: {USERID}. --", request.values)
+    # Keep the daily darts playable: the bundled prize schedule ends in 2012.
+    refresh_darts_schedule()
     return get_game_config()
 
 @app.route("/dynamic.flash1.dev.socialpoint.es/appsfb/socialempiresdev/srvempires/get_player_info.php", methods=['POST'])
