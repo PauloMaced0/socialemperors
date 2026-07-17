@@ -558,7 +558,24 @@ def do_command(USERID, cmd, args):
     elif cmd == Constant.CMD_ADD_COLLECTABLE:
         collection_id = args[0]
         collectible_id = args[1]
-        # TODO 
+        # TODO
+
+    elif cmd == Constant.CMD_ACTIVATE:
+        x = args[0]
+        y = args[1]
+        town_id = args[2]
+        item_id = args[3]
+        time_option = args[4] if len(args) > 4 else 0
+        print("Activate", str(get_name_from_item_id(item_id)), "at", f"({x},{y})", "option", time_option)
+        map = save["maps"][town_id]
+        for item in map["items"]:
+            if item[0] == item_id and item[1] == x and item[2] == y:
+                # Start the production clock now so the timer survives a reload.
+                item[4] = timestamp_now()
+                # Producers keep their state in item[6]; ensure the slot exists.
+                while len(item) < 7:
+                    item.append([])
+                break
 
     else:
         print(f"Unhandled command '{cmd}' -> args", args)

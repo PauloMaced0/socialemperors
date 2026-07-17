@@ -112,11 +112,30 @@ def test_unhandled_command_is_logged(tmp):
     assert "[1, 2, 3]" in content or "1, 2, 3" in content, "args not logged"
 
 
+def test_activate_starts_and_persists_production(tmp):
+    """CMD_ACTIVATE must stamp the producer so its timer survives a reload."""
+    PROD_ID, PX, PY = 5, 60, 60  # Mill I
+    m = sessions.session(UID)["maps"][0]
+    m["items"].append([PROD_ID, PX, PY, 0, OLD_TS, 0, [500, 500]])
+    # activate(x, y, town_id, item_id, time_option)
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_ACTIVATE, "args": [PX, PY, 0, PROD_ID, 2]},
+    ]))
+    disk = json.load(open(os.path.join(tmp, f"{UID}.save.json")))
+    prod = next((it for it in disk["maps"][0]["items"]
+                 if it[0] == PROD_ID and it[1] == PX and it[2] == PY), None)
+    assert prod is not None, "producer vanished"
+    now = engine.timestamp_now()
+    assert now - 10 <= prod[4] <= now, f"activation timestamp not ~now: {prod[4]}"
+    assert len(prod) >= 7, "producer lost its production slot (item[6])"
+
+
 TESTS = [
     test_collect_advances_item_timestamp,
     test_batch_persists_despite_failing_command,
     test_atomic_save_leaves_no_tmp_file,
     test_unhandled_command_is_logged,
+    test_activate_starts_and_persists_production,
 ]
 
 
