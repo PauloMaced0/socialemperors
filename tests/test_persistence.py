@@ -183,7 +183,31 @@ def test_end_attack_loss_does_not_mark_conquered(tmp):
     assert 2 not in sessions.session(UID)["maps"][0]["universAttackWin"]
 
 
+def test_end_quest_win_saves_star_rank(tmp):
+    """Completing a quest island must record its star rank (difficulty) in
+    privateState.questsRank, keyed by the quest id string, keeping the best."""
+    ps = sessions.session(UID)["privateState"]
+    ps["questsRank"] = {}
+    def end(qid, diff, win=1):
+        payload = json.dumps({
+            "map": 0, "resources": {"g": 0, "x": 0}, "units": [], "win": win,
+            "duration": 60, "voluntary_end": 0, "quest_id": qid, "difficulty": diff,
+        })
+        command.command(UID, _batch([{"cmd": Constant.CMD_END_QUEST, "args": [payload]}]))
+    end("100000006", 2)
+    disk = json.load(open(os.path.join(tmp, f"{UID}.save.json")))
+    assert disk["privateState"]["questsRank"].get("100000006") == 2, \
+        f"star rank not saved: {disk['privateState']['questsRank']}"
+    end("100000006", 1)  # worse run must not lower the rank
+    assert sessions.session(UID)["privateState"]["questsRank"]["100000006"] == 2
+    end("100000006", 3)  # better run raises it
+    assert sessions.session(UID)["privateState"]["questsRank"]["100000006"] == 3
+    end("100000007", 2, win=0)  # a loss records nothing
+    assert "100000007" not in sessions.session(UID)["privateState"]["questsRank"]
+
+
 TESTS = [
+    test_end_quest_win_saves_star_rank,
     test_end_attack_win_marks_conquered_and_rewards,
     test_end_attack_loss_does_not_mark_conquered,
     test_collect_advances_item_timestamp,

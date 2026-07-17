@@ -549,11 +549,20 @@ def do_command(USERID, cmd, args):
 
         # Update quests data
         save["privateState"]["unlockedQuestIndex"] = max(quest_id + 1, save["privateState"]["unlockedQuestIndex"], 0)
-        # save["privateState"]["questsRank"] = TODO 
+        # Star rank: questsRank is keyed by the quest id string (matches the
+        # client's ISLE_ORDER lookup) and holds the best difficulty cleared. The
+        # island shows that many stars, so it must persist on a win.
+        if win:
+            quest_key = str(data["quest_id"])
+            ranks = save["privateState"].get("questsRank")
+            if not isinstance(ranks, dict):
+                ranks = {}
+            ranks[quest_key] = max(int(ranks.get(quest_key, 0)), int(difficulty))
+            save["privateState"]["questsRank"] = ranks
         # save["maps"]["questTimes"] [quest_id] = TODO min (... , duration_sec)
         # save["maps"]["lastQuestTimes"] [quest_id] = TODO min (... , duration_sec)
 
-        print(f"Ended quest {quest_id}.")
+        print(f"Ended quest {quest_id}.", "WIN" if win else "loss", f"difficulty {difficulty}")
 
     elif cmd == Constant.CMD_END_ATTACK:
         data = json.loads(args[0])
