@@ -266,7 +266,11 @@ def do_command(USERID, cmd, args):
         save["playerInfo"]["cash"] = max(save["playerInfo"]["cash"] - 5, 0)#maybe make function for editing resources
         save["maps"][town_id]["coins"] += 2500
 
-    elif cmd == Constant.CMD_STORE_ITEM:
+    elif cmd == Constant.CMD_STORE_ITEM or cmd == Constant.CMD_STORE_ITEM_FROMBUG:
+        # store_item_frombug is the client relocating a colliding/out-of-bounds
+        # item to storage; it uses the same [x, y, town, id] args as store_item.
+        # If not persisted, the item stays on the map and the client re-sends this
+        # every single load.
         x = args[0]
         y = args[1]
         town_id = int(args[2])

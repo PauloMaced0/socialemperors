@@ -206,7 +206,26 @@ def test_end_quest_win_saves_star_rank(tmp):
     assert "100000007" not in sessions.session(UID)["privateState"]["questsRank"]
 
 
+def test_store_item_frombug_moves_item_to_storage(tmp):
+    """store_item_frombug must relocate the colliding item to storage (gifts),
+    same as store_item; otherwise the client re-sends it every load."""
+    ITEM_ID, IX, IY = 224, 53, 59  # Harbor
+    m = sessions.session(UID)["maps"][0]
+    m["items"].append([ITEM_ID, IX, IY, 0, 0, 0])
+    ps = sessions.session(UID)["privateState"]
+    ps["gifts"] = []
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_STORE_ITEM_FROMBUG, "args": [IX, IY, 0, ITEM_ID]},
+    ]))
+    disk = json.load(open(os.path.join(tmp, f"{UID}.save.json")))
+    still = [it for it in disk["maps"][0]["items"]
+             if it[0] == ITEM_ID and it[1] == IX and it[2] == IY]
+    assert not still, "colliding item was not removed from the map"
+    assert disk["privateState"]["gifts"][ITEM_ID] == 1, "item not added to storage"
+
+
 TESTS = [
+    test_store_item_frombug_moves_item_to_storage,
     test_end_quest_win_saves_star_rank,
     test_end_attack_win_marks_conquered_and_rewards,
     test_end_attack_loss_does_not_mark_conquered,
