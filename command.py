@@ -301,7 +301,10 @@ def do_command(USERID, cmd, args):
 
     elif cmd == Constant.CMD_DARTS_NEW_FREE:
         print("Darts: claim daily free.")
-        save["privateState"]["timeStampDartsNewFree"] = timestamp_now()
+        pState = save["privateState"]
+        pState["timeStampDartsNewFree"] = timestamp_now()
+        pState["dartsHasFree"] = False   # consume the once-per-day free game
+        pState["dartsBalloonsShot"] = [] # fresh board for this play
 
     elif cmd == Constant.CMD_DARTS_RESET:
         print("Darts: reset board.")
