@@ -112,6 +112,18 @@ def test_unhandled_command_is_logged(tmp):
     assert "[1, 2, 3]" in content or "1, 2, 3" in content, "args not logged"
 
 
+def test_get_player_info_advances_map_clock(tmp):
+    """The served map.timestamp must be current time, not frozen at creation,
+    so the client's production/build clock actually advances."""
+    import get_player_info as gpi
+    sess = sessions.session(UID)
+    sess["maps"][0]["timestamp"] = OLD_TS  # frozen far in the past
+    info = gpi.get_player_info(UID)
+    now = engine.timestamp_now()
+    assert now - 10 <= info["map"]["timestamp"] <= now, \
+        f"served map.timestamp not advanced to now: {info['map']['timestamp']}"
+
+
 def test_activate_starts_and_persists_production(tmp):
     """CMD_ACTIVATE must stamp the producer so its timer survives a reload."""
     PROD_ID, PX, PY = 5, 60, 60  # Mill I
@@ -136,6 +148,7 @@ TESTS = [
     test_atomic_save_leaves_no_tmp_file,
     test_unhandled_command_is_logged,
     test_activate_starts_and_persists_production,
+    test_get_player_info_advances_map_clock,
 ]
 
 
