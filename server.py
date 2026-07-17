@@ -15,7 +15,10 @@ from get_game_config import get_game_config, patch_game_config, refresh_darts_sc
 print (" [+] Loading players...")
 from get_player_info import get_player_info, get_neighbor_info
 from sessions import load_saved_villages, all_saves_userid, all_saves_info, save_info, new_village, fb_friends_str
+from auth import has_password, set_password, check_password, change_password
 load_saved_villages()
+
+WORKING_GAMEVERSION = "SocialEmpires0926bsec.swf"
 
 print (" [+] Loading server...")
 from flask import Flask, render_template, send_from_directory, request, redirect, session
@@ -32,6 +35,20 @@ port = 5050
 
 app = Flask(__name__, template_folder=TEMPLATES_DIR)
 
+
+@app.after_request
+def _no_cache_dynamic(resp):
+    # The dynamic game API (player info, config, commands) carries live state
+    # such as the daily-darts availability. If the browser/Ruffle caches it,
+    # a reload replays stale state (e.g. an already-used darts game shows as
+    # throwable again). Force revalidation on these endpoints; static assets
+    # (swf/images) stay cacheable.
+    if "srvempires" in request.path:
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+    return resp
+
 print (" [+] Configuring server routes...")
 
 ##########
@@ -42,22 +59,79 @@ print (" [+] Configuring server routes...")
 
 @app.route("/", methods=['GET', 'POST'])
 def login():
-    # Log out previous session
+    # Log out any previous / pending session
     session.pop('USERID', default=None)
     session.pop('GAMEVERSION', default=None)
+    session.pop('PENDING_USERID', default=None)
     # Reload saves. Allows saves modification without server reset
     load_saved_villages()
-    # If logging in, set session USERID, and go to play
     if request.method == 'POST':
-        session['USERID'] = request.form['USERID']
-        session['GAMEVERSION'] = request.form['GAMEVERSION']
-        print("[LOGIN] USERID:", request.form['USERID'])
-        print("[LOGIN] GAMEVERSION:", request.form['GAMEVERSION'])
+        USERID = request.form['USERID']
+        GAMEVERSION = request.form.get('GAMEVERSION', WORKING_GAMEVERSION)
+        password = request.form.get('password', '')
+        if USERID not in all_saves_userid():
+            return render_template("login.html", saves_info=all_saves_info(), version=version_name, error="Unknown village.")
+        # Legacy village with no password yet: send the player to create one
+        # before entering the game (no game session granted yet).
+        if not has_password(USERID):
+            session['PENDING_USERID'] = USERID
+            session['GAMEVERSION'] = GAMEVERSION
+            return redirect("/set-password")
+        if not check_password(USERID, password):
+            return render_template("login.html", saves_info=all_saves_info(), version=version_name, error="Incorrect password.")
+        session['USERID'] = USERID
+        session['GAMEVERSION'] = GAMEVERSION
+        print("[LOGIN] USERID:", USERID)
         return redirect("/play.html")
     # Login page
-    if request.method == 'GET':
-        saves_info = all_saves_info()
-        return render_template("login.html", saves_info=saves_info, version=version_name)
+    return render_template("login.html", saves_info=all_saves_info(), version=version_name)
+
+@app.route("/set-password", methods=['GET', 'POST'])
+def set_password_page():
+    # Only reachable mid-flow (new village or first login of a legacy village).
+    USERID = session.get('PENDING_USERID')
+    load_saved_villages()
+    if not USERID or USERID not in all_saves_userid():
+        return redirect("/")
+    name = save_info(USERID)["name"]
+    if request.method == 'POST':
+        pw = request.form.get('password', '')
+        confirm = request.form.get('confirm', '')
+        if not pw:
+            return render_template("set_password.html", name=name, error="Password cannot be empty.")
+        if pw != confirm:
+            return render_template("set_password.html", name=name, error="Passwords do not match.")
+        set_password(USERID, pw)
+        # Promote the pending village to a real game session.
+        session.pop('PENDING_USERID', default=None)
+        session['USERID'] = USERID
+        if 'GAMEVERSION' not in session:
+            session['GAMEVERSION'] = WORKING_GAMEVERSION
+        print("[SET-PASSWORD] USERID:", USERID)
+        return redirect("/play.html")
+    return render_template("set_password.html", name=name)
+
+@app.route("/change-password", methods=['GET', 'POST'])
+def change_password_page():
+    load_saved_villages()
+    if request.method == 'POST':
+        USERID = request.form['USERID']
+        old = request.form.get('current', '')
+        new = request.form.get('password', '')
+        confirm = request.form.get('confirm', '')
+        if USERID not in all_saves_userid():
+            return render_template("change_password.html", saves_info=all_saves_info(), error="Unknown village.")
+        if not has_password(USERID):
+            return render_template("change_password.html", saves_info=all_saves_info(), error="This village has no password yet — set one by logging in.")
+        if not new:
+            return render_template("change_password.html", saves_info=all_saves_info(), error="New password cannot be empty.")
+        if new != confirm:
+            return render_template("change_password.html", saves_info=all_saves_info(), error="New passwords do not match.")
+        if not change_password(USERID, old, new):
+            return render_template("change_password.html", saves_info=all_saves_info(), error="Current password is incorrect.")
+        print("[CHANGE-PASSWORD] USERID:", USERID)
+        return render_template("change_password.html", saves_info=all_saves_info(), message="Password changed. You can now log in.")
+    return render_template("change_password.html", saves_info=all_saves_info())
 
 @app.route("/play.html")
 def play():
@@ -98,9 +172,12 @@ def ruffle():
 
 @app.route("/new.html")
 def new():
-    session['USERID'] = new_village()
-    session['GAMEVERSION'] = "SocialEmpires0926bsec.swf"
-    return redirect("play.html")
+    # Create the village, but require a password before entering the game.
+    USERID = new_village()
+    session.pop('USERID', default=None)
+    session['PENDING_USERID'] = USERID
+    session['GAMEVERSION'] = WORKING_GAMEVERSION
+    return redirect("/set-password")
 
 @app.route("/crossdomain.xml")
 def crossdomain():

@@ -7,6 +7,29 @@ from constants import Constant
 from engine import apply_cost, apply_collect, apply_collect_xp, timestamp_now
 from bundle import SAVES_DIR
 
+DARTS_DAILY_SECONDS = 86400  # one darts throw per 24h
+DAILY_BONUS_SECONDS = 86400  # daily login bonus claimable once per 24h
+
+
+def _grant_resource(save, rtype, amount):
+    """Add `amount` of a resource identified by its config type code
+    (s=stone, w=wood, f=food, g=gold/coins, c=cash) to the default map /
+    player. No-op for unknown types or non-positive amounts."""
+    amount = int(amount)
+    if amount <= 0 or not rtype:
+        return
+    m = save["maps"][0]
+    if rtype == "s":
+        m["stone"] = int(m.get("stone", 0)) + amount
+    elif rtype == "w":
+        m["wood"] = int(m.get("wood", 0)) + amount
+    elif rtype == "f":
+        m["food"] = int(m.get("food", 0)) + amount
+    elif rtype == "g":
+        m["coins"] = int(m.get("coins", 0)) + amount
+    elif rtype == "c":
+        save["playerInfo"]["cash"] = int(save["playerInfo"]["cash"]) + amount
+
 
 def _log_unhandled(USERID, cmd, args):
     "Append an unimplemented command's payload for later implementation."
@@ -219,13 +242,25 @@ def do_command(USERID, cmd, args):
             map["items"] += [[unit_id, unit_x, unit_y, orientation, collected_at_timestamp, level]]
     
     elif cmd == Constant.CMD_RT_LEVEL_UP:
-        new_level = args[0]
-        print("Level Up!:", new_level)
+        new_level = int(args[0])
         map = save["maps"][0] # TODO : xp must be general, since theres no given town_id
-        map["level"] = args[0]
+        old_level = int(map.get("level", 0) or 0)
+        print("Level Up!:", new_level)
+        map["level"] = new_level
         current_xp = map["xp"]
         min_expected_xp = get_xp_from_level(max(0, new_level - 1))
         map["xp"] = max(min_expected_xp, current_xp) # try to fix problems with not counting XP... by keeping up with client-side level counting
+        # Grant each newly-crossed level's configured reward exactly once.
+        # Level N's reward lives at levels[N-1] (e.g. level 5 -> 1 cash). Using
+        # the stored old_level as the baseline makes repeated calls idempotent
+        # and covers multi-level jumps in a single XP change.
+        levels = get_game_config()["levels"]
+        for lvl in range(old_level + 1, new_level + 1):
+            idx = lvl - 1
+            if 0 <= idx < len(levels):
+                r = levels[idx]
+                _grant_resource(save, r.get("reward_type"), r.get("reward_amount", 0))
+                print(f"  level {lvl} reward: {r.get('reward_amount')} '{r.get('reward_type')}'")
 
     elif cmd == Constant.CMD_RT_PUBLISH_SCORE:
         new_xp = args[0]
@@ -300,9 +335,15 @@ def do_command(USERID, cmd, args):
         print("Store add items:", item_ids)
 
     elif cmd == Constant.CMD_DARTS_NEW_FREE:
-        print("Darts: claim daily free.")
         pState = save["privateState"]
-        pState["timeStampDartsNewFree"] = timestamp_now()
+        now = timestamp_now()
+        last_dart = int(pState.get("timeStampLastDart", 0) or 0)
+        # One darts throw per 24h. Reject the free claim if already thrown today.
+        if now - last_dart < DARTS_DAILY_SECONDS:
+            print("Darts: already thrown today - free claim rejected.")
+            return
+        print("Darts: claim daily free.")
+        pState["timeStampDartsNewFree"] = now
         pState["dartsHasFree"] = False   # consume the once-per-day free game
         pState["dartsBalloonsShot"] = [] # fresh board for this play
 
@@ -315,9 +356,29 @@ def do_command(USERID, cmd, args):
         pState["dartsRandomSeed"] = int(args[0]) if args else 0
 
     elif cmd == Constant.CMD_DARTS_SHOOT_BALLOON:
+        # One FREE throw per 24h; every further throw is billed the configured
+        # DART_COST_CASH ("Play again for 20"). The client only deducts that
+        # cash locally and never sends the payment, so the server must charge
+        # it here or a reload restores the cash and throws become infinite.
+        # Once the persisted cash drops below the price, the client's own
+        # canAfford() check blocks the board, so the daily limit holds.
+        pState = save["privateState"]
+        now = timestamp_now()
+        last_free = int(pState.get("timeStampLastDart", 0) or 0)
+        if now - last_free >= DARTS_DAILY_SECONDS:
+            # Today's free throw. Paid throws do not move this clock.
+            pState["timeStampLastDart"] = now
+            print("Darts: free daily throw.")
+        else:
+            price = int(get_game_config()["globals"].get("DART_COST_CASH", 20))
+            cash = int(save["playerInfo"]["cash"])
+            if cash < price:
+                print(f"Darts: extra throw rejected - needs {price} cash, has {cash}.")
+                return
+            save["playerInfo"]["cash"] = cash - price
+            print(f"Darts: extra throw billed {price} cash ({cash} -> {cash - price}).")
         balloon_index = int(args[0])
         print("Darts: shoot balloon", balloon_index)
-        pState = save["privateState"]
         if not isinstance(pState.get("dartsBalloonsShot"), list):
             pState["dartsBalloonsShot"] = []
         pState["dartsBalloonsShot"].append(balloon_index)
@@ -468,34 +529,41 @@ def do_command(USERID, cmd, args):
         pState["timeStampTakeCareMonster"] = -1 # remove timer
 
     elif cmd == Constant.CMD_WIN_BONUS:
-        coins = args[0]
-        town_id = args[1]
-        hero = args[2]
-        claimId = args[3]
-        cash = args[4]
-
-        print("Claiming Win Bonus")
-        map = save["maps"][town_id]
-
-        if cash != 0:
-            save["playerInfo"]["cash"] = save["playerInfo"]["cash"] + cash
-            print("Added " + str(cash) + " Cash to players balance")
-
-        if coins != 0:
-            map["coins"] = map["coins"] + coins
-            print("Added " + str(coins) + " Gold to players balance")
-
-        if hero != 0:
-            length = len(save["privateState"]["gifts"])
-            if length <= hero:
-                for i in range(hero - length + 1):
-                    save["privateState"]["gifts"].append(0)
-            save["privateState"]["gifts"][hero] += 1
-            print("Added Hero ID=" + str(hero))
-
+        # Daily login bonus. The reward is chosen SERVER-SIDE from
+        # DAILY_BONUS_CONFIG by streak position and gated to once per 24h; the
+        # client-submitted coins/cash/hero/claimId are ignored (they were the
+        # infinite-cash exploit).
+        town_id = int(args[1]) if len(args) > 1 else 0
         pState = save["privateState"]
-        pState["bonusNextId"] = claimId + 1
-        pState["timestampLastBonus"] = timestamp_now()
+        now = timestamp_now()
+        last = int(pState.get("timestampLastBonus", 0) or 0)
+        if last and now - last < DAILY_BONUS_SECONDS:
+            print("Daily bonus already claimed today - rejected.")
+            return
+
+        cfg = get_game_config()["globals"]["DAILY_BONUS_CONFIG"]
+        idx = int(pState.get("bonusNextId", 0) or 0) % len(cfg)
+        reward = cfg[idx]
+        qty = int(reward.get("qty", 0) or 0)
+        rtype = reward.get("type")
+        print(f"Claiming daily bonus [{idx}]: {qty} '{rtype}'")
+
+        map = save["maps"][town_id]
+        if rtype == "g":
+            map["coins"] = int(map["coins"]) + qty
+        elif rtype == "c":
+            save["playerInfo"]["cash"] = int(save["playerInfo"]["cash"]) + qty
+        elif rtype == "hero":
+            heroes = get_game_config()["globals"]["DAILY_BONUS_CONFIG_HEROES"]
+            hero_id = int(heroes[idx % len(heroes)])
+            gifts = pState["gifts"]
+            while len(gifts) <= hero_id:
+                gifts.append(0)
+            gifts[hero_id] += qty
+            print(f"  daily bonus hero ID={hero_id} x{qty}")
+
+        pState["bonusNextId"] = idx + 1
+        pState["timestampLastBonus"] = now
 
     elif cmd == Constant.CMD_ADMIN_ADD_ANIMAL:
         subcatFunc = str(args[0])

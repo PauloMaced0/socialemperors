@@ -8,12 +8,18 @@ def get_player_info(USERID):
     ts_now = timestamp_now()
     save = session(USERID)
     save["playerInfo"]["last_logged_in"] = ts_now
-    # Recompute the daily-darts free availability from the last claim so a
-    # reload can't hand out another free game: available only once the 24h
-    # window since timeStampDartsNewFree has elapsed.
+    # Recompute the daily-darts free availability from the last actual throw
+    # so a reload can't offer another game: available only once 24h has passed
+    # since the last dart was thrown (the throw is the source of truth,
+    # enforced server-side in command.py CMD_DARTS_SHOOT_BALLOON).
     pState = save["privateState"]
-    last_free = int(pState.get("timeStampDartsNewFree", 0) or 0)
-    pState["dartsHasFree"] = (ts_now - last_free) >= DARTS_FREE_INTERVAL
+    # Migration: saves predating timeStampLastDart approximate the last throw
+    # from the last free-claim so an existing same-day player isn't handed a
+    # bonus throw. Seed it once; the throw handler owns it thereafter.
+    if "timeStampLastDart" not in pState:
+        pState["timeStampLastDart"] = int(pState.get("timeStampDartsNewFree", 0) or 0)
+    last_dart = int(pState.get("timeStampLastDart", 0) or 0)
+    pState["dartsHasFree"] = (ts_now - last_dart) >= DARTS_FREE_INTERVAL
     # player
     player_info = {
         "result": "ok",
