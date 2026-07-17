@@ -112,34 +112,40 @@ def test_unhandled_command_is_logged(tmp):
     assert "[1, 2, 3]" in content or "1, 2, 3" in content, "args not logged"
 
 
-def test_get_player_info_advances_map_clock(tmp):
-    """The served map.timestamp must be current time, not frozen at creation,
-    so the client's production/build clock actually advances."""
-    import get_player_info as gpi
-    sess = sessions.session(UID)
-    sess["maps"][0]["timestamp"] = OLD_TS  # frozen far in the past
-    info = gpi.get_player_info(UID)
-    now = engine.timestamp_now()
-    assert now - 10 <= info["map"]["timestamp"] <= now, \
-        f"served map.timestamp not advanced to now: {info['map']['timestamp']}"
-
-
-def test_activate_starts_and_persists_production(tmp):
-    """CMD_ACTIVATE must stamp the producer so its timer survives a reload."""
+def test_activate_persists_working_state(tmp):
+    """CMD_ACTIVATE must persist attrs.cp (the chosen time option) AND stamp
+    collected_at, so the client sees the producer still working after a reload.
+    The client reads the working state from item[7]['cp']; without it the mine
+    reverts to idle ("assign a worker again")."""
     PROD_ID, PX, PY = 5, 60, 60  # Mill I
     m = sessions.session(UID)["maps"][0]
     m["items"].append([PROD_ID, PX, PY, 0, OLD_TS, 0, [500, 500]])
-    # activate(x, y, town_id, item_id, time_option)
+    # activate(x, y, town_id, item_id, time_option); option 3 = 4h
     command.command(UID, _batch([
-        {"cmd": Constant.CMD_ACTIVATE, "args": [PX, PY, 0, PROD_ID, 2]},
+        {"cmd": Constant.CMD_ACTIVATE, "args": [PX, PY, 0, PROD_ID, 3]},
     ]))
     disk = json.load(open(os.path.join(tmp, f"{UID}.save.json")))
     prod = next((it for it in disk["maps"][0]["items"]
                  if it[0] == PROD_ID and it[1] == PX and it[2] == PY), None)
     assert prod is not None, "producer vanished"
+    assert len(prod) >= 8 and isinstance(prod[7], dict), "producer has no attrs object"
+    assert prod[7].get("cp") == 3, f"attrs.cp not persisted: {prod[7]}"
     now = engine.timestamp_now()
-    assert now - 10 <= prod[4] <= now, f"activation timestamp not ~now: {prod[4]}"
-    assert len(prod) >= 7, "producer lost its production slot (item[6])"
+    assert now - 10 <= prod[4] <= now, f"production start not stamped: {prod[4]}"
+
+
+def test_activate_zero_stops_without_restamping(tmp):
+    """activate option 0 (reset/stop) clears cp and leaves the start time alone."""
+    PROD_ID, PX, PY = 5, 61, 61
+    m = sessions.session(UID)["maps"][0]
+    m["items"].append([PROD_ID, PX, PY, 0, OLD_TS, 0, [], {"cp": 3}])
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_ACTIVATE, "args": [PX, PY, 0, PROD_ID, 0]},
+    ]))
+    prod = next(it for it in sessions.session(UID)["maps"][0]["items"]
+                if it[0] == PROD_ID and it[1] == PX and it[2] == PY)
+    assert prod[7].get("cp") == 0, "cp not cleared on stop"
+    assert prod[4] == OLD_TS, "start time should not be restamped on stop"
 
 
 TESTS = [
@@ -147,8 +153,8 @@ TESTS = [
     test_batch_persists_despite_failing_command,
     test_atomic_save_leaves_no_tmp_file,
     test_unhandled_command_is_logged,
-    test_activate_starts_and_persists_production,
-    test_get_player_info_advances_map_clock,
+    test_activate_persists_working_state,
+    test_activate_zero_stops_without_restamping,
 ]
 
 

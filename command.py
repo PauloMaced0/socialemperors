@@ -570,11 +570,23 @@ def do_command(USERID, cmd, args):
         map = save["maps"][town_id]
         for item in map["items"]:
             if item[0] == item_id and item[1] == x and item[2] == y:
-                # Start the production clock now so the timer survives a reload.
-                item[4] = timestamp_now()
-                # Producers keep their state in item[6]; ensure the slot exists.
-                while len(item) < 7:
-                    item.append([])
+                # An item is [id, x, y, orient, collected_at, level, units, attrs].
+                # The client shows a producer as "working" only when attrs.cp is a
+                # nonzero time option (1..4), and derives the production duration and
+                # remaining time from attrs.cp + collected_at. Persist both so the
+                # timer keeps running across reloads.
+                while len(item) < 6:
+                    item.append(0)          # level
+                if len(item) < 7:
+                    item.append([])         # units
+                if len(item) < 8 or not isinstance(item[7], dict):
+                    if len(item) < 8:
+                        item.append({})     # attrs
+                    else:
+                        item[7] = {}
+                item[7]["cp"] = time_option
+                if time_option:
+                    item[4] = timestamp_now()   # production start
                 break
 
     else:

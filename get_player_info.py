@@ -5,11 +5,6 @@ def get_player_info(USERID):
     # Update last logged in
     ts_now = timestamp_now()
     session(USERID)["playerInfo"]["last_logged_in"] = ts_now
-    # Advance the map clock to now. The client computes build/production timers
-    # relative to map["timestamp"]; if it stays frozen at village creation, all
-    # timers read as not-yet-started and never count down across reloads.
-    for m in session(USERID)["maps"]:
-        m["timestamp"] = ts_now
     # player
     player_info = {
         "result": "ok",
