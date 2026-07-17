@@ -148,7 +148,44 @@ def test_activate_zero_stops_without_restamping(tmp):
     assert prod[4] == OLD_TS, "start time should not be restamped on stop"
 
 
+def test_end_attack_win_marks_conquered_and_rewards(tmp):
+    """Winning a PvP war must record the conquered island position in
+    universAttackWin (so it shows complete) and grant the battle rewards."""
+    m = sessions.session(UID)["maps"][0]
+    m["universAttackWin"] = []
+    m["coins"] = 1000
+    m["xp"] = 500
+    payload = json.dumps({
+        "attacker": {"map": 0}, "victim": {"posicion": 3, "user_id": "1111"},
+        "resources": {"g": 250, "x": 40}, "win": 1,
+    })
+    command.command(UID, _batch([{"cmd": Constant.CMD_END_ATTACK, "args": [payload]}]))
+    disk = json.load(open(os.path.join(tmp, f"{UID}.save.json")))
+    dm = disk["maps"][0]
+    assert 3 in dm["universAttackWin"], f"conquered position not recorded: {dm['universAttackWin']}"
+    assert dm["coins"] == 1250, f"gold reward not applied: {dm['coins']}"
+    assert dm["xp"] == 540, f"xp reward not applied: {dm['xp']}"
+    # winning the same island again must not duplicate it
+    command.command(UID, _batch([{"cmd": Constant.CMD_END_ATTACK, "args": [payload]}]))
+    dm2 = sessions.session(UID)["maps"][0]
+    assert dm2["universAttackWin"].count(3) == 1, "conquered position duplicated"
+
+
+def test_end_attack_loss_does_not_mark_conquered(tmp):
+    """A lost war must not mark the island conquered."""
+    m = sessions.session(UID)["maps"][0]
+    m["universAttackWin"] = []
+    payload = json.dumps({
+        "attacker": {"map": 0}, "victim": {"posicion": 2},
+        "resources": {"g": 0, "x": 0}, "win": 0,
+    })
+    command.command(UID, _batch([{"cmd": Constant.CMD_END_ATTACK, "args": [payload]}]))
+    assert 2 not in sessions.session(UID)["maps"][0]["universAttackWin"]
+
+
 TESTS = [
+    test_end_attack_win_marks_conquered_and_rewards,
+    test_end_attack_loss_does_not_mark_conquered,
     test_collect_advances_item_timestamp,
     test_batch_persists_despite_failing_command,
     test_atomic_save_leaves_no_tmp_file,

@@ -555,6 +555,30 @@ def do_command(USERID, cmd, args):
 
         print(f"Ended quest {quest_id}.")
 
+    elif cmd == Constant.CMD_END_ATTACK:
+        data = json.loads(args[0])
+        win = data.get("win") == 1
+        resources = data.get("resources", {})
+        gold_gained = int(resources.get("g", 0))
+        xp_gained = int(resources.get("x", 0))
+        town_id = save["playerInfo"].get("default_map", 0)
+        if town_id >= len(save["maps"]):
+            town_id = 0
+        map = save["maps"][town_id]
+        map["coins"] += gold_gained
+        map["xp"] += xp_gained
+        print("End attack.", "WIN" if win else "loss", f"(+{gold_gained}g, +{xp_gained}xp)")
+        # On a win, record the conquered island position so the PvP map shows it
+        # complete. The client reads map["universAttackWin"] to mark conquered slots.
+        if win:
+            victim = data.get("victim") or {}
+            posicion = victim.get("posicion")
+            if posicion is not None:
+                if not isinstance(map.get("universAttackWin"), list):
+                    map["universAttackWin"] = []
+                if int(posicion) not in map["universAttackWin"]:
+                    map["universAttackWin"].append(int(posicion))
+
     elif cmd == Constant.CMD_ADD_COLLECTABLE:
         collection_id = args[0]
         collectible_id = args[1]
