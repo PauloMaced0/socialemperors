@@ -931,7 +931,13 @@ def do_command(USERID, cmd, args):
         map["stone"] = int(map["stone"]) + stone
         map["xp"] = int(map["xp"]) + xp
         map["idCurrentTreasure"] = quest_id
-        print(f"Treasure collected: +{gold}g +{xp}xp +{food}f +{stone}s, next quest {quest_id}.")
+        # Stamp the kill time. The client gates the enemy camp and its 4h
+        # respawn countdown on now - map.timestampLastTreasure vs
+        # TIMER_OGRES_VILLAGE (Base.as reads it on load, MapInitializer.Init
+        # respawns the camp when the timer hits 0). Without persisting this a
+        # reload sees 0 and respawns the camp the player just cleared.
+        map["timestampLastTreasure"] = timestamp_now()
+        print(f"Treasure collected: +{gold}g +{xp}xp +{food}f +{stone}s, next quest {quest_id}. Stamped {map['timestampLastTreasure']}.")
 
     elif cmd == Constant.CMD_BUY_UNIT_WITH_CASH:
         # [item_id, x, y, frame, town]: buy a unit paying its cash price

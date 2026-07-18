@@ -187,6 +187,18 @@ def test_collect_treasure_clamped_and_persisted(tmp):
     assert m["idCurrentTreasure"] == 3, "next quest id not persisted"
 
 
+def test_collect_treasure_stamps_kill_time(tmp):
+    # Killing the enemy camp must persist timestampLastTreasure; the client
+    # gates the camp respawn on it, so without this a reload respawns the
+    # enemies the player just cleared.
+    _now(_local(14, 12))
+    save = sessions.session(UID)
+    save["maps"][0]["timestampLastTreasure"] = 0
+    _do(Constant.CMD_COLLECT_TREASURE, [100, 20, 1, 0, 0, 0])
+    assert save["maps"][0]["timestampLastTreasure"] == _local(14, 12), \
+        "camp kill time not persisted -> enemies respawn on reload"
+
+
 def test_buy_unit_with_cash(tmp):
     save = sessions.session(UID)
     n_items = len(_items(save))
@@ -231,6 +243,7 @@ TESTS = [
     test_monday_bonus_unit_whitelisted,
     test_comeback_bonus_day_gate,
     test_collect_treasure_clamped_and_persisted,
+    test_collect_treasure_stamps_kill_time,
     test_buy_unit_with_cash,
     test_neighbors_does_not_pollute_playerinfo,
     test_loading_scrubs_leaked_playerinfo_fields,
