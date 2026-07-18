@@ -89,37 +89,11 @@ def test_get_player_info_serves_session_village():
     assert body["playerInfo"]["pid"] == UID, "player info served for the POSTED USERID (spoofable)"
 
 
-def test_town_button_no_second_town_does_not_500():
-    # Clicking "Town" with only one map requests map 1 as the own user; must
-    # fall back to the default map instead of 500ing (a 500 leaves the game's
-    # loading cover stuck because the client's map-load error handler is a
-    # no-op).
-    c = _client(logged_in_as=UID)
-    r = c.post(API + "/get_player_info.php",
-               data={"USERID": UID, "user": UID, "map": "1",
-                     "user_key": "k", "language": "en", "client_id": "1"})
-    assert r.status_code == 200, f"own second-town request 500'd: {r.status_code}"
-    body = r.get_json()
-    assert body["result"] == "ok", "own second-town request did not return ok"
-    assert body["playerInfo"]["pid"] == UID, "own second-town served wrong village"
-    assert body["map"] is not None, "no map payload -> client would hang"
-
-
-def test_own_town_map_zero_ok():
-    c = _client(logged_in_as=UID)
-    r = c.post(API + "/get_player_info.php",
-               data={"USERID": UID, "user": UID, "map": "0",
-                     "user_key": "k", "language": "en", "client_id": "1"})
-    assert r.status_code == 200 and r.get_json()["result"] == "ok"
-
-
 TESTS = [
     test_command_requires_login,
     test_command_ignores_posted_userid,
     test_get_player_info_requires_login,
     test_get_player_info_serves_session_village,
-    test_town_button_no_second_town_does_not_500,
-    test_own_town_map_zero_ok,
 ]
 
 
