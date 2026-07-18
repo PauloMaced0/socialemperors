@@ -1,25 +1,23 @@
 from sessions import session, neighbor_session, neighbors
 from engine import timestamp_now
 
-DARTS_FREE_INTERVAL = 86400  # daily darts: free game refreshes every 24h
-
 def get_player_info(USERID):
     # Update last logged in
     ts_now = timestamp_now()
     save = session(USERID)
     save["playerInfo"]["last_logged_in"] = ts_now
-    # Recompute the daily-darts free availability from the last actual throw
-    # so a reload can't offer another game: available only once 24h has passed
-    # since the last dart was thrown (the throw is the source of truth,
-    # enforced server-side in command.py CMD_DARTS_SHOOT_BALLOON).
+    # dartsHasFree means "free game claimed (darts_new_free) but not yet
+    # thrown". The client reads it at login and, on a new local day, claims a
+    # fresh free game itself - so don't recompute it here, just repair stale
+    # saves where a throw happened after the claim but the flag was never
+    # consumed (pre-fix saves), so a reload can't hand out a bonus free throw.
     pState = save["privateState"]
-    # Migration: saves predating timeStampLastDart approximate the last throw
-    # from the last free-claim so an existing same-day player isn't handed a
-    # bonus throw. Seed it once; the throw handler owns it thereafter.
     if "timeStampLastDart" not in pState:
         pState["timeStampLastDart"] = int(pState.get("timeStampDartsNewFree", 0) or 0)
+    last_claim = int(pState.get("timeStampDartsNewFree", 0) or 0)
     last_dart = int(pState.get("timeStampLastDart", 0) or 0)
-    pState["dartsHasFree"] = (ts_now - last_dart) >= DARTS_FREE_INTERVAL
+    if pState.get("dartsHasFree") and last_claim > 0 and last_dart >= last_claim:
+        pState["dartsHasFree"] = False
     # player
     player_info = {
         "result": "ok",

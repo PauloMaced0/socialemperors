@@ -1,5 +1,6 @@
 import json
 import os
+import datetime
 
 from sessions import session, save_session
 from get_game_config import get_game_config, get_level_from_xp, get_name_from_item_id, get_attribute_from_mission_id, get_xp_from_level, get_attribute_from_item_id, get_item_from_subcat_functional
@@ -7,8 +8,39 @@ from constants import Constant
 from engine import apply_cost, apply_collect, apply_collect_xp, timestamp_now
 from bundle import SAVES_DIR
 
-DARTS_DAILY_SECONDS = 86400  # one darts throw per 24h
-DAILY_BONUS_SECONDS = 86400  # daily login bonus claimable once per 24h
+
+def _same_local_day(ts_a: int, ts_b: int) -> bool:
+    """Same LOCAL calendar day. The client's Utils.isSameDay compares local
+    Date components, so the darts daily gate must be calendar-day based, not
+    a rolling 24h window (a throw at 20:00 must not block the next morning's
+    free game). A zero timestamp means "never"."""
+    if ts_a <= 0 or ts_b <= 0:
+        return False
+    return datetime.date.fromtimestamp(ts_a) == datetime.date.fromtimestamp(ts_b)
+
+
+def _utc_day(ts: int) -> int:
+    """Epoch days in UTC. The client's Utils.isDailyBonusReady computes
+    floor((ts/3600 + timeZone)/24) with timeZone unset (= 0), i.e. UTC day
+    boundaries, so the daily login bonus must use the same arithmetic."""
+    return int(ts) // 86400
+
+
+def _current_darts_set_start(now_ts: int):
+    """Local-midnight timestamp of the darts prize set covering `now_ts`, or
+    None if the schedule has no current set. Mirrors the client, which parses
+    start_date into a local Date and picks the set whose week contains now."""
+    for entry in get_game_config().get("darts_items") or []:
+        if not entry.get("items"):
+            continue
+        try:
+            start_dt = datetime.datetime.strptime(entry["start_date"], "%Y-%m-%d %H:%M:%S")
+        except (KeyError, ValueError):
+            continue
+        start = int(start_dt.timestamp())
+        if start <= now_ts < start + 7 * 86400:
+            return start
+    return None
 
 
 def _grant_resource(save, rtype, amount):
@@ -335,38 +367,50 @@ def do_command(USERID, cmd, args):
         print("Store add items:", item_ids)
 
     elif cmd == Constant.CMD_DARTS_NEW_FREE:
+        # The client sends this when its stored timeStampDartsNewFree is on an
+        # earlier LOCAL calendar day: one free game per day. It does NOT clear
+        # the board - dartsBalloonsShot is the whole week's progress and only
+        # darts_reset (new weekly prize set) wipes it.
         pState = save["privateState"]
         now = timestamp_now()
-        last_dart = int(pState.get("timeStampLastDart", 0) or 0)
-        # One darts throw per 24h. Reject the free claim if already thrown today.
-        if now - last_dart < DARTS_DAILY_SECONDS:
-            print("Darts: already thrown today - free claim rejected.")
+        last_claim = int(pState.get("timeStampDartsNewFree", 0) or 0)
+        if _same_local_day(last_claim, now) and not pState.get("dartsHasFree"):
+            print("Darts: free game already used today - claim rejected.")
             return
-        print("Darts: claim daily free.")
+        print("Darts: claim daily free game.")
         pState["timeStampDartsNewFree"] = now
-        pState["dartsHasFree"] = False   # consume the once-per-day free game
-        pState["dartsBalloonsShot"] = [] # fresh board for this play
+        pState["dartsHasFree"] = True
 
     elif cmd == Constant.CMD_DARTS_RESET:
-        print("Darts: reset board.")
-        pState = save["privateState"]
-        pState["timeStampDartsReset"] = timestamp_now()
-        pState["timeStampDartsNewFree"] = timestamp_now()
-        pState["dartsBalloonsShot"] = []
-        pState["dartsRandomSeed"] = int(args[0]) if args else 0
-
-    elif cmd == Constant.CMD_DARTS_SHOOT_BALLOON:
-        # One FREE throw per 24h; every further throw is billed the configured
-        # DART_COST_CASH ("Play again for 20"). The client only deducts that
-        # cash locally and never sends the payment, so the server must charge
-        # it here or a reload restores the cash and throws become infinite.
-        # Once the persisted cash drops below the price, the client's own
-        # canAfford() check blocks the board, so the daily limit holds.
+        # Sent when a new weekly prize set started (client checks its stored
+        # timeStampDartsReset against the set's start_date). Starts a fresh
+        # board with a free throw. Only accepted once per weekly set so the
+        # board can't be re-rolled at will.
         pState = save["privateState"]
         now = timestamp_now()
-        last_free = int(pState.get("timeStampLastDart", 0) or 0)
-        if now - last_free >= DARTS_DAILY_SECONDS:
-            # Today's free throw. Paid throws do not move this clock.
+        set_start = _current_darts_set_start(now)
+        if set_start is not None and int(pState.get("timeStampDartsReset", 0) or 0) >= set_start:
+            print("Darts: board already reset for this week's set - rejected.")
+            return
+        print("Darts: reset board for new weekly set.")
+        pState["timeStampDartsReset"] = now
+        pState["timeStampDartsNewFree"] = now
+        pState["dartsBalloonsShot"] = []
+        pState["dartsRandomSeed"] = int(args[0]) if args else 0
+        pState["dartsHasFree"] = True
+
+    elif cmd == Constant.CMD_DARTS_SHOOT_BALLOON:
+        # The daily free game (claimed via darts_new_free) covers one throw;
+        # every further throw is billed the configured DART_COST_CASH ("Play
+        # again for 20"). The client only deducts that cash locally and never
+        # sends the payment, so the server must charge it here or a reload
+        # restores the cash and throws become infinite. Once the persisted
+        # cash drops below the price, the client's own canAfford() check
+        # blocks the board, so the daily limit holds.
+        pState = save["privateState"]
+        now = timestamp_now()
+        if pState.get("dartsHasFree"):
+            pState["dartsHasFree"] = False
             pState["timeStampLastDart"] = now
             print("Darts: free daily throw.")
         else:
@@ -376,6 +420,7 @@ def do_command(USERID, cmd, args):
                 print(f"Darts: extra throw rejected - needs {price} cash, has {cash}.")
                 return
             save["playerInfo"]["cash"] = cash - price
+            pState["timeStampLastDart"] = now
             print(f"Darts: extra throw billed {price} cash ({cash} -> {cash - price}).")
         balloon_index = int(args[0])
         print("Darts: shoot balloon", balloon_index)
@@ -529,20 +574,34 @@ def do_command(USERID, cmd, args):
         pState["timeStampTakeCareMonster"] = -1 # remove timer
 
     elif cmd == Constant.CMD_WIN_BONUS:
-        # Daily login bonus. The reward is chosen SERVER-SIDE from
-        # DAILY_BONUS_CONFIG by streak position and gated to once per 24h; the
-        # client-submitted coins/cash/hero/claimId are ignored (they were the
-        # infinite-cash exploit).
+        # Daily login bonus. Must mirror the client (PopupNewDaily +
+        # Utils.isDailyBonusReady) exactly or the reward shown on screen
+        # differs from the one persisted:
+        #  - gate by UTC CALENDAR DAY, not a rolling 24h (a 23:50 claim must
+        #    not block the 00:10 popup the client will show);
+        #  - reward index displayed today is (bonusNextId - 1) % 5, resetting
+        #    to day 1 when a day was skipped or on the first ever claim;
+        #  - on hero days the client picks a RANDOM hero from
+        #    DAILY_BONUS_CONFIG_HEROES, shows it and passes it in args[2], so
+        #    honor that id (whitelisted) or storage won't match the popup.
+        # The client-submitted coins/cash amounts stay ignored (they were the
+        # infinite-cash exploit) - resources always come from the config.
         town_id = int(args[1]) if len(args) > 1 else 0
+        client_hero = int(float(args[2])) if len(args) > 2 else 0
         pState = save["privateState"]
         now = timestamp_now()
         last = int(pState.get("timestampLastBonus", 0) or 0)
-        if last and now - last < DAILY_BONUS_SECONDS:
+        day_diff = _utc_day(now) - _utc_day(last)
+        if last and day_diff < 1:
             print("Daily bonus already claimed today - rejected.")
             return
 
         cfg = get_game_config()["globals"]["DAILY_BONUS_CONFIG"]
-        idx = int(pState.get("bonusNextId", 0) or 0) % len(cfg)
+        next_id = int(pState.get("bonusNextId", 0) or 0)
+        if not last or next_id <= 0 or day_diff > 1:
+            idx = 0  # first ever claim, or streak broken: back to day 1
+        else:
+            idx = (next_id - 1) % len(cfg)
         reward = cfg[idx]
         qty = int(reward.get("qty", 0) or 0)
         rtype = reward.get("type")
@@ -554,15 +613,17 @@ def do_command(USERID, cmd, args):
         elif rtype == "c":
             save["playerInfo"]["cash"] = int(save["playerInfo"]["cash"]) + qty
         elif rtype == "hero":
-            heroes = get_game_config()["globals"]["DAILY_BONUS_CONFIG_HEROES"]
-            hero_id = int(heroes[idx % len(heroes)])
+            heroes = [int(h) for h in get_game_config()["globals"]["DAILY_BONUS_CONFIG_HEROES"]]
+            hero_id = client_hero if client_hero in heroes else heroes[0]
             gifts = pState["gifts"]
             while len(gifts) <= hero_id:
                 gifts.append(0)
             gifts[hero_id] += qty
             print(f"  daily bonus hero ID={hero_id} x{qty}")
 
-        pState["bonusNextId"] = idx + 1
+        # Next login the client displays (bonusNextId - 1) % 5, so storing
+        # idx + 2 advances the popup to the following day.
+        pState["bonusNextId"] = idx + 2
         pState["timestampLastBonus"] = now
 
     elif cmd == Constant.CMD_ADMIN_ADD_ANIMAL:
