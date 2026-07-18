@@ -186,11 +186,15 @@ def all_userid() -> list:
     return list(__villages.keys()) + list(__saves.keys())
 
 def save_info(USERID: str) -> dict:
+    from get_game_config import get_level_from_xp
     save = __saves[USERID]
     default_map = save["playerInfo"]["default_map"]
     empire_name = str(save["playerInfo"]["map_names"][default_map])
     xp = save["maps"][default_map]["xp"]
-    level = save["maps"][default_map]["level"]
+    # Compute level from xp the way the in-game HUD does. The stored `level`
+    # field drifts out of sync (e.g. shows 20 for a level-99 xp total), so
+    # deriving it keeps the village list consistent with the actual level.
+    level = get_level_from_xp(int(xp))
     return{"userid": USERID, "name": empire_name, "xp": xp, "level": level}
 
 def all_saves_info() -> list:

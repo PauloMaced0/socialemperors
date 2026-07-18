@@ -285,6 +285,15 @@ def test_load_repairs_broken_troll_town(tmp):
 
 # --- neighbour aliasing ------------------------------------------------------
 
+def test_save_info_level_derived_from_xp(tmp):
+    # The village list must show the real level: derive it from xp like the
+    # in-game HUD, not from the stored `level` field which drifts out of sync.
+    save = sessions.session(UID)
+    save["maps"][0]["xp"] = 9497483   # a level-99 xp total
+    save["maps"][0]["level"] = 20     # stale/wrong stored field
+    assert sessions.save_info(UID)["level"] == 99, "village list did not derive level from xp"
+
+
 def test_neighbors_does_not_pollute_playerinfo(tmp):
     sessions.neighbors(UID)
     static = sessions.neighbor_session("1111")  # AcidCaos static village
@@ -324,6 +333,7 @@ TESTS = [
     test_buy_map_troll_needs_level_20,
     test_buy_map_insufficient_gold_rejected,
     test_load_repairs_broken_troll_town,
+    test_save_info_level_derived_from_xp,
     test_neighbors_does_not_pollute_playerinfo,
     test_loading_scrubs_leaked_playerinfo_fields,
 ]
