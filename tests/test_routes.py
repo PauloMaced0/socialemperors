@@ -137,6 +137,34 @@ def test_own_town_out_of_range_falls_back():
     assert r.get_json()["result"] == "ok"
 
 
+ASSETS = "/default01.static.socialpointgames.com/static/socialempires"
+
+
+def test_missing_asset_returns_404_not_500():
+    # A missing projectile/effect SWF must 404, never 500. Combat fires these
+    # every shot; a 500 logs a traceback and makes Ruffle error each frame,
+    # tanking framerate during a fight.
+    c = server.app.test_client()
+    r = c.get(f"{ASSETS}/fx/p.definitely_missing_asset_xyz.swf")
+    assert r.status_code == 404, f"missing asset returned {r.status_code}, expected 404"
+
+
+def test_missing_asset_is_cached():
+    # Second request for the same missing asset must not repeat the (slow,
+    # dead) CDN round-trip.
+    c = server.app.test_client()
+    path = "fx/p.another_missing_asset_xyz.swf"
+    c.get(f"{ASSETS}/{path}")
+    assert path in server._missing_assets, "missing asset not cached for fast repeat 404s"
+    assert c.get(f"{ASSETS}/{path}").status_code == 404
+
+
+def test_present_asset_served():
+    c = server.app.test_client()
+    r = c.get(f"{ASSETS}/fx/p.fireBall.swf")  # exists in assets/fx
+    assert r.status_code == 200 and len(r.data) > 0, "bundled asset not served"
+
+
 TESTS = [
     test_command_requires_login,
     test_command_ignores_posted_userid,
@@ -145,6 +173,9 @@ TESTS = [
     test_player_info_includes_town_list,
     test_switch_to_own_second_town_no_500,
     test_own_town_out_of_range_falls_back,
+    test_missing_asset_returns_404_not_500,
+    test_missing_asset_is_cached,
+    test_present_asset_served,
 ]
 
 

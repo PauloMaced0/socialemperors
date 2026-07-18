@@ -2,6 +2,8 @@ print (" [+] Loading basics...")
 import os
 import json
 import urllib
+import urllib.request
+import urllib.error
 if os.name == 'nt':
     os.system("color")
     os.system("title Social Empires Server")
@@ -206,35 +208,42 @@ def similar_05122012_magicParticles():
 def similar_05122012_dynamic():
     return send_from_directory(ASSETS_DIR + "/swf", "120608_dynamic.swf")
 
+# Paths already known to be absent locally and on the (dead) CDN. Combat
+# fires the same missing projectile SWFs over and over; without this cache
+# every shot would make a network round-trip to the dead CDN before 404ing,
+# which is itself a heavy framerate sink during a big fight.
+_missing_assets = set()
+
 @app.route("/default01.static.socialpointgames.com/static/socialempires/<path:path>")
 def static_assets_loader(path):
-    # return send_from_directory(ASSETS_DIR, path)
-    if not os.path.exists(ASSETS_DIR + "/"+ path):
-        # File does not exists in provided assets
-        if not os.path.exists(f"{BASE_DIR}/download_assets/assets/{path}"):
-            # Download file from SP's CDN if it doesn't exist
-
-            # Make directory
-            directory = os.path.dirname(f"{BASE_DIR}/download_assets/assets/{path}")
-            if not os.path.exists(directory):
-                os.makedirs(directory)
-
-            # Download File
-            URL = f"https://static.socialpointgames.com/static/socialempires/assets/{path}"
-            try:
-                response = urllib.request.urlretrieve(URL, f"{BASE_DIR}/download_assets/assets/{path}")
-            except urllib.error.HTTPError:
-                return ("", 404)
-
-            print(f"====== DOWNLOADED ASSET: {URL}")
-            return send_from_directory("{BASE_DIR}/download_assets/assets", path)
-        else:
-            # Use downloaded CDN asset
-            print(f"====== USING EXTERNAL: download_assets/assets/{path}")
-            return send_from_directory("{BASE_DIR}/download_assets/assets", path)
-    else:
-        # Use provided asset
+    # Serve a game asset. A MISSING asset must return 404 fast, never 500:
+    # the client requests projectile/effect SWFs (e.g. fx/p.miniFireball2.swf)
+    # every time a unit fires, and some are absent from the bundle. A 500
+    # logs a full traceback and makes Ruffle error on every shot - a real
+    # framerate sink during a big fight.
+    if os.path.exists(os.path.join(ASSETS_DIR, path)):
         return send_from_directory(ASSETS_DIR, path)
+
+    downloaded_dir = os.path.join(BASE_DIR, "download_assets", "assets")
+    if os.path.exists(os.path.join(downloaded_dir, path)):
+        return send_from_directory(downloaded_dir, path)
+
+    if path in _missing_assets:
+        return ("", 404)
+
+    # First time we see this path: try SocialPoint's CDN once and cache the
+    # result either way. The CDN is likely dead, so any failure just becomes
+    # a remembered 404 - never a 500, and never a repeat network call.
+    URL = f"https://static.socialpointgames.com/static/socialempires/assets/{path}"
+    try:
+        os.makedirs(os.path.dirname(os.path.join(downloaded_dir, path)), exist_ok=True)
+        urllib.request.urlretrieve(URL, os.path.join(downloaded_dir, path))
+        print(f"====== DOWNLOADED ASSET: {URL}")
+        return send_from_directory(downloaded_dir, path)
+    except Exception as e:
+        print(f" [!] Asset not found (404, cached): {path} ({type(e).__name__})")
+        _missing_assets.add(path)
+        return ("", 404)
 
 ## GAME DYNAMIC
 
