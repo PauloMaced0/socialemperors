@@ -1,5 +1,6 @@
 import json
 import os
+import datetime
 
 from sessions import session, save_session
 from get_game_config import get_game_config, get_level_from_xp, get_name_from_item_id, get_attribute_from_mission_id, get_xp_from_level, get_attribute_from_item_id, get_item_from_subcat_functional
@@ -7,8 +8,39 @@ from constants import Constant
 from engine import apply_cost, apply_collect, apply_collect_xp, timestamp_now
 from bundle import SAVES_DIR
 
-DARTS_DAILY_SECONDS = 86400  # one darts throw per 24h
-DAILY_BONUS_SECONDS = 86400  # daily login bonus claimable once per 24h
+
+def _same_local_day(ts_a: int, ts_b: int) -> bool:
+    """Same LOCAL calendar day. The client's Utils.isSameDay compares local
+    Date components, so the darts daily gate must be calendar-day based, not
+    a rolling 24h window (a throw at 20:00 must not block the next morning's
+    free game). A zero timestamp means "never"."""
+    if ts_a <= 0 or ts_b <= 0:
+        return False
+    return datetime.date.fromtimestamp(ts_a) == datetime.date.fromtimestamp(ts_b)
+
+
+def _utc_day(ts: int) -> int:
+    """Epoch days in UTC. The client's Utils.isDailyBonusReady computes
+    floor((ts/3600 + timeZone)/24) with timeZone unset (= 0), i.e. UTC day
+    boundaries, so the daily login bonus must use the same arithmetic."""
+    return int(ts) // 86400
+
+
+def _current_darts_set_start(now_ts: int):
+    """Local-midnight timestamp of the darts prize set covering `now_ts`, or
+    None if the schedule has no current set. Mirrors the client, which parses
+    start_date into a local Date and picks the set whose week contains now."""
+    for entry in get_game_config().get("darts_items") or []:
+        if not entry.get("items"):
+            continue
+        try:
+            start_dt = datetime.datetime.strptime(entry["start_date"], "%Y-%m-%d %H:%M:%S")
+        except (KeyError, ValueError):
+            continue
+        start = int(start_dt.timestamp())
+        if start <= now_ts < start + 7 * 86400:
+            return start
+    return None
 
 
 def _grant_resource(save, rtype, amount):
@@ -335,38 +367,50 @@ def do_command(USERID, cmd, args):
         print("Store add items:", item_ids)
 
     elif cmd == Constant.CMD_DARTS_NEW_FREE:
+        # The client sends this when its stored timeStampDartsNewFree is on an
+        # earlier LOCAL calendar day: one free game per day. It does NOT clear
+        # the board - dartsBalloonsShot is the whole week's progress and only
+        # darts_reset (new weekly prize set) wipes it.
         pState = save["privateState"]
         now = timestamp_now()
-        last_dart = int(pState.get("timeStampLastDart", 0) or 0)
-        # One darts throw per 24h. Reject the free claim if already thrown today.
-        if now - last_dart < DARTS_DAILY_SECONDS:
-            print("Darts: already thrown today - free claim rejected.")
+        last_claim = int(pState.get("timeStampDartsNewFree", 0) or 0)
+        if _same_local_day(last_claim, now) and not pState.get("dartsHasFree"):
+            print("Darts: free game already used today - claim rejected.")
             return
-        print("Darts: claim daily free.")
+        print("Darts: claim daily free game.")
         pState["timeStampDartsNewFree"] = now
-        pState["dartsHasFree"] = False   # consume the once-per-day free game
-        pState["dartsBalloonsShot"] = [] # fresh board for this play
+        pState["dartsHasFree"] = True
 
     elif cmd == Constant.CMD_DARTS_RESET:
-        print("Darts: reset board.")
-        pState = save["privateState"]
-        pState["timeStampDartsReset"] = timestamp_now()
-        pState["timeStampDartsNewFree"] = timestamp_now()
-        pState["dartsBalloonsShot"] = []
-        pState["dartsRandomSeed"] = int(args[0]) if args else 0
-
-    elif cmd == Constant.CMD_DARTS_SHOOT_BALLOON:
-        # One FREE throw per 24h; every further throw is billed the configured
-        # DART_COST_CASH ("Play again for 20"). The client only deducts that
-        # cash locally and never sends the payment, so the server must charge
-        # it here or a reload restores the cash and throws become infinite.
-        # Once the persisted cash drops below the price, the client's own
-        # canAfford() check blocks the board, so the daily limit holds.
+        # Sent when a new weekly prize set started (client checks its stored
+        # timeStampDartsReset against the set's start_date). Starts a fresh
+        # board with a free throw. Only accepted once per weekly set so the
+        # board can't be re-rolled at will.
         pState = save["privateState"]
         now = timestamp_now()
-        last_free = int(pState.get("timeStampLastDart", 0) or 0)
-        if now - last_free >= DARTS_DAILY_SECONDS:
-            # Today's free throw. Paid throws do not move this clock.
+        set_start = _current_darts_set_start(now)
+        if set_start is not None and int(pState.get("timeStampDartsReset", 0) or 0) >= set_start:
+            print("Darts: board already reset for this week's set - rejected.")
+            return
+        print("Darts: reset board for new weekly set.")
+        pState["timeStampDartsReset"] = now
+        pState["timeStampDartsNewFree"] = now
+        pState["dartsBalloonsShot"] = []
+        pState["dartsRandomSeed"] = int(args[0]) if args else 0
+        pState["dartsHasFree"] = True
+
+    elif cmd == Constant.CMD_DARTS_SHOOT_BALLOON:
+        # The daily free game (claimed via darts_new_free) covers one throw;
+        # every further throw is billed the configured DART_COST_CASH ("Play
+        # again for 20"). The client only deducts that cash locally and never
+        # sends the payment, so the server must charge it here or a reload
+        # restores the cash and throws become infinite. Once the persisted
+        # cash drops below the price, the client's own canAfford() check
+        # blocks the board, so the daily limit holds.
+        pState = save["privateState"]
+        now = timestamp_now()
+        if pState.get("dartsHasFree"):
+            pState["dartsHasFree"] = False
             pState["timeStampLastDart"] = now
             print("Darts: free daily throw.")
         else:
@@ -376,6 +420,7 @@ def do_command(USERID, cmd, args):
                 print(f"Darts: extra throw rejected - needs {price} cash, has {cash}.")
                 return
             save["playerInfo"]["cash"] = cash - price
+            pState["timeStampLastDart"] = now
             print(f"Darts: extra throw billed {price} cash ({cash} -> {cash - price}).")
         balloon_index = int(args[0])
         print("Darts: shoot balloon", balloon_index)
@@ -383,32 +428,43 @@ def do_command(USERID, cmd, args):
             pState["dartsBalloonsShot"] = []
         pState["dartsBalloonsShot"].append(balloon_index)
 
-    elif cmd == Constant.CMD_PLACE_GIFT:
-        item_id = args[0]
+    elif cmd == Constant.CMD_PLACE_GIFT or cmd == Constant.CMD_PLACE_STORED_ITEM:
+        # place_gift: [id, x, y, town, ?] - place_stored_item: [id, x, y, frame, town].
+        # Both take one unit out of storage (gifts) and put it on the map. The
+        # storage check must happen BEFORE the item is placed: placing first
+        # and crashing on the decrement would persist a free item.
+        item_id = int(args[0])
         x = args[1]
         y = args[2]
-        town_id = args[3]#unsure, both 3 and 4 seem to stay 0
-        args[4]#unknown yet
+        town_id = int(args[4]) if cmd == Constant.CMD_PLACE_STORED_ITEM else int(args[3])
+        gifts = save["privateState"]["gifts"]
+        if item_id < 0 or item_id >= len(gifts) or gifts[item_id] <= 0:
+            print("None of", str(get_name_from_item_id(item_id)), "in storage - placement rejected.")
+            return
         print("Add", str(get_name_from_item_id(item_id)), "at", f"({x},{y})")
         items = save["maps"][town_id]["items"]
         orientation = 0#TODO
         collected_at_timestamp = timestamp_now()
         level = 0
         items += [[item_id, x, y, orientation, collected_at_timestamp, level]]#maybe make function for adding items
-        save["privateState"]["gifts"][item_id] -= 1
-        if save["privateState"]["gifts"][item_id] == 0: #removes excess zeros at end if necessary
-            while(save["privateState"]["gifts"][-1] == 0):
-                save["privateState"]["gifts"].pop()  
+        gifts[item_id] -= 1
+        while len(gifts) != 0 and gifts[-1] == 0: #removes excess zeros at end if necessary
+            gifts.pop()
 
-    elif cmd == Constant.CMD_SELL_GIFT:
-        item_id = args[0]
-        town_id = args[1]
+    elif cmd == Constant.CMD_SELL_GIFT or cmd == Constant.CMD_SELL_STORED:
+        # Both are [id, town]: remove one unit from storage, refund 5% of its
+        # (non-cash) cost. Guarded so selling items you don't own is rejected
+        # instead of corrupting the gifts array.
+        item_id = int(args[0])
+        town_id = int(args[1])
         print("Gift", str(get_name_from_item_id(item_id)), "sold on town:",town_id)
         gifts = save["privateState"]["gifts"]
+        if item_id < 0 or item_id >= len(gifts) or gifts[item_id] <= 0:
+            print("None of", str(get_name_from_item_id(item_id)), "in storage - sale rejected.")
+            return
         gifts[item_id] -= 1
-        if gifts[item_id] == 0: #removes excess zeros at end if necessary
-            while(len(gifts) != 0 and gifts[-1] == 0):
-                gifts.pop()
+        while len(gifts) != 0 and gifts[-1] == 0: #removes excess zeros at end if necessary
+            gifts.pop()
         price_multiplier = -0.05
         if get_attribute_from_item_id(item_id, "cost_type") != "c":
             apply_cost(save["playerInfo"], save["maps"][town_id], item_id, price_multiplier)
@@ -529,20 +585,34 @@ def do_command(USERID, cmd, args):
         pState["timeStampTakeCareMonster"] = -1 # remove timer
 
     elif cmd == Constant.CMD_WIN_BONUS:
-        # Daily login bonus. The reward is chosen SERVER-SIDE from
-        # DAILY_BONUS_CONFIG by streak position and gated to once per 24h; the
-        # client-submitted coins/cash/hero/claimId are ignored (they were the
-        # infinite-cash exploit).
+        # Daily login bonus. Must mirror the client (PopupNewDaily +
+        # Utils.isDailyBonusReady) exactly or the reward shown on screen
+        # differs from the one persisted:
+        #  - gate by UTC CALENDAR DAY, not a rolling 24h (a 23:50 claim must
+        #    not block the 00:10 popup the client will show);
+        #  - reward index displayed today is (bonusNextId - 1) % 5, resetting
+        #    to day 1 when a day was skipped or on the first ever claim;
+        #  - on hero days the client picks a RANDOM hero from
+        #    DAILY_BONUS_CONFIG_HEROES, shows it and passes it in args[2], so
+        #    honor that id (whitelisted) or storage won't match the popup.
+        # The client-submitted coins/cash amounts stay ignored (they were the
+        # infinite-cash exploit) - resources always come from the config.
         town_id = int(args[1]) if len(args) > 1 else 0
+        client_hero = int(float(args[2])) if len(args) > 2 else 0
         pState = save["privateState"]
         now = timestamp_now()
         last = int(pState.get("timestampLastBonus", 0) or 0)
-        if last and now - last < DAILY_BONUS_SECONDS:
+        day_diff = _utc_day(now) - _utc_day(last)
+        if last and day_diff < 1:
             print("Daily bonus already claimed today - rejected.")
             return
 
         cfg = get_game_config()["globals"]["DAILY_BONUS_CONFIG"]
-        idx = int(pState.get("bonusNextId", 0) or 0) % len(cfg)
+        next_id = int(pState.get("bonusNextId", 0) or 0)
+        if not last or next_id <= 0 or day_diff > 1:
+            idx = 0  # first ever claim, or streak broken: back to day 1
+        else:
+            idx = (next_id - 1) % len(cfg)
         reward = cfg[idx]
         qty = int(reward.get("qty", 0) or 0)
         rtype = reward.get("type")
@@ -554,15 +624,17 @@ def do_command(USERID, cmd, args):
         elif rtype == "c":
             save["playerInfo"]["cash"] = int(save["playerInfo"]["cash"]) + qty
         elif rtype == "hero":
-            heroes = get_game_config()["globals"]["DAILY_BONUS_CONFIG_HEROES"]
-            hero_id = int(heroes[idx % len(heroes)])
+            heroes = [int(h) for h in get_game_config()["globals"]["DAILY_BONUS_CONFIG_HEROES"]]
+            hero_id = client_hero if client_hero in heroes else heroes[0]
             gifts = pState["gifts"]
             while len(gifts) <= hero_id:
                 gifts.append(0)
             gifts[hero_id] += qty
             print(f"  daily bonus hero ID={hero_id} x{qty}")
 
-        pState["bonusNextId"] = idx + 1
+        # Next login the client displays (bonusNextId - 1) % 5, so storing
+        # idx + 2 advances the popup to the following day.
+        pState["bonusNextId"] = idx + 2
         pState["timestampLastBonus"] = now
 
     elif cmd == Constant.CMD_ADMIN_ADD_ANIMAL:
@@ -587,23 +659,58 @@ def do_command(USERID, cmd, args):
         save["privateState"]["potion"] += amount
 
     elif cmd == Constant.CMD_RESURRECT_HERO:
-        unit_id = args[0]
+        # Two client flows share this command:
+        #  - PopupGraveyard (5 args, last is "1"/"0"): pays with potions
+        #    (unit's `potion` attribute) or, without potion, with the unit's
+        #    resource cost (gold units: food=cost + gold=cost/2; cash units:
+        #    cash=cost/2).
+        #  - PopupResurrectHeroes (4 args): pays gold = cost_unit_cash * 500
+        #    (Config.RESURRECT_MULTIPLIER).
+        # The client only deducts locally, so the server must charge the same
+        # or resurrection is free after a reload.
+        unit_id = int(args[0])
         x = args[1]
         y = args[2]
-        town_id = args[3]
-        bool_used_potion = len(args) > 4 and args[4] == '1'
+        town_id = int(args[3])
+        map = save["maps"][town_id]
         print("Resurrect", str(get_name_from_item_id(unit_id)), "from graveyard")
-        # pay
-        if bool_used_potion:
-            quantity = 1
-            save["privateState"]["potion"] = max(int(save["privateState"]["potion"] - quantity), 0)
+        if len(args) > 4:
+            if str(args[4]) == '1':
+                needed = int(get_attribute_from_item_id(unit_id, "potion") or 1)
+                potions = int(save["privateState"]["potion"])
+                if potions < needed:
+                    print(f"Resurrect rejected - needs {needed} potions, has {potions}.")
+                    return
+                save["privateState"]["potion"] = potions - needed
+            else:
+                cost = int(get_attribute_from_item_id(unit_id, "cost") or 0)
+                if get_attribute_from_item_id(unit_id, "cost_type") == "c":
+                    price = round(cost / 2)
+                    cash = int(save["playerInfo"]["cash"])
+                    if cash < price:
+                        print(f"Resurrect rejected - needs {price} cash, has {cash}.")
+                        return
+                    save["playerInfo"]["cash"] = cash - price
+                else:
+                    food_price, gold_price = cost, round(cost / 2)
+                    food, coins = int(map["food"]), int(map["coins"])
+                    if food < food_price or coins < gold_price:
+                        print(f"Resurrect rejected - needs {food_price} food + {gold_price} gold.")
+                        return
+                    map["food"] = food - food_price
+                    map["coins"] = coins - gold_price
         else:
-            pass # TODO 
+            price = int(get_attribute_from_item_id(unit_id, "cost_unit_cash") or 0) * 500
+            coins = int(map["coins"])
+            if coins < price:
+                print(f"Resurrect rejected - needs {price} gold, has {coins}.")
+                return
+            map["coins"] = coins - price
         # Place unit
         collected_at_timestamp = timestamp_now()
-        level = 0 # TODO 
+        level = 0 # TODO
         orientation = 0
-        map["items"] += [[id, x, y, orientation, collected_at_timestamp, level]]
+        map["items"] += [[unit_id, x, y, orientation, collected_at_timestamp, level]]
 
     elif cmd == Constant.CMD_BUY_SUPER_OFFER_PACK:
         town_id = args[0]
@@ -754,6 +861,94 @@ def do_command(USERID, cmd, args):
                 if time_option:
                     item[4] = timestamp_now()   # production start
                 break
+
+    elif cmd == Constant.CMD_COLLECT_MONDAY_BONUS or cmd == Constant.CMD_COLLECT_COMEBACK_BONUS:
+        # weekly_reward / comeback_reward, args [type, value(, day)]. The
+        # client picks a random reward and applies it locally; the server
+        # validates the TYPE against the configured reward set and grants the
+        # configured amount (never the client's), or stores the unit if it is
+        # in the configured unit pool.
+        rtype = str(args[0])
+        rvalue = int(float(args[1] or 0))
+        pState = save["privateState"]
+        now = timestamp_now()
+        g = get_game_config()["globals"]
+        if cmd == Constant.CMD_COLLECT_MONDAY_BONUS:
+            # Client shows the popup on Mondays, once per local day.
+            if datetime.date.fromtimestamp(now).weekday() != 0:
+                print("Monday bonus rejected - not Monday.")
+                return
+            if _same_local_day(int(pState.get("timeStampMondayBonus", 0) or 0), now):
+                print("Monday bonus already collected today - rejected.")
+                return
+            rewards, units = g["MONDAY_BONUS_REWARDS"], g["MONDAY_BONUS_UNITS"]
+        else:
+            # Comeback bonus: one claim per streak day index (args[2]).
+            day = int(args[2]) if len(args) > 2 else 0
+            collected = pState.setdefault("comebackBonusCollected", [])
+            if day in collected:
+                print(f"Comeback bonus day {day} already collected - rejected.")
+                return
+            rewards, units = g["COMEBACK_BONUS_REWARDS"], g["COMEBACK_BONUS_UNITS"]
+        cfg_reward = next((r for r in rewards if r.get("type") == rtype), None)
+        if cfg_reward is None:
+            print(f"Bonus reward type '{rtype}' not in config - rejected.")
+            return
+        if rtype == "u":
+            unit_ids = [int(u) for u in units]
+            unit_id = rvalue if rvalue in unit_ids else unit_ids[0]
+            gifts = pState["gifts"]
+            while len(gifts) <= unit_id:
+                gifts.append(0)
+            gifts[unit_id] += 1
+            print(f"{cmd}: stored unit {unit_id}.")
+        elif rtype == "g":
+            qty = int(cfg_reward.get("value", 0))
+            save["maps"][0]["coins"] = int(save["maps"][0]["coins"]) + qty
+            print(f"{cmd}: +{qty} gold.")
+        elif rtype == "c":
+            qty = int(cfg_reward.get("value", 0))
+            save["playerInfo"]["cash"] = int(save["playerInfo"]["cash"]) + qty
+            print(f"{cmd}: +{qty} cash.")
+        if cmd == Constant.CMD_COLLECT_MONDAY_BONUS:
+            pState["timeStampMondayBonus"] = now
+        else:
+            pState["comebackBonusCollected"].append(day)
+
+    elif cmd == Constant.CMD_COLLECT_TREASURE:
+        # Quest-island treasure: [gold, xp, nextQuestId, food, stone, town].
+        # Amounts are computed client-side from level tables, so clamp them to
+        # the client's own maxima instead of trusting arbitrary values.
+        gold = max(0, min(int(float(args[0] or 0)), 1500))
+        xp = max(0, min(int(float(args[1] or 0)), 200))
+        quest_id = int(args[2])
+        food = max(0, min(int(float(args[3] or 0)), 1500))
+        stone = max(0, min(int(float(args[4] or 0)), 1500))
+        town_id = int(args[5]) if len(args) > 5 else 0
+        map = save["maps"][town_id]
+        map["coins"] = int(map["coins"]) + gold
+        map["food"] = int(map["food"]) + food
+        map["stone"] = int(map["stone"]) + stone
+        map["xp"] = int(map["xp"]) + xp
+        map["idCurrentTreasure"] = quest_id
+        print(f"Treasure collected: +{gold}g +{xp}xp +{food}f +{stone}s, next quest {quest_id}.")
+
+    elif cmd == Constant.CMD_BUY_UNIT_WITH_CASH:
+        # [item_id, x, y, frame, town]: buy a unit paying its cash price
+        # (cost_unit_cash) instead of resources.
+        item_id = int(args[0])
+        x = args[1]
+        y = args[2]
+        town_id = int(args[4]) if len(args) > 4 else 0
+        price = int(get_attribute_from_item_id(item_id, "cost_unit_cash") or 0)
+        cash = int(save["playerInfo"]["cash"])
+        if cash < price:
+            print(f"Buy with cash rejected - needs {price} cash, has {cash}.")
+            return
+        save["playerInfo"]["cash"] = cash - price
+        map = save["maps"][town_id]
+        map["items"] += [[item_id, x, y, 0, timestamp_now(), 0]]
+        print("Bought", str(get_name_from_item_id(item_id)), f"for {price} cash at ({x},{y}).")
 
     else:
         print(f"Unhandled command '{cmd}' -> args", args)

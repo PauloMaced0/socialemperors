@@ -9,6 +9,8 @@ import sys
 import json
 import shutil
 import tempfile
+import calendar
+import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -51,6 +53,8 @@ def _do(cmd, args):
 def _now(t):
     command.timestamp_now = lambda: t
     engine.timestamp_now = lambda: t
+    import get_player_info as gpi
+    gpi.timestamp_now = lambda: t
 
 
 # --- GD-04: level-up rewards ---------------------------------------------
@@ -83,75 +87,174 @@ def test_levelup_single_step_grants_only_that_level(tmp):
 
 
 # --- GD-05: daily bonus ---------------------------------------------------
+# The client (PopupNewDaily/Utils.isDailyBonusReady) gates the popup by UTC
+# CALENDAR DAY and displays reward index (bonusNextId - 1) % 5. The server
+# must mirror both or the reward shown on screen differs from the one saved.
+
+def _utc(day, hour):
+    "Epoch seconds for 1970-01-<day> <hour>:00 UTC."
+    return calendar.timegm((1970, 1, day, hour, 0, 0))
+
+
+def _local(day, hour):
+    "Epoch seconds for 1970-01-<day> <hour>:00 LOCAL time (darts use local days)."
+    return int(datetime.datetime(1970, 1, day, hour, 0).timestamp())
+
 
 def test_daily_bonus_uses_config_not_client(tmp):
-    _now(1000000)
-    # client tries to inject 999 cash / 999 gold / hero 5
-    _do(Constant.CMD_WIN_BONUS, [999, 0, 5, 0, 999])
+    _now(_utc(12, 15))
+    # client tries to inject 999 cash / 999 gold
+    _do(Constant.CMD_WIN_BONUS, [999, 0, 0, 0, 999])
     save = sessions.session(UID)
-    # config[0] = 250 gold; client values must be ignored
+    # config[0] = 250 gold; client resource values must be ignored
     assert save["playerInfo"]["cash"] == 0, f"client cash injected: {save['playerInfo']['cash']}"
     assert save["maps"][0]["coins"] == 250, f"expected 250 gold from config, got {save['maps'][0]['coins']}"
-    assert save["privateState"]["bonusNextId"] == 1, "streak not advanced"
+    # client shows (bonusNextId - 1) % 5 next login, so day-2 needs id 2
+    assert save["privateState"]["bonusNextId"] == 2, "bonusNextId must advance to 2 (client displays id-1)"
 
 
 def test_daily_bonus_cooldown_blocks_second_claim(tmp):
-    _now(1000000)
+    _now(_utc(12, 10))
     _do(Constant.CMD_WIN_BONUS, [0, 0, 0, 0, 0])          # claim #1 -> 250 gold
     coins1 = sessions.session(UID)["maps"][0]["coins"]
-    _now(1000000 + 3600)                                   # +1h, still same day
+    _now(_utc(12, 23))                                     # same UTC day
     _do(Constant.CMD_WIN_BONUS, [0, 0, 0, 1, 999])         # attempt #2
     save = sessions.session(UID)
     assert save["maps"][0]["coins"] == coins1, "second same-day claim was NOT blocked"
     assert save["playerInfo"]["cash"] == 0, "second claim leaked cash"
-    assert save["privateState"]["bonusNextId"] == 1, "blocked claim advanced streak"
+    assert save["privateState"]["bonusNextId"] == 2, "blocked claim advanced streak"
 
 
 def test_daily_bonus_next_day_gives_next_reward(tmp):
-    _now(1000000)
-    _do(Constant.CMD_WIN_BONUS, [0, 0, 0, 0, 0])           # #1 -> 250 gold
-    _now(1000000 + 86400)                                  # +24h
-    _do(Constant.CMD_WIN_BONUS, [0, 0, 0, 0, 0])           # #2 -> config[1] = hero
     heroes = get_game_config()["globals"]["DAILY_BONUS_CONFIG_HEROES"]
-    hero_id = int(heroes[1 % len(heroes)])
+    hero_id = int(heroes[3])
+    _now(_utc(12, 20))
+    _do(Constant.CMD_WIN_BONUS, [0, 0, 0, 0, 0])           # #1 -> 250 gold
+    # next UTC day only 8h later: client offers the bonus again (calendar
+    # day), server must accept even though < 24h elapsed
+    _now(_utc(13, 4))
+    _do(Constant.CMD_WIN_BONUS, [0, 0, hero_id, 0, 0])     # #2 -> config[1] = hero
     gifts = sessions.session(UID)["privateState"]["gifts"]
     assert len(gifts) > hero_id and gifts[hero_id] >= 1, "day-2 hero bonus not granted"
-    assert sessions.session(UID)["privateState"]["bonusNextId"] == 2, "streak not advanced to 2"
+    assert sessions.session(UID)["privateState"]["bonusNextId"] == 3, "streak not advanced to 3"
 
 
-# --- Darts: one free throw per day, extras billed ------------------------
+def test_daily_bonus_grants_the_hero_the_client_showed(tmp):
+    heroes = get_game_config()["globals"]["DAILY_BONUS_CONFIG_HEROES"]
+    shown = int(heroes[-1])  # client picks a RANDOM hero and displays it
+    save = sessions.session(UID)
+    save["privateState"]["bonusNextId"] = 2  # today displays index 1 = hero day
+    save["privateState"]["timestampLastBonus"] = _utc(11, 12)
+    _now(_utc(12, 12))
+    _do(Constant.CMD_WIN_BONUS, [0, 0, shown, 2, 0])
+    gifts = save["privateState"]["gifts"]
+    assert len(gifts) > shown and gifts[shown] >= 1, "server stored a different hero than the client showed"
+
+
+def test_daily_bonus_hero_outside_config_rejected(tmp):
+    save = sessions.session(UID)
+    save["privateState"]["bonusNextId"] = 2  # hero day
+    save["privateState"]["timestampLastBonus"] = _utc(11, 12)
+    _now(_utc(12, 12))
+    _do(Constant.CMD_WIN_BONUS, [0, 0, 1, 2, 0])  # hero 1 not in DAILY_BONUS_CONFIG_HEROES
+    heroes = [int(h) for h in get_game_config()["globals"]["DAILY_BONUS_CONFIG_HEROES"]]
+    gifts = save["privateState"]["gifts"]
+    assert len(gifts) <= 1 or gifts[1] == 0, "arbitrary client hero id was stored"
+    granted = [h for h in heroes if len(gifts) > h and gifts[h] >= 1]
+    assert len(granted) == 1, f"expected fallback hero from config, got {granted}"
+
+
+def test_daily_bonus_streak_resets_after_missed_day(tmp):
+    _now(_utc(12, 12))
+    _do(Constant.CMD_WIN_BONUS, [0, 0, 0, 0, 0])           # day 1 -> 250 gold
+    coins1 = sessions.session(UID)["maps"][0]["coins"]
+    _now(_utc(15, 12))                                     # skipped 2 days
+    _do(Constant.CMD_WIN_BONUS, [0, 0, 0, 0, 0])           # back to day 1
+    save = sessions.session(UID)
+    assert save["maps"][0]["coins"] == coins1 + 250, "reset claim should grant day-1 gold again"
+    assert save["privateState"]["bonusNextId"] == 2, "streak should restart at day 1"
+
+
+# --- Darts: one free game per LOCAL calendar day, extras billed -----------
+# Client flow (PopupDarts): on a new local day it sends darts_new_free, then
+# darts_shoot_balloon. Extra throws on the same day are "Play again for 20"
+# billed in cash. The board (dartsBalloonsShot) persists all week; only
+# darts_reset (new weekly prize set) clears it.
+
+def _seed_darts(save, cash=0):
+    save["playerInfo"]["cash"] = cash
+    ps = save["privateState"]
+    ps["dartsBalloonsShot"] = []
+    ps["dartsHasFree"] = False
+    ps["timeStampDartsNewFree"] = 0
+    ps["timeStampLastDart"] = 0
+    return ps
+
 
 def test_darts_free_then_billed_then_broke(tmp):
-    _now(1000000)
+    _now(_local(12, 15))
     save = sessions.session(UID)
-    save["playerInfo"]["cash"] = 25
-    save["privateState"]["dartsBalloonsShot"] = []
-    save["privateState"]["timeStampLastDart"] = 0
+    ps = _seed_darts(save, cash=25)
+    _do(Constant.CMD_DARTS_NEW_FREE, [])
+    assert ps["dartsHasFree"] is True, "free game claim rejected"
     _do(Constant.CMD_DARTS_SHOOT_BALLOON, [1, 0, 0])   # free
-    assert save["privateState"]["dartsBalloonsShot"] == [1], "free throw not recorded"
+    assert ps["dartsBalloonsShot"] == [1], "free throw not recorded"
     assert save["playerInfo"]["cash"] == 25, "free throw wrongly billed"
-    _do(Constant.CMD_DARTS_SHOOT_BALLOON, [2, 0, 0])   # extra -> billed 20
-    assert save["privateState"]["dartsBalloonsShot"] == [1, 2], "paid throw not recorded"
+    assert ps["dartsHasFree"] is False, "free throw did not consume the free game"
+    _do(Constant.CMD_DARTS_SHOOT_BALLOON, [2, 1, 0])   # extra -> billed 20
+    assert ps["dartsBalloonsShot"] == [1, 2], "paid throw not recorded"
     assert save["playerInfo"]["cash"] == 5, f"extra throw not billed: {save['playerInfo']['cash']}"
-    _do(Constant.CMD_DARTS_SHOOT_BALLOON, [3, 0, 0])   # broke -> rejected
-    assert save["privateState"]["dartsBalloonsShot"] == [1, 2], "broke throw not rejected"
+    _do(Constant.CMD_DARTS_SHOOT_BALLOON, [3, 1, 0])   # broke -> rejected
+    assert ps["dartsBalloonsShot"] == [1, 2], "broke throw not rejected"
     assert save["playerInfo"]["cash"] == 5, "broke throw changed cash"
 
 
-def test_darts_free_returns_after_24h(tmp):
-    _now(1000000)
+def test_darts_free_next_local_day_even_within_24h(tmp):
+    # Yesterday's bug: threw at 20:00, next morning 08:00 (< 24h later) the
+    # client offers the free game (new local day) but the server billed it.
+    _now(_local(12, 20))
     save = sessions.session(UID)
-    save["playerInfo"]["cash"] = 0
-    save["privateState"]["dartsBalloonsShot"] = []
-    save["privateState"]["timeStampLastDart"] = 0
-    _do(Constant.CMD_DARTS_SHOOT_BALLOON, [1, 0, 0])   # free today
-    _now(1000000 + 3600)
-    _do(Constant.CMD_DARTS_SHOOT_BALLOON, [2, 0, 0])   # +1h, no cash -> rejected
-    assert save["privateState"]["dartsBalloonsShot"] == [1], "same-day free repeat leaked"
-    _now(1000000 + 86400)
-    _do(Constant.CMD_DARTS_SHOOT_BALLOON, [2, 0, 0])   # +24h -> free again
-    assert save["privateState"]["dartsBalloonsShot"] == [1, 2], "next-day free throw blocked"
+    ps = _seed_darts(save, cash=0)
+    _do(Constant.CMD_DARTS_NEW_FREE, [])
+    _do(Constant.CMD_DARTS_SHOOT_BALLOON, [1, 0, 0])
+    _now(_local(12, 23))
+    _do(Constant.CMD_DARTS_NEW_FREE, [])               # same day -> rejected
+    _do(Constant.CMD_DARTS_SHOOT_BALLOON, [2, 1, 0])   # no cash -> rejected
+    assert ps["dartsBalloonsShot"] == [1], "same-day free repeat leaked"
+    _now(_local(13, 8))                                # next local day, 12h later
+    _do(Constant.CMD_DARTS_NEW_FREE, [])
+    assert ps["dartsHasFree"] is True, "next-morning free game blocked (24h gate regression)"
+    _do(Constant.CMD_DARTS_SHOOT_BALLOON, [2, 0, 0])
+    assert ps["dartsBalloonsShot"] == [1, 2], "next-day free throw blocked"
     assert save["playerInfo"]["cash"] == 0, "next-day free throw billed"
+
+
+def test_darts_new_free_keeps_board(tmp):
+    # dartsBalloonsShot is the WEEK's discovered prizes; a new daily free
+    # game must not wipe it (only darts_reset on a new weekly set does).
+    _now(_local(12, 15))
+    save = sessions.session(UID)
+    ps = _seed_darts(save)
+    _do(Constant.CMD_DARTS_NEW_FREE, [])
+    _do(Constant.CMD_DARTS_SHOOT_BALLOON, [7, 0, 0])
+    _now(_local(13, 15))
+    _do(Constant.CMD_DARTS_NEW_FREE, [])
+    assert ps["dartsBalloonsShot"] == [7], "new daily free game wiped the weekly board"
+
+
+def test_darts_unused_free_survives_reload_same_day(tmp):
+    # Claimed the free game, closed the popup without throwing, reloaded:
+    # get_player_info must not revoke the unused free throw.
+    import get_player_info as gpi
+    _now(_local(12, 15))
+    save = sessions.session(UID)
+    ps = _seed_darts(save)
+    _do(Constant.CMD_DARTS_NEW_FREE, [])
+    gpi.get_player_info(UID)
+    assert ps["dartsHasFree"] is True, "unused free game revoked on reload"
+    _do(Constant.CMD_DARTS_SHOOT_BALLOON, [4, 0, 0])
+    gpi.get_player_info(UID)
+    assert ps["dartsHasFree"] is False, "consumed free game resurrected on reload"
 
 
 TESTS = [
@@ -161,8 +264,13 @@ TESTS = [
     test_daily_bonus_uses_config_not_client,
     test_daily_bonus_cooldown_blocks_second_claim,
     test_daily_bonus_next_day_gives_next_reward,
+    test_daily_bonus_grants_the_hero_the_client_showed,
+    test_daily_bonus_hero_outside_config_rejected,
+    test_daily_bonus_streak_resets_after_missed_day,
     test_darts_free_then_billed_then_broke,
-    test_darts_free_returns_after_24h,
+    test_darts_free_next_local_day_even_within_24h,
+    test_darts_new_free_keeps_board,
+    test_darts_unused_free_survives_reload_same_day,
 ]
 
 
