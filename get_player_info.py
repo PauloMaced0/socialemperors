@@ -1,6 +1,20 @@
 from sessions import session, neighbor_session, neighbors
 from engine import timestamp_now
 
+
+def _ensure_town_list(save):
+    """Populate privateState.maps, the town list the client feeds to
+    TownManager.init(). TownManager.hasSecondTown() does `maps.length > 1`
+    and getSecondRace() reads `maps[1].r`, so a missing field makes the
+    client crash (#1009 null.length) the moment the player opens the Town /
+    race-selector popup - the screen dims and nothing happens.
+
+    Each entry is one owned town carrying its race code ("h"/"t"). Rebuilt
+    from the authoritative maps array on every load so it can never drift."""
+    save["privateState"]["maps"] = [
+        {"r": m.get("race", "h")} for m in save["maps"]
+    ]
+
 def get_player_info(USERID):
     # Update last logged in
     ts_now = timestamp_now()
@@ -18,6 +32,7 @@ def get_player_info(USERID):
     last_dart = int(pState.get("timeStampLastDart", 0) or 0)
     if pState.get("dartsHasFree") and last_claim > 0 and last_dart >= last_claim:
         pState["dartsHasFree"] = False
+    _ensure_town_list(save)
     # player
     player_info = {
         "result": "ok",
@@ -31,6 +46,7 @@ def get_player_info(USERID):
     return player_info
 
 def get_neighbor_info(userid, map_number):
+    _ensure_town_list(neighbor_session(userid))
     neighbor_info = {
         "result": "ok",
         "processed_errors": 0,

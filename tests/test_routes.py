@@ -89,11 +89,28 @@ def test_get_player_info_serves_session_village():
     assert body["playerInfo"]["pid"] == UID, "player info served for the POSTED USERID (spoofable)"
 
 
+def test_player_info_includes_town_list():
+    # The client feeds privateState.maps to TownManager.init(); a missing
+    # field crashes hasSecondTown() (null.length, AVM2 #1009) when the Town /
+    # race-selector popup opens, leaving the screen dimmed. One entry per
+    # owned town, each carrying its race code.
+    c = _client(logged_in_as=UID)
+    r = c.post(API + "/get_player_info.php",
+               data={"USERID": UID, "user_key": "k", "language": "en", "client_id": "1"})
+    assert r.status_code == 200
+    maps = r.get_json()["privateState"].get("maps")
+    assert isinstance(maps, list) and len(maps) >= 1, f"privateState.maps missing/empty: {maps}"
+    assert all("r" in t for t in maps), f"town entries lack race code 'r': {maps}"
+    # single-town save -> hasSecondTown() is false, opens the buy-town popup
+    assert len(maps) == 1, f"expected one town for the test save, got {len(maps)}"
+
+
 TESTS = [
     test_command_requires_login,
     test_command_ignores_posted_userid,
     test_get_player_info_requires_login,
     test_get_player_info_serves_session_village,
+    test_player_info_includes_town_list,
 ]
 
 
