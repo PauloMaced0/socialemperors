@@ -931,11 +931,6 @@ def do_command(USERID, cmd, args):
         map["stone"] = int(map["stone"]) + stone
         map["xp"] = int(map["xp"]) + xp
         map["idCurrentTreasure"] = quest_id
-        # Stamp the kill time. The client gates the enemy camp (and its 4h
-        # respawn countdown) on now - timestampLastTreasure vs
-        # TIMER_OGRES_VILLAGE; without persisting this, a reload sees the old
-        # timestamp and respawns the camp the player just cleared.
-        map["timestampLastTreasure"] = timestamp_now()
         print(f"Treasure collected: +{gold}g +{xp}xp +{food}f +{stone}s, next quest {quest_id}.")
 
     elif cmd == Constant.CMD_BUY_UNIT_WITH_CASH:
