@@ -101,6 +101,15 @@
                     backgroundColor: "#669C2C",
                     allowScriptAccess: false,
                     autoplay: true,
+                    // Perf: "low" disables Ruffle's bitmap smoothing / anti-
+                    // aliasing, the biggest per-pixel cost when a big fight
+                    // puts many animated sprites on screen. wmode opaque skips
+                    // transparency compositing; the longer execution budget
+                    // stops heavy combat frames from tripping the "script
+                    // running slowly" halt.
+                    quality: "low",
+                    wmode: "opaque",
+                    maxExecutionDuration: 60,
                     parameters: '\
                         spdebug=notnull&brk=0\
                         &staticUrl=http://{{SERVERIP}}:5050/default01.static.socialpointgames.com/static/socialempires/&brk=0\
