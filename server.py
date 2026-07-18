@@ -265,7 +265,13 @@ def get_game_config_response():
 @app.route("/dynamic.flash1.dev.socialpoint.es/appsfb/socialempiresdev/srvempires/get_player_info.php", methods=['POST'])
 def get_player_info_response():
 
-    USERID = request.values['USERID']
+    # The acting player is whoever is logged in - never the USERID the client
+    # posts, or any browser on the network could read/act as another village.
+    USERID = session.get('USERID')
+    if not USERID or USERID not in all_saves_userid():
+        return ({"result": "error", "error": "not_logged_in"}, 403)
+    if request.values.get('USERID') not in (None, USERID):
+        print(f" [!] get_player_info: posted USERID {request.values['USERID']} ignored, session is {USERID}.")
     user_key = request.values['user_key']
     spdebug = request.values['spdebug'] if 'spdebug' in request.values else None
     language = request.values['language']
@@ -329,7 +335,13 @@ def flash_sync_error_response():
 def command_response():
     spdebug = None
 
-    USERID = request.values['USERID']
+    # Commands only ever apply to the logged-in village; the posted USERID is
+    # untrusted (any client on the network could send someone else's id).
+    USERID = session.get('USERID')
+    if not USERID or USERID not in all_saves_userid():
+        return ({"result": "error", "error": "not_logged_in"}, 403)
+    if request.values.get('USERID') not in (None, USERID):
+        print(f" [!] command: posted USERID {request.values['USERID']} ignored, session is {USERID}.")
     user_key = request.values['user_key']
     if 'spdebug' in request.values:
         spdebug = request.values['spdebug']

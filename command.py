@@ -428,32 +428,43 @@ def do_command(USERID, cmd, args):
             pState["dartsBalloonsShot"] = []
         pState["dartsBalloonsShot"].append(balloon_index)
 
-    elif cmd == Constant.CMD_PLACE_GIFT:
-        item_id = args[0]
+    elif cmd == Constant.CMD_PLACE_GIFT or cmd == Constant.CMD_PLACE_STORED_ITEM:
+        # place_gift: [id, x, y, town, ?] - place_stored_item: [id, x, y, frame, town].
+        # Both take one unit out of storage (gifts) and put it on the map. The
+        # storage check must happen BEFORE the item is placed: placing first
+        # and crashing on the decrement would persist a free item.
+        item_id = int(args[0])
         x = args[1]
         y = args[2]
-        town_id = args[3]#unsure, both 3 and 4 seem to stay 0
-        args[4]#unknown yet
+        town_id = int(args[4]) if cmd == Constant.CMD_PLACE_STORED_ITEM else int(args[3])
+        gifts = save["privateState"]["gifts"]
+        if item_id < 0 or item_id >= len(gifts) or gifts[item_id] <= 0:
+            print("None of", str(get_name_from_item_id(item_id)), "in storage - placement rejected.")
+            return
         print("Add", str(get_name_from_item_id(item_id)), "at", f"({x},{y})")
         items = save["maps"][town_id]["items"]
         orientation = 0#TODO
         collected_at_timestamp = timestamp_now()
         level = 0
         items += [[item_id, x, y, orientation, collected_at_timestamp, level]]#maybe make function for adding items
-        save["privateState"]["gifts"][item_id] -= 1
-        if save["privateState"]["gifts"][item_id] == 0: #removes excess zeros at end if necessary
-            while(save["privateState"]["gifts"][-1] == 0):
-                save["privateState"]["gifts"].pop()  
+        gifts[item_id] -= 1
+        while len(gifts) != 0 and gifts[-1] == 0: #removes excess zeros at end if necessary
+            gifts.pop()
 
-    elif cmd == Constant.CMD_SELL_GIFT:
-        item_id = args[0]
-        town_id = args[1]
+    elif cmd == Constant.CMD_SELL_GIFT or cmd == Constant.CMD_SELL_STORED:
+        # Both are [id, town]: remove one unit from storage, refund 5% of its
+        # (non-cash) cost. Guarded so selling items you don't own is rejected
+        # instead of corrupting the gifts array.
+        item_id = int(args[0])
+        town_id = int(args[1])
         print("Gift", str(get_name_from_item_id(item_id)), "sold on town:",town_id)
         gifts = save["privateState"]["gifts"]
+        if item_id < 0 or item_id >= len(gifts) or gifts[item_id] <= 0:
+            print("None of", str(get_name_from_item_id(item_id)), "in storage - sale rejected.")
+            return
         gifts[item_id] -= 1
-        if gifts[item_id] == 0: #removes excess zeros at end if necessary
-            while(len(gifts) != 0 and gifts[-1] == 0):
-                gifts.pop()
+        while len(gifts) != 0 and gifts[-1] == 0: #removes excess zeros at end if necessary
+            gifts.pop()
         price_multiplier = -0.05
         if get_attribute_from_item_id(item_id, "cost_type") != "c":
             apply_cost(save["playerInfo"], save["maps"][town_id], item_id, price_multiplier)
@@ -648,23 +659,58 @@ def do_command(USERID, cmd, args):
         save["privateState"]["potion"] += amount
 
     elif cmd == Constant.CMD_RESURRECT_HERO:
-        unit_id = args[0]
+        # Two client flows share this command:
+        #  - PopupGraveyard (5 args, last is "1"/"0"): pays with potions
+        #    (unit's `potion` attribute) or, without potion, with the unit's
+        #    resource cost (gold units: food=cost + gold=cost/2; cash units:
+        #    cash=cost/2).
+        #  - PopupResurrectHeroes (4 args): pays gold = cost_unit_cash * 500
+        #    (Config.RESURRECT_MULTIPLIER).
+        # The client only deducts locally, so the server must charge the same
+        # or resurrection is free after a reload.
+        unit_id = int(args[0])
         x = args[1]
         y = args[2]
-        town_id = args[3]
-        bool_used_potion = len(args) > 4 and args[4] == '1'
+        town_id = int(args[3])
+        map = save["maps"][town_id]
         print("Resurrect", str(get_name_from_item_id(unit_id)), "from graveyard")
-        # pay
-        if bool_used_potion:
-            quantity = 1
-            save["privateState"]["potion"] = max(int(save["privateState"]["potion"] - quantity), 0)
+        if len(args) > 4:
+            if str(args[4]) == '1':
+                needed = int(get_attribute_from_item_id(unit_id, "potion") or 1)
+                potions = int(save["privateState"]["potion"])
+                if potions < needed:
+                    print(f"Resurrect rejected - needs {needed} potions, has {potions}.")
+                    return
+                save["privateState"]["potion"] = potions - needed
+            else:
+                cost = int(get_attribute_from_item_id(unit_id, "cost") or 0)
+                if get_attribute_from_item_id(unit_id, "cost_type") == "c":
+                    price = round(cost / 2)
+                    cash = int(save["playerInfo"]["cash"])
+                    if cash < price:
+                        print(f"Resurrect rejected - needs {price} cash, has {cash}.")
+                        return
+                    save["playerInfo"]["cash"] = cash - price
+                else:
+                    food_price, gold_price = cost, round(cost / 2)
+                    food, coins = int(map["food"]), int(map["coins"])
+                    if food < food_price or coins < gold_price:
+                        print(f"Resurrect rejected - needs {food_price} food + {gold_price} gold.")
+                        return
+                    map["food"] = food - food_price
+                    map["coins"] = coins - gold_price
         else:
-            pass # TODO 
+            price = int(get_attribute_from_item_id(unit_id, "cost_unit_cash") or 0) * 500
+            coins = int(map["coins"])
+            if coins < price:
+                print(f"Resurrect rejected - needs {price} gold, has {coins}.")
+                return
+            map["coins"] = coins - price
         # Place unit
         collected_at_timestamp = timestamp_now()
-        level = 0 # TODO 
+        level = 0 # TODO
         orientation = 0
-        map["items"] += [[id, x, y, orientation, collected_at_timestamp, level]]
+        map["items"] += [[unit_id, x, y, orientation, collected_at_timestamp, level]]
 
     elif cmd == Constant.CMD_BUY_SUPER_OFFER_PACK:
         town_id = args[0]
@@ -815,6 +861,94 @@ def do_command(USERID, cmd, args):
                 if time_option:
                     item[4] = timestamp_now()   # production start
                 break
+
+    elif cmd == Constant.CMD_COLLECT_MONDAY_BONUS or cmd == Constant.CMD_COLLECT_COMEBACK_BONUS:
+        # weekly_reward / comeback_reward, args [type, value(, day)]. The
+        # client picks a random reward and applies it locally; the server
+        # validates the TYPE against the configured reward set and grants the
+        # configured amount (never the client's), or stores the unit if it is
+        # in the configured unit pool.
+        rtype = str(args[0])
+        rvalue = int(float(args[1] or 0))
+        pState = save["privateState"]
+        now = timestamp_now()
+        g = get_game_config()["globals"]
+        if cmd == Constant.CMD_COLLECT_MONDAY_BONUS:
+            # Client shows the popup on Mondays, once per local day.
+            if datetime.date.fromtimestamp(now).weekday() != 0:
+                print("Monday bonus rejected - not Monday.")
+                return
+            if _same_local_day(int(pState.get("timeStampMondayBonus", 0) or 0), now):
+                print("Monday bonus already collected today - rejected.")
+                return
+            rewards, units = g["MONDAY_BONUS_REWARDS"], g["MONDAY_BONUS_UNITS"]
+        else:
+            # Comeback bonus: one claim per streak day index (args[2]).
+            day = int(args[2]) if len(args) > 2 else 0
+            collected = pState.setdefault("comebackBonusCollected", [])
+            if day in collected:
+                print(f"Comeback bonus day {day} already collected - rejected.")
+                return
+            rewards, units = g["COMEBACK_BONUS_REWARDS"], g["COMEBACK_BONUS_UNITS"]
+        cfg_reward = next((r for r in rewards if r.get("type") == rtype), None)
+        if cfg_reward is None:
+            print(f"Bonus reward type '{rtype}' not in config - rejected.")
+            return
+        if rtype == "u":
+            unit_ids = [int(u) for u in units]
+            unit_id = rvalue if rvalue in unit_ids else unit_ids[0]
+            gifts = pState["gifts"]
+            while len(gifts) <= unit_id:
+                gifts.append(0)
+            gifts[unit_id] += 1
+            print(f"{cmd}: stored unit {unit_id}.")
+        elif rtype == "g":
+            qty = int(cfg_reward.get("value", 0))
+            save["maps"][0]["coins"] = int(save["maps"][0]["coins"]) + qty
+            print(f"{cmd}: +{qty} gold.")
+        elif rtype == "c":
+            qty = int(cfg_reward.get("value", 0))
+            save["playerInfo"]["cash"] = int(save["playerInfo"]["cash"]) + qty
+            print(f"{cmd}: +{qty} cash.")
+        if cmd == Constant.CMD_COLLECT_MONDAY_BONUS:
+            pState["timeStampMondayBonus"] = now
+        else:
+            pState["comebackBonusCollected"].append(day)
+
+    elif cmd == Constant.CMD_COLLECT_TREASURE:
+        # Quest-island treasure: [gold, xp, nextQuestId, food, stone, town].
+        # Amounts are computed client-side from level tables, so clamp them to
+        # the client's own maxima instead of trusting arbitrary values.
+        gold = max(0, min(int(float(args[0] or 0)), 1500))
+        xp = max(0, min(int(float(args[1] or 0)), 200))
+        quest_id = int(args[2])
+        food = max(0, min(int(float(args[3] or 0)), 1500))
+        stone = max(0, min(int(float(args[4] or 0)), 1500))
+        town_id = int(args[5]) if len(args) > 5 else 0
+        map = save["maps"][town_id]
+        map["coins"] = int(map["coins"]) + gold
+        map["food"] = int(map["food"]) + food
+        map["stone"] = int(map["stone"]) + stone
+        map["xp"] = int(map["xp"]) + xp
+        map["idCurrentTreasure"] = quest_id
+        print(f"Treasure collected: +{gold}g +{xp}xp +{food}f +{stone}s, next quest {quest_id}.")
+
+    elif cmd == Constant.CMD_BUY_UNIT_WITH_CASH:
+        # [item_id, x, y, frame, town]: buy a unit paying its cash price
+        # (cost_unit_cash) instead of resources.
+        item_id = int(args[0])
+        x = args[1]
+        y = args[2]
+        town_id = int(args[4]) if len(args) > 4 else 0
+        price = int(get_attribute_from_item_id(item_id, "cost_unit_cash") or 0)
+        cash = int(save["playerInfo"]["cash"])
+        if cash < price:
+            print(f"Buy with cash rejected - needs {price} cash, has {cash}.")
+            return
+        save["playerInfo"]["cash"] = cash - price
+        map = save["maps"][town_id]
+        map["items"] += [[item_id, x, y, 0, timestamp_now(), 0]]
+        print("Bought", str(get_name_from_item_id(item_id)), f"for {price} cash at ({x},{y}).")
 
     else:
         print(f"Unhandled command '{cmd}' -> args", args)

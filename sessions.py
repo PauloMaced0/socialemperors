@@ -88,6 +88,11 @@ def load_saved_villages():
         except:
             map_name = '?'
         print(f"({map_name}) Ok.")
+        # Scrub transient neighbour-listing fields that older builds leaked
+        # into playerInfo (they belong to maps[0] and were persisted by
+        # accident via aliasing in neighbors()).
+        for leaked in ("coins", "xp", "level", "stone", "wood", "food"):
+            save["playerInfo"].pop(leaked, None)
         __saves[str(USERID)] = save
         modified = migrate_loaded_save(save) # check save version for migration
         if modified:
@@ -188,28 +193,28 @@ def neighbors(USERID: str) -> list:
         or vill["playerInfo"]["pid"] == Constant.NEIGHBOUR_ARTHUR_GUINEVERE_2 \
         or vill["playerInfo"]["pid"] == Constant.NEIGHBOUR_ARTHUR_GUINEVERE_3:
             continue
-        neigh = vill["playerInfo"]
+        # Copy: mutating playerInfo in place leaks these transient fields
+        # into the stored village and gets persisted on the next save.
+        neigh = dict(vill["playerInfo"])
         neigh["coins"] = vill["maps"][0]["coins"]
         neigh["xp"] = vill["maps"][0]["xp"]
         neigh["level"] = vill["maps"][0]["level"]
         neigh["stone"] = vill["maps"][0]["stone"]
         neigh["wood"] = vill["maps"][0]["wood"]
         neigh["food"] = vill["maps"][0]["food"]
-        neigh["stone"] = vill["maps"][0]["stone"]
         neighbors += [neigh]
     # other players
     for key in __saves:
         vill = __saves[key]
         if vill["playerInfo"]["pid"] == USERID:
             continue
-        neigh = vill["playerInfo"]
+        neigh = dict(vill["playerInfo"])
         neigh["coins"] = vill["maps"][0]["coins"]
         neigh["xp"] = vill["maps"][0]["xp"]
         neigh["level"] = vill["maps"][0]["level"]
         neigh["stone"] = vill["maps"][0]["stone"]
         neigh["wood"] = vill["maps"][0]["wood"]
         neigh["food"] = vill["maps"][0]["food"]
-        neigh["stone"] = vill["maps"][0]["stone"]
         neighbors += [neigh]
     return neighbors
 
