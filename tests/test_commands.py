@@ -266,6 +266,23 @@ def test_buy_map_insufficient_gold_rejected(tmp):
     assert save["maps"][0]["coins"] == 500, "gold changed on rejected purchase"
 
 
+def test_load_repairs_broken_troll_town(tmp):
+    # A troll town left with the human town hall (from the first buggy
+    # buy_map) is rebuilt on load so it trains goblins, not villagers.
+    save = sessions.session(UID)
+    save["maps"].append({
+        "race": "t", "coins": 0, "wood": 0, "stone": 0, "food": 0,
+        "level": 1, "xp": 0, "expansions": [13],
+        "items": [[26, 52, 52, 0, 0, 0], [512, 50, 42, 0, 0, 0]],  # human hall + unit
+    })
+    changed = sessions._repair_broken_troll_towns(save)
+    assert changed, "broken troll town not detected"
+    ids = [it[0] for it in save["maps"][1]["items"]]
+    assert 289 in ids and 26 not in ids, "troll town not rebuilt with Troll Hall"
+    # a healthy troll town is left alone
+    assert not sessions._repair_broken_troll_towns(save), "rebuilt town wrongly re-repaired"
+
+
 # --- neighbour aliasing ------------------------------------------------------
 
 def test_neighbors_does_not_pollute_playerinfo(tmp):
@@ -306,6 +323,7 @@ TESTS = [
     test_buy_map_rejects_second_purchase,
     test_buy_map_troll_needs_level_20,
     test_buy_map_insufficient_gold_rejected,
+    test_load_repairs_broken_troll_town,
     test_neighbors_does_not_pollute_playerinfo,
     test_loading_scrubs_leaked_playerinfo_fields,
 ]

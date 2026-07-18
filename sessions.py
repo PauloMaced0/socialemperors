@@ -95,6 +95,8 @@ def load_saved_villages():
             save["playerInfo"].pop(leaked, None)
         __saves[str(USERID)] = save
         modified = migrate_loaded_save(save) # check save version for migration
+        if _repair_broken_troll_towns(save):
+            modified = True
         if modified:
             save_session(USERID)
     
@@ -153,6 +155,25 @@ def fresh_town_map(race: str) -> dict:
             new_items.append(item)
         town["items"] = new_items
     return town
+
+def _repair_broken_troll_towns(save: dict) -> bool:
+    """Repair troll towns created by the first buggy buy_map, which cloned the
+    human starter (human Town Hall id 26 -> trained Peasants) and then let the
+    enemy camp spawn and persist into the fresh town (hundreds of stray items).
+    Detect that exact broken state - a troll town still carrying the human town
+    hall - and regenerate it as a proper troll town. Runs on load, before any
+    save, so a restart fixes it and it can't be clobbered. Returns True if a
+    town was rebuilt."""
+    changed = False
+    for i, town in enumerate(save.get("maps", [])):
+        if town.get("race") != "t":
+            continue
+        ids = {item[0] for item in town.get("items", [])}
+        if 26 in ids and 289 not in ids:
+            save["maps"][i] = fresh_town_map("t")
+            print(f"   > repaired broken troll town (map {i})")
+            changed = True
+    return changed
 
 # Access functions
 
