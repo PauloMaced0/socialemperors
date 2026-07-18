@@ -95,6 +95,8 @@ def load_saved_villages():
             save["playerInfo"].pop(leaked, None)
         __saves[str(USERID)] = save
         modified = migrate_loaded_save(save) # check save version for migration
+        if _repair_broken_troll_towns(save):
+            modified = True
         if modified:
             save_session(USERID)
     
@@ -119,6 +121,60 @@ def new_village() -> str:
     print("Done.")
     return USERID
 
+# The town hall ITEM decides what the town trains (human hall id 26 trains
+# Peasants; Troll Hall I id 289 trains goblins), so a troll town must swap
+# the human starter buildings for their troll equivalents. Same subcat, tier
+# I. Pre-placed human units are dropped - a fresh town starts with no army
+# and the player trains the race's own units.
+_HUMAN_TO_TROLL_BUILDING = {
+    26: 289,   # Town Hall   -> Troll Hall I
+    1: 307,    # House I     -> Troll House I
+}
+_HUMAN_STARTER_UNITS = {512, 516}  # Light Knight, Light Archer
+
+def fresh_town_map(race: str) -> dict:
+    """A brand-new town map for a second-town purchase: the initial town
+    layout (town hall, houses, trees) with the chosen race. For a troll town
+    the human buildings are swapped for troll ones so the town hall actually
+    trains goblins, and the human starter units are dropped."""
+    town = copy.deepcopy(__initial_village["maps"][0])
+    town["race"] = race
+    town["timestamp"] = timestamp_now()
+    town["idCurrentTreasure"] = 0
+    # Stamp "just cleared" so the enemy camp doesn't spawn immediately into a
+    # brand-new town that has no army yet; it arrives after the normal 4h.
+    town["timestampLastTreasure"] = timestamp_now()
+    if race == "t":
+        new_items = []
+        for item in town["items"]:
+            item_id = item[0]
+            if item_id in _HUMAN_STARTER_UNITS:
+                continue  # no pre-placed human army in a troll town
+            if item_id in _HUMAN_TO_TROLL_BUILDING:
+                item = [_HUMAN_TO_TROLL_BUILDING[item_id]] + item[1:]
+            new_items.append(item)
+        town["items"] = new_items
+    return town
+
+def _repair_broken_troll_towns(save: dict) -> bool:
+    """Repair troll towns created by the first buggy buy_map, which cloned the
+    human starter (human Town Hall id 26 -> trained Peasants) and then let the
+    enemy camp spawn and persist into the fresh town (hundreds of stray items).
+    Detect that exact broken state - a troll town still carrying the human town
+    hall - and regenerate it as a proper troll town. Runs on load, before any
+    save, so a restart fixes it and it can't be clobbered. Returns True if a
+    town was rebuilt."""
+    changed = False
+    for i, town in enumerate(save.get("maps", [])):
+        if town.get("race") != "t":
+            continue
+        ids = {item[0] for item in town.get("items", [])}
+        if 26 in ids and 289 not in ids:
+            save["maps"][i] = fresh_town_map("t")
+            print(f"   > repaired broken troll town (map {i})")
+            changed = True
+    return changed
+
 # Access functions
 
 def all_saves_userid() -> list:
@@ -130,11 +186,15 @@ def all_userid() -> list:
     return list(__villages.keys()) + list(__saves.keys())
 
 def save_info(USERID: str) -> dict:
+    from get_game_config import get_level_from_xp
     save = __saves[USERID]
     default_map = save["playerInfo"]["default_map"]
     empire_name = str(save["playerInfo"]["map_names"][default_map])
     xp = save["maps"][default_map]["xp"]
-    level = save["maps"][default_map]["level"]
+    # Compute level from xp the way the in-game HUD does. The stored `level`
+    # field drifts out of sync (e.g. shows 20 for a level-99 xp total), so
+    # deriving it keeps the village list consistent with the actual level.
+    level = get_level_from_xp(int(xp))
     return{"userid": USERID, "name": empire_name, "xp": xp, "level": level}
 
 def all_saves_info() -> list:

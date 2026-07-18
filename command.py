@@ -2,7 +2,7 @@ import json
 import os
 import datetime
 
-from sessions import session, save_session
+from sessions import session, save_session, fresh_town_map
 from get_game_config import get_game_config, get_level_from_xp, get_name_from_item_id, get_attribute_from_mission_id, get_xp_from_level, get_attribute_from_item_id, get_item_from_subcat_functional
 from constants import Constant
 from engine import apply_cost, apply_collect, apply_collect_xp, timestamp_now
@@ -275,8 +275,19 @@ def do_command(USERID, cmd, args):
     
     elif cmd == Constant.CMD_RT_LEVEL_UP:
         new_level = int(args[0])
-        map = save["maps"][0] # TODO : xp must be general, since theres no given town_id
+        # Player level/xp is GLOBAL, not per-town: the client sends only the
+        # level (no town id) because the original backend kept one value per
+        # account. Persist it to the default town as the canonical store;
+        # get_player_info mirrors it onto every town so switching towns can't
+        # overwrite it (leveling in a second town used to drop the main town).
+        map = save["maps"][int(save["playerInfo"].get("default_map", 0) or 0)]
         old_level = int(map.get("level", 0) or 0)
+        # Level only ever goes up; the client sends rt_level_up on a level-UP.
+        # Never accept a downgrade (a stale command from a lower-level town
+        # would otherwise drop the whole account).
+        if new_level <= old_level:
+            print(f"Level Up ignored: {new_level} <= current {old_level}.")
+            return
         print("Level Up!:", new_level)
         map["level"] = new_level
         current_xp = map["xp"]
@@ -295,9 +306,15 @@ def do_command(USERID, cmd, args):
                 print(f"  level {lvl} reward: {r.get('reward_amount')} '{r.get('reward_type')}'")
 
     elif cmd == Constant.CMD_RT_PUBLISH_SCORE:
-        new_xp = args[0]
+        new_xp = int(args[0])
         print("xp set to", new_xp)
-        map = save["maps"][0] # TODO : xp must be general, since theres no given town_id
+        # Global player xp - store on the default town (canonical). Never let a
+        # second town's lower xp clobber it: the client sends whatever the
+        # currently-loaded town shows, and with get_player_info now mirroring
+        # the global xp onto every town, that value is always the global one.
+        map = save["maps"][int(save["playerInfo"].get("default_map", 0) or 0)]
+        # xp is monotonic; never let a stale/lower publish reduce it.
+        new_xp = max(int(map.get("xp", 0) or 0), new_xp)
         map["xp"] = new_xp
         map["level"] = get_level_from_xp(new_xp)
 
@@ -931,7 +948,13 @@ def do_command(USERID, cmd, args):
         map["stone"] = int(map["stone"]) + stone
         map["xp"] = int(map["xp"]) + xp
         map["idCurrentTreasure"] = quest_id
-        print(f"Treasure collected: +{gold}g +{xp}xp +{food}f +{stone}s, next quest {quest_id}.")
+        # Stamp the kill time. The client gates the enemy camp and its 4h
+        # respawn countdown on now - map.timestampLastTreasure vs
+        # TIMER_OGRES_VILLAGE (Base.as reads it on load, MapInitializer.Init
+        # respawns the camp when the timer hits 0). Without persisting this a
+        # reload sees 0 and respawns the camp the player just cleared.
+        map["timestampLastTreasure"] = timestamp_now()
+        print(f"Treasure collected: +{gold}g +{xp}xp +{food}f +{stone}s, next quest {quest_id}. Stamped {map['timestampLastTreasure']}.")
 
     elif cmd == Constant.CMD_BUY_UNIT_WITH_CASH:
         # [item_id, x, y, frame, town]: buy a unit paying its cash price
@@ -949,6 +972,49 @@ def do_command(USERID, cmd, args):
         map = save["maps"][town_id]
         map["items"] += [[item_id, x, y, 0, timestamp_now(), 0]]
         print("Bought", str(get_name_from_item_id(item_id)), f"for {price} cash at ({x},{y}).")
+
+    elif cmd == Constant.CMD_BUY_MAP:
+        # Buy a second town. args: [count(=1), resource(0=gold, 1=cash),
+        # race("h"/"t"), currentTownID]. The client (PopupRaceSelector)
+        # deducts locally and immediately travels to town 1, so the server
+        # must actually create maps[1] or the follow-up load 500s and the
+        # game hangs on the loading bar.
+        resource = int(args[1])
+        race = str(args[2])
+        cur_town = int(args[3]) if len(args) > 3 else 0
+        TOWN_PRICE_GOLD, TOWN_PRICE_CASH, TROLL_MIN_LEVEL = 100000, 22, 20
+        if len(save["maps"]) >= 2:
+            print("Second town already owned - buy_map rejected.")
+            return
+        if race == "t" and int(save["maps"][cur_town].get("level", 1)) < TROLL_MIN_LEVEL:
+            print(f"Troll town needs level {TROLL_MIN_LEVEL} - buy_map rejected.")
+            return
+        if resource == 1:
+            cash = int(save["playerInfo"]["cash"])
+            if cash < TOWN_PRICE_CASH:
+                print(f"Not enough cash for second town ({cash}/{TOWN_PRICE_CASH}) - rejected.")
+                return
+            save["playerInfo"]["cash"] = cash - TOWN_PRICE_CASH
+        else:
+            coins = int(save["maps"][cur_town]["coins"])
+            if coins < TOWN_PRICE_GOLD:
+                print(f"Not enough gold for second town ({coins}/{TOWN_PRICE_GOLD}) - rejected.")
+                return
+            save["maps"][cur_town]["coins"] = coins - TOWN_PRICE_GOLD
+        # Create the town and register it so the client can list/switch to it.
+        new_town = fresh_town_map(race)
+        # Player level is global: start the new town at the account's current
+        # level/xp so it doesn't show as level 1 before the next load.
+        cur = save["maps"][cur_town]
+        new_town["xp"], new_town["level"] = cur.get("xp", 0), cur.get("level", 1)
+        save["maps"].append(new_town)
+        pi = save["playerInfo"]
+        base_name = str(pi["map_names"][0]) if pi.get("map_names") else "My Empire"
+        pi.setdefault("map_names", []).append(f"{base_name} II")
+        sizes = pi.setdefault("map_sizes", [])
+        first_size = sizes[0] if sizes else 1
+        sizes.append(first_size if first_size else 1)
+        print(f"Second town created (race '{race}'), paid via {'cash' if resource == 1 else 'gold'}.")
 
     else:
         print(f"Unhandled command '{cmd}' -> args", args)
