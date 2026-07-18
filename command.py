@@ -275,8 +275,19 @@ def do_command(USERID, cmd, args):
     
     elif cmd == Constant.CMD_RT_LEVEL_UP:
         new_level = int(args[0])
-        map = save["maps"][0] # TODO : xp must be general, since theres no given town_id
+        # Player level/xp is GLOBAL, not per-town: the client sends only the
+        # level (no town id) because the original backend kept one value per
+        # account. Persist it to the default town as the canonical store;
+        # get_player_info mirrors it onto every town so switching towns can't
+        # overwrite it (leveling in a second town used to drop the main town).
+        map = save["maps"][int(save["playerInfo"].get("default_map", 0) or 0)]
         old_level = int(map.get("level", 0) or 0)
+        # Level only ever goes up; the client sends rt_level_up on a level-UP.
+        # Never accept a downgrade (a stale command from a lower-level town
+        # would otherwise drop the whole account).
+        if new_level <= old_level:
+            print(f"Level Up ignored: {new_level} <= current {old_level}.")
+            return
         print("Level Up!:", new_level)
         map["level"] = new_level
         current_xp = map["xp"]
@@ -295,9 +306,15 @@ def do_command(USERID, cmd, args):
                 print(f"  level {lvl} reward: {r.get('reward_amount')} '{r.get('reward_type')}'")
 
     elif cmd == Constant.CMD_RT_PUBLISH_SCORE:
-        new_xp = args[0]
+        new_xp = int(args[0])
         print("xp set to", new_xp)
-        map = save["maps"][0] # TODO : xp must be general, since theres no given town_id
+        # Global player xp - store on the default town (canonical). Never let a
+        # second town's lower xp clobber it: the client sends whatever the
+        # currently-loaded town shows, and with get_player_info now mirroring
+        # the global xp onto every town, that value is always the global one.
+        map = save["maps"][int(save["playerInfo"].get("default_map", 0) or 0)]
+        # xp is monotonic; never let a stale/lower publish reduce it.
+        new_xp = max(int(map.get("xp", 0) or 0), new_xp)
         map["xp"] = new_xp
         map["level"] = get_level_from_xp(new_xp)
 
@@ -985,7 +1002,12 @@ def do_command(USERID, cmd, args):
                 return
             save["maps"][cur_town]["coins"] = coins - TOWN_PRICE_GOLD
         # Create the town and register it so the client can list/switch to it.
-        save["maps"].append(fresh_town_map(race))
+        new_town = fresh_town_map(race)
+        # Player level is global: start the new town at the account's current
+        # level/xp so it doesn't show as level 1 before the next load.
+        cur = save["maps"][cur_town]
+        new_town["xp"], new_town["level"] = cur.get("xp", 0), cur.get("level", 1)
+        save["maps"].append(new_town)
         pi = save["playerInfo"]
         base_name = str(pi["map_names"][0]) if pi.get("map_names") else "My Empire"
         pi.setdefault("map_names", []).append(f"{base_name} II")

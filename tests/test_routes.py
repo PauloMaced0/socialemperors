@@ -128,6 +128,29 @@ def test_switch_to_own_second_town_no_500():
     assert len(body["privateState"]["maps"]) == 2, "town list not updated to 2"
 
 
+def test_second_town_shows_global_level():
+    # Player level is global: the second town must report the account level,
+    # not its own fresh xp, so switching towns never drops the level.
+    import sessions as _s
+    import command as _cmd
+    v = _s.session(UID)
+    v["maps"][0]["level"] = 99
+    v["maps"][0]["xp"] = 9497483
+    v["maps"][0]["coins"] = 200000
+    if len(v["maps"]) < 2:
+        _cmd.do_command(UID, "buy_map", [1, 0, "t", 0])
+    # force the second town to a stale low level; serving must override it
+    v["maps"][1]["level"] = 3
+    v["maps"][1]["xp"] = 92
+    c = _client(logged_in_as=UID)
+    r = c.post(API + "/get_player_info.php",
+               data={"USERID": UID, "user": UID, "map": "1",
+                     "user_key": "k", "language": "en", "client_id": "1"})
+    assert r.get_json()["map"]["level"] == 99, "second town did not show global level 99"
+    # main town must be untouched
+    assert v["maps"][0]["level"] == 99, "main town level changed"
+
+
 def test_own_town_out_of_range_falls_back():
     c = _client(logged_in_as=OTHER)  # OTHER has one town
     r = c.post(API + "/get_player_info.php",
@@ -172,6 +195,7 @@ TESTS = [
     test_get_player_info_serves_session_village,
     test_player_info_includes_town_list,
     test_switch_to_own_second_town_no_500,
+    test_second_town_shows_global_level,
     test_own_town_out_of_range_falls_back,
     test_missing_asset_returns_404_not_500,
     test_missing_asset_is_cached,

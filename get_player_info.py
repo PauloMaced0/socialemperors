@@ -16,6 +16,23 @@ def _ensure_town_list(save):
     ]
 
 
+def _sync_global_level(save):
+    """Mirror the player's global xp/level onto every town. The client shows
+    the CURRENT town's map.xp/level as the player level, and levelling sends
+    no town id (level is a single per-account value in the original game). If
+    towns kept independent xp, entering a fresh second town would show its
+    low level and levelling there would overwrite the main town. Keep the
+    default town as canonical and copy its xp/level to the others."""
+    maps = save["maps"]
+    if len(maps) < 2:
+        return
+    canonical = maps[int(save["playerInfo"].get("default_map", 0) or 0)]
+    xp, level = canonical.get("xp", 0), canonical.get("level", 1)
+    for i, town in enumerate(maps):
+        if town is not canonical:
+            town["xp"], town["level"] = xp, level
+
+
 def _clamp_map(save, map_number):
     """A valid map index for this village. Switching towns (or clicking
     "Town" with one town) requests map 1; an out-of-range index would 500
@@ -45,6 +62,7 @@ def get_player_info(USERID, map_number=None):
     if pState.get("dartsHasFree") and last_claim > 0 and last_dart >= last_claim:
         pState["dartsHasFree"] = False
     _ensure_town_list(save)
+    _sync_global_level(save)
     # player
     map_idx = _clamp_map(save, map_number)
     player_info = {
