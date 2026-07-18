@@ -105,12 +105,46 @@ def test_player_info_includes_town_list():
     assert len(maps) == 1, f"expected one town for the test save, got {len(maps)}"
 
 
+def test_switch_to_own_second_town_no_500():
+    # Buying a second town then travelling to it sends get_player_info with
+    # user == own id and map=1. It must serve the own save's map 1 (not the
+    # neighbour path, which 500'd), so the game doesn't hang on the loading
+    # bar. Uses UID; give it a second town first via buy_map.
+    c = _client(logged_in_as=UID)
+    import sessions as _s
+    v = _s.session(UID)
+    v["maps"][0]["level"] = 50
+    v["maps"][0]["coins"] = 200000
+    if len(v["maps"]) < 2:
+        import command as _cmd
+        _cmd.do_command(UID, "buy_map", [1, 0, "t", 0])
+    r = c.post(API + "/get_player_info.php",
+               data={"USERID": UID, "user": UID, "map": "1",
+                     "user_key": "k", "language": "en", "client_id": "1"})
+    assert r.status_code == 200, f"loading own second town 500'd: {r.status_code}"
+    body = r.get_json()
+    assert body["result"] == "ok"
+    assert body["map"]["race"] == "t", "second town not served"
+    assert len(body["privateState"]["maps"]) == 2, "town list not updated to 2"
+
+
+def test_own_town_out_of_range_falls_back():
+    c = _client(logged_in_as=OTHER)  # OTHER has one town
+    r = c.post(API + "/get_player_info.php",
+               data={"USERID": OTHER, "user": OTHER, "map": "1",
+                     "user_key": "k", "language": "en", "client_id": "1"})
+    assert r.status_code == 200, "out-of-range own map 500'd instead of falling back"
+    assert r.get_json()["result"] == "ok"
+
+
 TESTS = [
     test_command_requires_login,
     test_command_ignores_posted_userid,
     test_get_player_info_requires_login,
     test_get_player_info_serves_session_village,
     test_player_info_includes_town_list,
+    test_switch_to_own_second_town_no_500,
+    test_own_town_out_of_range_falls_back,
 ]
 
 

@@ -15,7 +15,19 @@ def _ensure_town_list(save):
         {"r": m.get("race", "h")} for m in save["maps"]
     ]
 
-def get_player_info(USERID):
+
+def _clamp_map(save, map_number):
+    """A valid map index for this village. Switching towns (or clicking
+    "Town" with one town) requests map 1; an out-of-range index would 500
+    and, because the client's map-load error handler is a no-op, freeze the
+    game on the loading bar. Fall back to the default map."""
+    maps = save["maps"]
+    default = int(save["playerInfo"].get("default_map", 0) or 0)
+    if map_number is None or map_number < 0 or map_number >= len(maps):
+        map_number = default if 0 <= default < len(maps) else 0
+    return map_number
+
+def get_player_info(USERID, map_number=None):
     # Update last logged in
     ts_now = timestamp_now()
     save = session(USERID)
@@ -34,26 +46,31 @@ def get_player_info(USERID):
         pState["dartsHasFree"] = False
     _ensure_town_list(save)
     # player
+    map_idx = _clamp_map(save, map_number)
     player_info = {
         "result": "ok",
         "processed_errors": 0,
         "timestamp": ts_now,
-        "playerInfo": session(USERID)["playerInfo"],
-        "map": session(USERID)["maps"][0],
-        "privateState": session(USERID)["privateState"],
+        "playerInfo": save["playerInfo"],
+        "map": save["maps"][map_idx],
+        "privateState": save["privateState"],
         "neighbors": neighbors(USERID)
     }
     return player_info
 
 def get_neighbor_info(userid, map_number):
-    _ensure_town_list(neighbor_session(userid))
+    save = neighbor_session(userid)
+    if save is None:
+        return ({"result": "error", "error": "unknown_user"}, 404)
+    _ensure_town_list(save)
+    map_idx = _clamp_map(save, map_number)
     neighbor_info = {
         "result": "ok",
         "processed_errors": 0,
         "timestamp": timestamp_now(),
-        "playerInfo": neighbor_session(userid)["playerInfo"],
-        "map": neighbor_session(userid)["maps"][map_number],
-        "privateState": neighbor_session(userid)["privateState"],
+        "playerInfo": save["playerInfo"],
+        "map": save["maps"][map_idx],
+        "privateState": save["privateState"],
         "neighbors": neighbors(userid)
     }
     return neighbor_info

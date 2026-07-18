@@ -119,6 +119,19 @@ def new_village() -> str:
     print("Done.")
     return USERID
 
+def fresh_town_map(race: str) -> dict:
+    """A brand-new town map for a second-town purchase: a deep copy of the
+    initial town layout (town hall, houses, starter units, trees) with the
+    chosen race and a fresh build timestamp. Cloning the starter layout
+    guarantees the town loads and is playable; the player can rebuild it in
+    the chosen race's style."""
+    town = copy.deepcopy(__initial_village["maps"][0])
+    town["race"] = race
+    town["timestamp"] = timestamp_now()
+    town["idCurrentTreasure"] = 0
+    town["timestampLastTreasure"] = 0
+    return town
+
 # Access functions
 
 def all_saves_userid() -> list:

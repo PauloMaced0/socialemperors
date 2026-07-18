@@ -210,6 +210,59 @@ def test_buy_unit_with_cash(tmp):
     assert save["playerInfo"]["cash"] == 0, "cash price not charged"
 
 
+# --- buy second town -------------------------------------------------------
+
+def test_buy_map_creates_second_town_with_gold(tmp):
+    save = sessions.session(UID)
+    save["maps"][0]["level"] = 50
+    save["maps"][0]["coins"] = 150000
+    _do(Constant.CMD_BUY_MAP, [1, 0, "t", 0])  # gold-paid troll town
+    assert len(save["maps"]) == 2, "second town not created"
+    assert save["maps"][0]["coins"] == 50000, f"gold price not charged: {save['maps'][0]['coins']}"
+    assert save["maps"][1]["race"] == "t", "second town race wrong"
+    assert len(save["maps"][1]["items"]) > 0, "second town has no starter layout"
+    assert len(save["playerInfo"]["map_names"]) == 2, "town name not registered"
+    assert len(save["playerInfo"]["map_sizes"]) == 2, "town size not registered"
+
+
+def test_buy_map_with_cash(tmp):
+    save = sessions.session(UID)
+    save["maps"][0]["level"] = 50
+    save["playerInfo"]["cash"] = 30
+    _do(Constant.CMD_BUY_MAP, [1, 1, "t", 0])  # cash-paid
+    assert len(save["maps"]) == 2, "second town not created (cash)"
+    assert save["playerInfo"]["cash"] == 8, f"cash price not charged: {save['playerInfo']['cash']}"
+
+
+def test_buy_map_rejects_second_purchase(tmp):
+    save = sessions.session(UID)
+    save["maps"][0]["level"] = 50
+    save["maps"][0]["coins"] = 500000
+    _do(Constant.CMD_BUY_MAP, [1, 0, "t", 0])
+    coins_after_first = save["maps"][0]["coins"]
+    _do(Constant.CMD_BUY_MAP, [1, 0, "t", 0])  # already have two towns
+    assert len(save["maps"]) == 2, "third town created"
+    assert save["maps"][0]["coins"] == coins_after_first, "second purchase charged again"
+
+
+def test_buy_map_troll_needs_level_20(tmp):
+    save = sessions.session(UID)
+    save["maps"][0]["level"] = 10
+    save["maps"][0]["coins"] = 500000
+    _do(Constant.CMD_BUY_MAP, [1, 0, "t", 0])  # too low level for troll
+    assert len(save["maps"]) == 1, "troll town created below level 20"
+    assert save["maps"][0]["coins"] == 500000, "gold charged on rejected troll town"
+
+
+def test_buy_map_insufficient_gold_rejected(tmp):
+    save = sessions.session(UID)
+    save["maps"][0]["level"] = 50
+    save["maps"][0]["coins"] = 500
+    _do(Constant.CMD_BUY_MAP, [1, 0, "t", 0])
+    assert len(save["maps"]) == 1, "town created without paying"
+    assert save["maps"][0]["coins"] == 500, "gold changed on rejected purchase"
+
+
 # --- neighbour aliasing ------------------------------------------------------
 
 def test_neighbors_does_not_pollute_playerinfo(tmp):
@@ -245,6 +298,11 @@ TESTS = [
     test_collect_treasure_clamped_and_persisted,
     test_collect_treasure_stamps_kill_time,
     test_buy_unit_with_cash,
+    test_buy_map_creates_second_town_with_gold,
+    test_buy_map_with_cash,
+    test_buy_map_rejects_second_purchase,
+    test_buy_map_troll_needs_level_20,
+    test_buy_map_insufficient_gold_rejected,
     test_neighbors_does_not_pollute_playerinfo,
     test_loading_scrubs_leaked_playerinfo_fields,
 ]

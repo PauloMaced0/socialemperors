@@ -2,7 +2,7 @@ import json
 import os
 import datetime
 
-from sessions import session, save_session
+from sessions import session, save_session, fresh_town_map
 from get_game_config import get_game_config, get_level_from_xp, get_name_from_item_id, get_attribute_from_mission_id, get_xp_from_level, get_attribute_from_item_id, get_item_from_subcat_functional
 from constants import Constant
 from engine import apply_cost, apply_collect, apply_collect_xp, timestamp_now
@@ -955,6 +955,44 @@ def do_command(USERID, cmd, args):
         map = save["maps"][town_id]
         map["items"] += [[item_id, x, y, 0, timestamp_now(), 0]]
         print("Bought", str(get_name_from_item_id(item_id)), f"for {price} cash at ({x},{y}).")
+
+    elif cmd == Constant.CMD_BUY_MAP:
+        # Buy a second town. args: [count(=1), resource(0=gold, 1=cash),
+        # race("h"/"t"), currentTownID]. The client (PopupRaceSelector)
+        # deducts locally and immediately travels to town 1, so the server
+        # must actually create maps[1] or the follow-up load 500s and the
+        # game hangs on the loading bar.
+        resource = int(args[1])
+        race = str(args[2])
+        cur_town = int(args[3]) if len(args) > 3 else 0
+        TOWN_PRICE_GOLD, TOWN_PRICE_CASH, TROLL_MIN_LEVEL = 100000, 22, 20
+        if len(save["maps"]) >= 2:
+            print("Second town already owned - buy_map rejected.")
+            return
+        if race == "t" and int(save["maps"][cur_town].get("level", 1)) < TROLL_MIN_LEVEL:
+            print(f"Troll town needs level {TROLL_MIN_LEVEL} - buy_map rejected.")
+            return
+        if resource == 1:
+            cash = int(save["playerInfo"]["cash"])
+            if cash < TOWN_PRICE_CASH:
+                print(f"Not enough cash for second town ({cash}/{TOWN_PRICE_CASH}) - rejected.")
+                return
+            save["playerInfo"]["cash"] = cash - TOWN_PRICE_CASH
+        else:
+            coins = int(save["maps"][cur_town]["coins"])
+            if coins < TOWN_PRICE_GOLD:
+                print(f"Not enough gold for second town ({coins}/{TOWN_PRICE_GOLD}) - rejected.")
+                return
+            save["maps"][cur_town]["coins"] = coins - TOWN_PRICE_GOLD
+        # Create the town and register it so the client can list/switch to it.
+        save["maps"].append(fresh_town_map(race))
+        pi = save["playerInfo"]
+        base_name = str(pi["map_names"][0]) if pi.get("map_names") else "My Empire"
+        pi.setdefault("map_names", []).append(f"{base_name} II")
+        sizes = pi.setdefault("map_sizes", [])
+        first_size = sizes[0] if sizes else 1
+        sizes.append(first_size if first_size else 1)
+        print(f"Second town created (race '{race}'), paid via {'cash' if resource == 1 else 'gold'}.")
 
     else:
         print(f"Unhandled command '{cmd}' -> args", args)

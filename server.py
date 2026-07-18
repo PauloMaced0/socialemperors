@@ -282,9 +282,12 @@ def get_player_info_response():
 
     print(f"get_player_info: USERID: {USERID}. user: {user} --", request.values)
 
-    # Current Player
-    if user is None:
-        return (get_player_info(USERID), 200)
+    # Own player - no `user`, or `user` is the logged-in village itself
+    # (switching between your own towns sends your own id with map=1). Serve
+    # from the session save with the requested map so a second town loads
+    # with the player's own private state, not the neighbour view.
+    if user is None or user == USERID:
+        return (get_player_info(USERID, map), 200)
     # Arthur
     elif user == Constant.NEIGHBOUR_ARTHUR_GUINEVERE_1 \
     or user == Constant.NEIGHBOUR_ARTHUR_GUINEVERE_2 \
