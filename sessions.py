@@ -119,17 +119,39 @@ def new_village() -> str:
     print("Done.")
     return USERID
 
+# The town hall ITEM decides what the town trains (human hall id 26 trains
+# Peasants; Troll Hall I id 289 trains goblins), so a troll town must swap
+# the human starter buildings for their troll equivalents. Same subcat, tier
+# I. Pre-placed human units are dropped - a fresh town starts with no army
+# and the player trains the race's own units.
+_HUMAN_TO_TROLL_BUILDING = {
+    26: 289,   # Town Hall   -> Troll Hall I
+    1: 307,    # House I     -> Troll House I
+}
+_HUMAN_STARTER_UNITS = {512, 516}  # Light Knight, Light Archer
+
 def fresh_town_map(race: str) -> dict:
-    """A brand-new town map for a second-town purchase: a deep copy of the
-    initial town layout (town hall, houses, starter units, trees) with the
-    chosen race and a fresh build timestamp. Cloning the starter layout
-    guarantees the town loads and is playable; the player can rebuild it in
-    the chosen race's style."""
+    """A brand-new town map for a second-town purchase: the initial town
+    layout (town hall, houses, trees) with the chosen race. For a troll town
+    the human buildings are swapped for troll ones so the town hall actually
+    trains goblins, and the human starter units are dropped."""
     town = copy.deepcopy(__initial_village["maps"][0])
     town["race"] = race
     town["timestamp"] = timestamp_now()
     town["idCurrentTreasure"] = 0
-    town["timestampLastTreasure"] = 0
+    # Stamp "just cleared" so the enemy camp doesn't spawn immediately into a
+    # brand-new town that has no army yet; it arrives after the normal 4h.
+    town["timestampLastTreasure"] = timestamp_now()
+    if race == "t":
+        new_items = []
+        for item in town["items"]:
+            item_id = item[0]
+            if item_id in _HUMAN_STARTER_UNITS:
+                continue  # no pre-placed human army in a troll town
+            if item_id in _HUMAN_TO_TROLL_BUILDING:
+                item = [_HUMAN_TO_TROLL_BUILDING[item_id]] + item[1:]
+            new_items.append(item)
+        town["items"] = new_items
     return town
 
 # Access functions

@@ -220,7 +220,10 @@ def test_buy_map_creates_second_town_with_gold(tmp):
     assert len(save["maps"]) == 2, "second town not created"
     assert save["maps"][0]["coins"] == 50000, f"gold price not charged: {save['maps'][0]['coins']}"
     assert save["maps"][1]["race"] == "t", "second town race wrong"
-    assert len(save["maps"][1]["items"]) > 0, "second town has no starter layout"
+    town2_ids = [it[0] for it in save["maps"][1]["items"]]
+    assert 289 in town2_ids, "troll town missing Troll Hall (289) - would train villagers"
+    assert 26 not in town2_ids, "troll town still has the human Town Hall (26)"
+    assert 512 not in town2_ids and 516 not in town2_ids, "troll town kept human starter units"
     assert len(save["playerInfo"]["map_names"]) == 2, "town name not registered"
     assert len(save["playerInfo"]["map_sizes"]) == 2, "town size not registered"
 
