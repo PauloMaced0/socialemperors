@@ -114,6 +114,10 @@ def new_village() -> str:
     village["playerInfo"]["pid"] = USERID
     village["maps"][0]["timestamp"] = timestamp_now()
     village["privateState"]["dartsRandomSeed"] = abs(int((2**16 - 1) * random.random()))
+    # Numeric darts flag from the start (not JSON bool) - the old Flash client
+    # misreads a bare `false` as truthy. 0 = no unclaimed free game; the client
+    # claims the daily free game itself on a new local day (darts_new_free).
+    village["privateState"]["dartsHasFree"] = 0
     # Memory saves
     __saves[USERID] = village
     # Generate save file

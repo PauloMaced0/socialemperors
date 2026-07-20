@@ -60,7 +60,12 @@ def get_player_info(USERID, map_number=None):
     last_claim = int(pState.get("timeStampDartsNewFree", 0) or 0)
     last_dart = int(pState.get("timeStampLastDart", 0) or 0)
     if pState.get("dartsHasFree") and last_claim > 0 and last_dart >= last_claim:
-        pState["dartsHasFree"] = False
+        pState["dartsHasFree"] = 0
+    # Emit the flag as numeric 0/1, never a JSON bool: the old Flash client's
+    # JSON reader treats a bare `false` as a truthy object, so a consumed free
+    # game would still render the free "Play" button and let a reload throw
+    # again (charged as paid or rejected). Numeric flags read correctly.
+    pState["dartsHasFree"] = 1 if pState.get("dartsHasFree") else 0
     _ensure_town_list(save)
     _sync_global_level(save)
     # player
