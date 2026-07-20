@@ -16,7 +16,7 @@ from get_game_config import get_game_config, patch_game_config, refresh_darts_sc
 
 print (" [+] Loading players...")
 from get_player_info import get_player_info, get_neighbor_info
-from sessions import load_saved_villages, all_saves_userid, all_saves_info, save_info, new_village, fb_friends_str
+from sessions import load_saved_villages, all_saves_userid, all_saves_info, save_info, new_village
 from auth import has_password, set_password, check_password, change_password
 load_saved_villages()
 
@@ -30,6 +30,7 @@ from engine import timestamp_now
 from version import version_name
 from constants import Constant
 from quests import get_quest_map
+from tournaments import get_tournament_info, join_tournament_full, tournament_ok
 from bundle import ASSETS_DIR, STUB_DIR, TEMPLATES_DIR, BASE_DIR
 
 host = '127.0.0.1'
@@ -147,11 +148,12 @@ def play():
     if session['USERID'] not in all_saves_userid():
         return redirect("/")
     
-    USERID = session['USERID']
-    GAMEVERSION = session['GAMEVERSION']
-    print("[PLAY] USERID:", USERID)
-    print("[PLAY] GAMEVERSION:", GAMEVERSION)
-    return render_template("play.html", save_info=save_info(USERID), serverTime=timestamp_now(), friendsInfo=fb_friends_str(USERID), version=version_name, GAMEVERSION=GAMEVERSION, SERVERIP=host)
+    # Serve the game through bundled Ruffle (ruffle.html), never the browser
+    # extension path (play.html template). The extension mis-initialises the
+    # Flash top-bar HUD - blank labels and dead-click buttons - while bundled
+    # Ruffle renders it correctly. Redirect so every existing link to
+    # /play.html lands on the working player without duplicating the route.
+    return redirect("/ruffle.html")
 
 @app.route("/ruffle.html")
 def ruffle():
@@ -397,6 +399,45 @@ def get_continent_ranking_response():
         ]
     }
     return(response)
+
+## TOURNAMENTS
+
+TOURNAMENTS_BASE = "/dynamic.flash1.dev.socialpoint.es/appsfb/socialempiresdev/srvempires/tournaments"
+
+def tournament_request_data() -> dict:
+    # Tournament services post data as "<sha256 hash>;<json payload>", same
+    # envelope as command.php. The hash is not checked (the client runs with
+    # skiphash12341 set).
+    data_str = request.values.get('data', '')
+    if ';' not in data_str:
+        return {}
+    try:
+        return json.loads(data_str.split(';', 1)[1])
+    except json.JSONDecodeError:
+        return {}
+
+@app.route(TOURNAMENTS_BASE + "/get_tournament_info.php", methods=['POST'])
+def get_tournament_info_response():
+    print(f"get_tournament_info: USERID: {request.values.get('USERID')}.")
+    return {"data": get_tournament_info()}
+
+@app.route(TOURNAMENTS_BASE + "/join_tournament.php", methods=['POST'])
+@app.route(TOURNAMENTS_BASE + "/create_tournament.php", methods=['POST'])
+def join_tournament_response():
+    # No multiplayer matchmaking: answer "room full" with a refund marker so
+    # the client restores the entry fee it already subtracted.
+    data = tournament_request_data()
+    tournament_type_id = data.get("tournament_type_id", "")
+    print(f"join/create_tournament: USERID: {request.values.get('USERID')}, "
+          f"type: {tournament_type_id}. -> NOK (no matchmaking)")
+    return {"data": join_tournament_full(tournament_type_id)}
+
+@app.route(TOURNAMENTS_BASE + "/leave_tournament.php", methods=['POST'])
+@app.route(TOURNAMENTS_BASE + "/cancel_tournament.php", methods=['POST'])
+@app.route(TOURNAMENTS_BASE + "/clean_tournament.php", methods=['POST'])
+def leave_tournament_response():
+    print(f"leave/cancel/clean_tournament: USERID: {request.values.get('USERID')}.")
+    return {"data": tournament_ok()}
 
 
 ########

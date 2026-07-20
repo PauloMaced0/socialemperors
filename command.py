@@ -350,6 +350,23 @@ def do_command(USERID, cmd, args):
         save["playerInfo"]["cash"] = max(save["playerInfo"]["cash"] - 5, 0)#maybe make function for editing resources
         save["maps"][town_id]["coins"] += 2500
 
+    elif cmd == Constant.CMD_TOURNAMENT_SUBSTRACT_RESOURCES or cmd == Constant.CMD_TOURNAMENT_REFUND_RESOURCES:
+        # Tournament entry fee bookkeeping. The client subtracts the fee when
+        # joining/creating and refunds it when the service answers NOK (this
+        # server always does: no matchmaking). Mirror both so the save stays
+        # in sync with what the client shows. Coins live per town; the
+        # commands carry no town id, so main town stands in for the pair -
+        # subtract and refund are symmetric, the net effect is zero.
+        resource_type = args[0]  # "g" gold/coins, "c" cash
+        amount = int(float(args[1]))
+        if cmd == Constant.CMD_TOURNAMENT_SUBSTRACT_RESOURCES:
+            amount = -amount
+        print(f"Tournament {'refund' if amount >= 0 else 'fee'}: {abs(amount)} {resource_type}.")
+        if resource_type == "c":
+            save["playerInfo"]["cash"] = max(save["playerInfo"]["cash"] + amount, 0)
+        else:
+            save["maps"][0]["coins"] = max(save["maps"][0]["coins"] + amount, 0)
+
     elif cmd == Constant.CMD_STORE_ITEM or cmd == Constant.CMD_STORE_ITEM_FROMBUG:
         # store_item_frombug is the client relocating a colliding/out-of-bounds
         # item to storage; it uses the same [x, y, town, id] args as store_item.
@@ -396,7 +413,7 @@ def do_command(USERID, cmd, args):
             return
         print("Darts: claim daily free game.")
         pState["timeStampDartsNewFree"] = now
-        pState["dartsHasFree"] = True
+        pState["dartsHasFree"] = 1
 
     elif cmd == Constant.CMD_DARTS_RESET:
         # Sent when a new weekly prize set started (client checks its stored
@@ -414,7 +431,7 @@ def do_command(USERID, cmd, args):
         pState["timeStampDartsNewFree"] = now
         pState["dartsBalloonsShot"] = []
         pState["dartsRandomSeed"] = int(args[0]) if args else 0
-        pState["dartsHasFree"] = True
+        pState["dartsHasFree"] = 1
 
     elif cmd == Constant.CMD_DARTS_SHOOT_BALLOON:
         # The daily free game (claimed via darts_new_free) covers one throw;
@@ -427,7 +444,7 @@ def do_command(USERID, cmd, args):
         pState = save["privateState"]
         now = timestamp_now()
         if pState.get("dartsHasFree"):
-            pState["dartsHasFree"] = False
+            pState["dartsHasFree"] = 0
             pState["timeStampLastDart"] = now
             print("Darts: free daily throw.")
         else:

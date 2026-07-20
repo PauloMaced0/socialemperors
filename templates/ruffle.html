@@ -100,6 +100,13 @@
                     url: "http://{{SERVERIP}}:5050/default01.static.socialpointgames.com/static/socialempires/flash/SELoader.swf?swftoload=http://{{SERVERIP}}:5050/default01.static.socialpointgames.com/static/socialempires/flash/{{GAMEVERSION}}",
                     backgroundColor: "#669C2C",
                     allowScriptAccess: false,
+                    // Let the SWF's fullscreen button work: it sets
+                    // Stage.displayState = FULL_SCREEN, which Ruffle only
+                    // honors when allowFullscreen is enabled (default false).
+                    // play.html's <embed> had allowFullScreen="true"; this is
+                    // the JS-player equivalent, restored after the
+                    // play.html -> ruffle.html redirect.
+                    allowFullscreen: true,
                     autoplay: true,
                     // Perf: "low" disables Ruffle's bitmap smoothing / anti-
                     // aliasing, the biggest per-pixel cost when a big fight
