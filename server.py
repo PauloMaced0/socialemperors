@@ -33,8 +33,16 @@ from quests import get_quest_map
 from tournaments import get_tournament_info, join_tournament_full, tournament_ok
 from bundle import ASSETS_DIR, STUB_DIR, TEMPLATES_DIR, BASE_DIR
 
-host = '127.0.0.1'
-port = 5050
+# host    = address the server BINDS to (0.0.0.0 to accept LAN/Tailscale peers)
+# port    = listen port (also hard-coded as :5050 in the templates' asset URLs,
+#           so keep it 5050 unless you also change those)
+# serverip = address baked into the page's asset URLs; must be what CLIENTS
+#           reach the server on (e.g. the Pi's Tailscale IP), NOT 127.0.0.1,
+#           or a friend's browser fetches from its own machine and gets nothing.
+# Defaults preserve the old local-only behaviour; override via env on the Pi.
+host = os.environ.get('SE_BIND', '127.0.0.1')
+port = int(os.environ.get('SE_PORT', '5050'))
+serverip = os.environ.get('SE_SERVER_IP', '127.0.0.1')
 
 app = Flask(__name__, template_folder=TEMPLATES_DIR)
 
@@ -171,7 +179,7 @@ def ruffle():
     GAMEVERSION = session['GAMEVERSION']
     print("[RUFFLE] USERID:", USERID)
     print("[RUFFLE] GAMEVERSION:", GAMEVERSION)
-    return render_template("ruffle.html", save_info=save_info(USERID), serverTime=timestamp_now(), version=version_name, GAMEVERSION=GAMEVERSION, SERVERIP=host)
+    return render_template("ruffle.html", save_info=save_info(USERID), serverTime=timestamp_now(), version=version_name, GAMEVERSION=GAMEVERSION, SERVERIP=serverip)
 
 
 @app.route("/new.html")
