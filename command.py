@@ -1033,6 +1033,72 @@ def do_command(USERID, cmd, args):
         sizes.append(first_size if first_size else 1)
         print(f"Second town created (race '{race}'), paid via {'cash' if resource == 1 else 'gold'}.")
 
+    elif cmd == Constant.CMD_BAHAMUT_SUPREME_INVOCATION_TEMPLE_NEXT_STEP:
+        # Complete one of the 12 Supreme Bahamut Temple steps. The client
+        # deducts the cost locally then sends [json(data), stepIndex]; persist
+        # it so a reload can neither undo the contribution nor replay it.
+        # data is a resource cost {"g":n}/{"s":n}/{"w":n}/{"f":n}/{"c":n}/
+        # {"mana":n}, a dragon sacrifice {"u": dragonId} (the unit was already
+        # removed client-side), or {"collection": id}. templeStep is the list
+        # of completed step indices; timeStampTemple starts the 48h wait.
+        pState = save["privateState"]
+        steps = pState.setdefault("templeStep", [])
+        try:
+            data = json.loads(args[0]) if args and args[0] else {}
+            step = int(args[1])
+        except (ValueError, IndexError, TypeError):
+            print("Temple: malformed next_temple_step args", args)
+            return
+        if step in steps:
+            # Idempotent: a completed step is never charged or recorded twice
+            # (fixes double-submit granting the reward / spending resources
+            # more than once).
+            print(f"Temple: step {step} already done - ignored.")
+            return
+        default = int(save["playerInfo"].get("default_map", 0) or 0)
+        maps = save["maps"]
+        town = maps[default] if 0 <= default < len(maps) else maps[0]
+        pinfo = save["playerInfo"]
+        for currency, amount in data.items():
+            try:
+                amount = int(amount)
+            except (ValueError, TypeError):
+                continue  # "u"/"collection": consumed client-side, not a resource
+            if currency == "g":
+                town["coins"] = max(int(town.get("coins", 0)) - amount, 0)
+            elif currency == "w":
+                town["wood"] = max(int(town.get("wood", 0)) - amount, 0)
+            elif currency == "s":
+                town["stone"] = max(int(town.get("stone", 0)) - amount, 0)
+            elif currency == "f":
+                town["food"] = max(int(town.get("food", 0)) - amount, 0)
+            elif currency == "c":
+                pinfo["cash"] = max(int(pinfo["cash"]) - amount, 0)
+            elif currency == "mana":
+                pState["mana"] = max(int(pState.get("mana", 0)) - amount, 0)
+        steps.append(step)
+        pState["timeStampTemple"] = timestamp_now()
+        print(f"Temple: step {step} completed ({data}). {len(steps)}/12 done.")
+
+    elif cmd == Constant.CMD_BAHAMUT_SUPREME_INVOCATION_TEMPLE_BUY_TIME:
+        # Skip the active 48h inter-step wait for 5 cash. The client already
+        # zeroed timeStampTemple locally; mirror the charge and the reset so a
+        # reload can't restore the wait or the cash.
+        price = int(args[0]) if args else 5
+        pinfo = save["playerInfo"]
+        pinfo["cash"] = max(int(pinfo["cash"]) - price, 0)
+        save["privateState"]["timeStampTemple"] = 0
+        print(f"Temple: skipped step wait for {price} cash.")
+
+    elif cmd == Constant.CMD_BAHAMUT_SUPREME_INVOCATION_TEMPLE_RESET:
+        # Restart the temple (also fired right after the final Bahamut is
+        # granted, which is what makes the reward one-shot: clearing templeStep
+        # removes the completed state so it can't be claimed again).
+        pState = save["privateState"]
+        pState["templeStep"] = []
+        pState["timeStampTemple"] = 0
+        print("Temple: progress reset.")
+
     else:
         print(f"Unhandled command '{cmd}' -> args", args)
         _log_unhandled(USERID, cmd, args)

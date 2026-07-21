@@ -66,6 +66,13 @@ def get_player_info(USERID, map_number=None):
     # game would still render the free "Play" button and let a reload throw
     # again (charged as paid or rejected). Numeric flags read correctly.
     pState["dartsHasFree"] = 1 if pState.get("dartsHasFree") else 0
+    # Supreme Bahamut Temple: ensure the fields the client reads on load exist,
+    # so older saves get valid Temple state automatically (the client does
+    # Utils.inArray(step, privateState["templeStep"]) and would break on an
+    # undefined list). templeStep = completed step indices; timeStampTemple =
+    # last-step time that gates the 48h wait.
+    pState.setdefault("templeStep", [])
+    pState.setdefault("timeStampTemple", 0)
     _ensure_town_list(save)
     _sync_global_level(save)
     # player
