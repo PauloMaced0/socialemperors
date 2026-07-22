@@ -73,14 +73,16 @@ def get_player_info(USERID, map_number=None):
     # last-step time that gates the 48h wait.
     pState.setdefault("templeStep", [])
     pState.setdefault("timeStampTemple", 0)
-    # Player card name: playerInfo["name"] is a hardcoded "Emperor" on every
-    # save, so the player's own card always reads "Emperor". Show their real
-    # identity - the default town's name (same source the neighbour cards use).
+    # Player card name: playerInfo["name"] is the hardcoded default "Emperor"
+    # on player saves, so the own card reads "Emperor". When it's still that
+    # default, show the real identity - the default town's name. (Leave an
+    # already-personalised name alone.)
     pi = save["playerInfo"]
-    names = pi.get("map_names") or []
-    dm = int(pi.get("default_map", 0) or 0)
-    if 0 <= dm < len(names) and names[dm]:
-        pi["name"] = names[dm]
+    if not pi.get("name") or pi.get("name") == "Emperor":
+        names = pi.get("map_names") or []
+        dm = int(pi.get("default_map", 0) or 0)
+        if 0 <= dm < len(names) and names[dm]:
+            pi["name"] = names[dm]
     # Market "trades left today": the client shows MARKET_MAX_NUM_TRADES (20) -
     # map.numTradesDone. If the map lacks numTradesDone it's undefined, and with
     # no timestampLastTrade the 20h reset never fires, so it renders "NaN". Seed
