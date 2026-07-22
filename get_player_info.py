@@ -73,6 +73,14 @@ def get_player_info(USERID, map_number=None):
     # last-step time that gates the 48h wait.
     pState.setdefault("templeStep", [])
     pState.setdefault("timeStampTemple", 0)
+    # Player card name: playerInfo["name"] is a hardcoded "Emperor" on every
+    # save, so the player's own card always reads "Emperor". Show their real
+    # identity - the default town's name (same source the neighbour cards use).
+    pi = save["playerInfo"]
+    names = pi.get("map_names") or []
+    dm = int(pi.get("default_map", 0) or 0)
+    if 0 <= dm < len(names) and names[dm]:
+        pi["name"] = names[dm]
     _ensure_town_list(save)
     _sync_global_level(save)
     # player

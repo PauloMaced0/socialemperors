@@ -247,6 +247,19 @@ def fb_friends_str(USERID: str) -> list:
         friends += [frie]
     return friends
 
+def _display_name(vill: dict) -> str:
+    """The name shown on player/neighbour cards. playerInfo["name"] is a
+    hardcoded "Emperor" on every save (never personalised), so every card
+    reads "Emperor"; the real identity is the default town's name in
+    map_names. Fall back to the stored name only if map_names is absent."""
+    pi = vill["playerInfo"]
+    names = pi.get("map_names") or []
+    dm = int(pi.get("default_map", 0) or 0)
+    if 0 <= dm < len(names) and names[dm]:
+        return str(names[dm])
+    return pi.get("name") or "Emperor"
+
+
 def neighbors(USERID: str) -> list:
     neighbors = []
     # static villages
@@ -260,6 +273,7 @@ def neighbors(USERID: str) -> list:
         # Copy: mutating playerInfo in place leaks these transient fields
         # into the stored village and gets persisted on the next save.
         neigh = dict(vill["playerInfo"])
+        neigh["name"] = _display_name(vill)
         neigh["coins"] = vill["maps"][0]["coins"]
         neigh["xp"] = vill["maps"][0]["xp"]
         neigh["level"] = vill["maps"][0]["level"]
@@ -273,6 +287,7 @@ def neighbors(USERID: str) -> list:
         if vill["playerInfo"]["pid"] == USERID:
             continue
         neigh = dict(vill["playerInfo"])
+        neigh["name"] = _display_name(vill)
         neigh["coins"] = vill["maps"][0]["coins"]
         neigh["xp"] = vill["maps"][0]["xp"]
         neigh["level"] = vill["maps"][0]["level"]

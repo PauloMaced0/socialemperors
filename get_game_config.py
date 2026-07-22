@@ -99,6 +99,28 @@ def refresh_darts_schedule() -> None:
         wk = monday + datetime.timedelta(weeks=(i - last_real))
         e["start_date"] = wk.strftime("%Y-%m-%d 00:00:00")
 
+def fix_resource_upgrades() -> None:
+    """Restore the missing upgrade links on the human resource buildings.
+
+    The Mill, Gold Mine and Stone Mine tier chains ship with upgrades_to=0, so
+    the client shows no "upgrade" button on them - unlike Lumber Mill, which is
+    correctly linked I->II->III->IV. Wire each tier to the next by id so they
+    upgrade like every other building. (Troll equivalents are already linked.)
+    """
+    chains = [
+        ["5", "6", "7", "202"],     # Mill I -> II -> III -> IV
+        ["13", "14", "15", "203"],  # Gold Mine I -> II -> III -> IV
+        ["16", "17", "18", "204"],  # Stone Mine I -> II -> III -> IV
+    ]
+    by_id = {str(it.get("id")): it for it in __game_config.get("items", [])}
+    for chain in chains:
+        for lower, higher in zip(chain, chain[1:]):
+            it = by_id.get(lower)
+            if it is not None:
+                it["upgrades_to"] = higher
+
+fix_resource_upgrades()
+
 def get_game_config() -> dict:
     return __game_config
 
