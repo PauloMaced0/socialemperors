@@ -81,6 +81,14 @@ def get_player_info(USERID, map_number=None):
     dm = int(pi.get("default_map", 0) or 0)
     if 0 <= dm < len(names) and names[dm]:
         pi["name"] = names[dm]
+    # Market "trades left today": the client shows MARKET_MAX_NUM_TRADES (20) -
+    # map.numTradesDone. If the map lacks numTradesDone it's undefined, and with
+    # no timestampLastTrade the 20h reset never fires, so it renders "NaN". Seed
+    # both per town; timestampLastTrade=0 makes the client reset the counter to
+    # 0 on load (trades aren't persisted server-side yet).
+    for m in save["maps"]:
+        m.setdefault("numTradesDone", 0)
+        m.setdefault("timestampLastTrade", 0)
     _ensure_town_list(save)
     _sync_global_level(save)
     # player
