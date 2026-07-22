@@ -248,16 +248,24 @@ def fb_friends_str(USERID: str) -> list:
     return friends
 
 def _display_name(vill: dict) -> str:
-    """The name shown on player/neighbour cards. playerInfo["name"] is a
-    hardcoded "Emperor" on every save (never personalised), so every card
-    reads "Emperor"; the real identity is the default town's name in
-    map_names. Fall back to the stored name only if map_names is absent."""
+    """The name shown on player/neighbour cards.
+
+    Two kinds of village disagree on where the real name lives:
+      - Player saves keep playerInfo["name"] at the hardcoded default
+        "Emperor" and carry the real identity in map_names (the town name).
+      - Static neighbours (AcidCaos, Arthur) have a personalised
+        playerInfo["name"] but a generic map_names ("My Empire", "Boss").
+    So trust playerInfo["name"] when it's been personalised, and only fall
+    back to the default town's name when it's still the generic "Emperor"."""
     pi = vill["playerInfo"]
+    name = pi.get("name")
+    if name and name != "Emperor":
+        return str(name)
     names = pi.get("map_names") or []
     dm = int(pi.get("default_map", 0) or 0)
     if 0 <= dm < len(names) and names[dm]:
         return str(names[dm])
-    return pi.get("name") or "Emperor"
+    return name or "Emperor"
 
 
 def neighbors(USERID: str) -> list:
