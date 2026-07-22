@@ -1,0 +1,6 @@
+[
+	{ "op": "add", "path": "/localization_strings/-", "value": { "id": 1550, "name": "POPUP_DAILYBONUS_TITLE", "text": "Daily Bonus" } },
+	{ "op": "add", "path": "/localization_strings/-", "value": { "id": 1551, "name": "POPUP_DAILYBONUS_TODAY", "text": "Today" } },
+	{ "op": "add", "path": "/localization_strings/-", "value": { "id": 1552, "name": "POPUP_DAILYBONUS_TOMORROW", "text": "Tomorrow" } },
+	{ "op": "add", "path": "/localization_strings/-", "value": { "id": 1553, "name": "POPUP_DAILYBONUS_DESC", "text": "Come back every day for a bigger prize!" } }
+]
