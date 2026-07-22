@@ -16,7 +16,7 @@ from get_game_config import get_game_config, patch_game_config, refresh_darts_sc
 
 print (" [+] Loading players...")
 from get_player_info import get_player_info, get_neighbor_info
-from sessions import load_saved_villages, all_saves_userid, all_saves_info, save_info, new_village
+from sessions import load_saved_villages, all_saves_userid, all_saves_info, save_info, new_village, fb_friends_str
 from auth import has_password, set_password, check_password, change_password
 load_saved_villages()
 
@@ -179,7 +179,10 @@ def ruffle():
     GAMEVERSION = session['GAMEVERSION']
     print("[RUFFLE] USERID:", USERID)
     print("[RUFFLE] GAMEVERSION:", GAMEVERSION)
-    return render_template("ruffle.html", save_info=save_info(USERID), serverTime=timestamp_now(), version=version_name, GAMEVERSION=GAMEVERSION, SERVERIP=serverip)
+    # Real friends list (JSON) for the client's friendsInfo flashvar - names,
+    # levels and pics for neighbour cards and the "ask friends to help" box.
+    friends_json = json.dumps(fb_friends_str(USERID), separators=(",", ":"))
+    return render_template("ruffle.html", save_info=save_info(USERID), serverTime=timestamp_now(), version=version_name, GAMEVERSION=GAMEVERSION, SERVERIP=serverip, friendsInfo=friends_json)
 
 
 @app.route("/new.html")

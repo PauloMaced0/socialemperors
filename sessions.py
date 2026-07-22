@@ -218,9 +218,25 @@ def neighbor_session(USERID: str) -> dict:
     if USERID in __villages:
         return __villages[USERID]
 
+def _friend_entry(vill: dict) -> dict:
+    """One friendsInfo entry the client indexes by uid. The client reads
+    first_name/level/pic_square (friendsInfoMap[uid]) to label neighbour and
+    "ask friends to help" cards; without a name those cards render blank."""
+    pi = vill["playerInfo"]
+    default = int(pi.get("default_map", 0) or 0)
+    maps = vill.get("maps") or [{}]
+    m = maps[default] if 0 <= default < len(maps) else maps[0]
+    pic = pi.get("pic") or "/img/profile/1025.png"
+    return {
+        "uid": pi["pid"],
+        "first_name": _display_name(vill),
+        "pic_square": pic,
+        "level": m.get("level", 1),
+        "xp": m.get("xp", 0),
+    }
+
+
 def fb_friends_str(USERID: str) -> list:
-    DELETE_ME = [{"uid": "1111", "pic_square":"http://127.0.0.1:5050/img/profile/Paladin_Justiciero.jpg"},
-        {"uid": "aa_002", "pic_square":"/1025.png"}]
     friends = []
     # static villages
     for key in __villages:
@@ -230,21 +246,13 @@ def fb_friends_str(USERID: str) -> list:
         or vill["playerInfo"]["pid"] == Constant.NEIGHBOUR_ARTHUR_GUINEVERE_2 \
         or vill["playerInfo"]["pid"] == Constant.NEIGHBOUR_ARTHUR_GUINEVERE_3:
             continue
-        frie = {}
-        frie["uid"] = vill["playerInfo"]["pid"]
-        frie["pic_square"] = vill["playerInfo"]["pic"]
-        if not frie["pic_square"]: frie["pic_square"] = "/img/profile/1025.png"
-        friends += [frie]
+        friends += [_friend_entry(vill)]
     # other players
     for key in __saves:
         vill = __saves[key]
         if vill["playerInfo"]["pid"] == USERID:
             continue
-        frie = {}
-        frie["uid"] = vill["playerInfo"]["pid"]
-        frie["pic_square"] = vill["playerInfo"]["pic"]
-        if not frie["pic_square"]: frie["pic_square"] = "/img/profile/1025.png"
-        friends += [frie]
+        friends += [_friend_entry(vill)]
     return friends
 
 def _display_name(vill: dict) -> str:
