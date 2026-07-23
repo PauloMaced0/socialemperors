@@ -68,6 +68,30 @@ def _grant_resource(save, rtype, amount):
         save["playerInfo"]["cash"] = int(save["playerInfo"]["cash"]) + amount
 
 
+def _grant_assist_reward(save, count):
+    """Credit the neighbour-assist reward the client applies on completion.
+
+    ASSIST_REWARD_GOLD/XP come from the game globals; `count` is the number of
+    assisted buildings (1 for the single-bar flow). Gold and XP go to the
+    player's default town, matching the client's local Base.Player.adjustStats.
+    """
+    count = max(0, int(count))
+    if count <= 0:
+        return
+    globals_cfg = get_game_config().get("globals", {})
+    try:
+        gold = int(globals_cfg.get("ASSIST_REWARD_GOLD", 10) or 0)
+        xp = int(globals_cfg.get("ASSIST_REWARD_XP", 3) or 0)
+    except (TypeError, ValueError):
+        gold, xp = 10, 3
+    town_id = int(save["playerInfo"].get("default_map", 0) or 0)
+    if town_id < 0 or town_id >= len(save["maps"]):
+        town_id = 0
+    town = save["maps"][town_id]
+    town["coins"] = int(town.get("coins", 0) or 0) + gold * count
+    town["xp"] = int(town.get("xp", 0) or 0) + xp * count
+
+
 def _find_map_item(town, item_id, x, y):
     return next((
         item for item in town.get("items", [])
@@ -1533,6 +1557,36 @@ def do_command(USERID, cmd, args):
                     map["universAttackWin"] = []
                 if int(posicion) not in map["universAttackWin"]:
                     map["universAttackWin"].append(int(posicion))
+
+    elif cmd == Constant.CMD_ASSIST_NEIGHBOUR:
+        # [friend_pid, lastIdAssist, town]. The player assisted a neighbour's
+        # building. FauxBar2 credits ASSIST_REWARD_GOLD + ASSIST_REWARD_XP
+        # locally on completion, so persist the same reward or it is lost on
+        # reload. (Small fixed reward; the client gates how often you assist.)
+        _grant_assist_reward(save, 1)
+        return True
+
+    elif cmd == Constant.CMD_ASSIST_NEIGHBOUR_NEW:
+        # [friend_id, 0, json([[tx,ty,building_id], ...])]. Batched neighbour
+        # assists collected while visiting. The reward scales with the number
+        # of buildings helped, bounded so a malformed batch cannot farm.
+        clicks = []
+        try:
+            if len(args) > 2:
+                clicks = json.loads(args[2])
+        except (ValueError, TypeError):
+            clicks = []
+        count = len(clicks) if isinstance(clicks, list) else 0
+        if count > 0:
+            _grant_assist_reward(save, min(count, 30))
+        return True
+
+    elif cmd == Constant.CMD_ASSIST_RECEIVE:
+        # [town, building_id]. Acknowledge an ally-cart reward box. The box's
+        # resource amount is not carried in the command (the flying token is a
+        # client-side visual), so no server grant is applied; handling the
+        # command keeps it from being dropped as unhandled.
+        return True
 
     elif cmd == Constant.CMD_HIRE_WORKER:
         # Local replacement for the original Facebook callback:

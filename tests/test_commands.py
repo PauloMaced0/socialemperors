@@ -345,6 +345,27 @@ def test_market_trade_requires_open_market(tmp):
     assert ok is True and m["wood"] == 100, f"opened market trade failed (wood={m['wood']})"
 
 
+def test_assist_neighbour_grants_reward(tmp):
+    # Assisting a neighbour credits ASSIST_REWARD_GOLD + ASSIST_REWARD_XP; the
+    # command must persist it (client applies it locally). Batched _new scales
+    # with the number of helped buildings. assist_receive is acknowledged only.
+    from get_game_config import get_game_config
+    g = get_game_config()["globals"]
+    gold = int(g.get("ASSIST_REWARD_GOLD", 10))
+    xp = int(g.get("ASSIST_REWARD_XP", 3))
+    save = sessions.session(UID)
+    m = save["maps"][0]
+    m["coins"] = 0
+    m["xp"] = 0
+    assert command.do_command(UID, Constant.CMD_ASSIST_NEIGHBOUR, ["9999", 1, 0]) is True
+    assert m["coins"] == gold and m["xp"] == xp, "single assist reward not granted"
+    clicks = json.dumps([[1, 1, 5], [2, 2, 6], [3, 3, 7]])  # 3 buildings
+    assert command.do_command(UID, Constant.CMD_ASSIST_NEIGHBOUR_NEW, ["9999", 0, clicks]) is True
+    assert m["coins"] == gold * 4 and m["xp"] == xp * 4, "batched assist reward wrong"
+    assert command.do_command(UID, Constant.CMD_ASSIST_RECEIVE, [0, 224]) is True
+    assert m["coins"] == gold * 4, "assist_receive should not grant an unknown amount"
+
+
 def test_place_gift_uses_town_arg_not_frame(tmp):
     # Client layout for both place_gift and place_stored_item is
     # [id, x, y, frame, townID]. place_gift wrongly read town from args[3]
@@ -405,6 +426,7 @@ TESTS = [
     test_save_info_level_derived_from_xp,
     test_static_scenarios_are_not_social_players,
     test_collect_gated_on_opened_social_mine,
+    test_assist_neighbour_grants_reward,
     test_place_gift_uses_town_arg_not_frame,
     test_market_trade_requires_open_market,
     test_market_II_needs_no_staff,
