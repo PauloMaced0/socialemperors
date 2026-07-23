@@ -352,6 +352,30 @@ def test_mini_fireball_combat_asset_served():
         "miniFireball2 route did not return a valid SWF"
 
 
+def test_public_player_profile_requires_login():
+    c = _client()
+    r = c.get(API + "/get_public_player_info.php", query_string={"USERID": OTHER})
+    assert r.status_code == 403, f"anonymous profile read accepted: {r.status_code}"
+
+
+def test_public_player_profile_returns_stats():
+    # Give OTHER some persisted PvP stats, then read their public profile as UID.
+    other = sessions.session(OTHER)
+    other["playerInfo"]["map_names"] = ["Rival Empire"]
+    other["privateState"]["honor"] = 42
+    other["privateState"]["attacksWon"] = 3
+    other["privateState"]["attacksLost"] = 1
+    c = _client(logged_in_as=UID)
+    r = c.get(API + "/get_public_player_info.php", query_string={"USERID": OTHER})
+    assert r.status_code == 200, f"profile read rejected: {r.status_code}"
+    body = json.loads(r.data)
+    assert body["pid"] == OTHER
+    assert body["name"] == "Rival Empire", f"empire name wrong: {body.get('name')}"
+    assert body["honor_points"] == 42, "honor_points not reflected"
+    assert body["attacks_won"] == 3 and body["attacks_lost"] == 1, "battle stats not reflected"
+    assert isinstance(body.get("map_names"), list) and body["map_names"], "map_names missing"
+
+
 TESTS = [
     test_command_requires_login,
     test_command_ignores_posted_userid,
@@ -372,6 +396,8 @@ TESTS = [
     test_missing_asset_is_cached,
     test_present_asset_served,
     test_mini_fireball_combat_asset_served,
+    test_public_player_profile_requires_login,
+    test_public_player_profile_returns_stats,
 ]
 
 
