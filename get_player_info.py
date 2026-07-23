@@ -1,5 +1,11 @@
-from sessions import session, neighbor_session, neighbors
+import copy
+import datetime
+
+from sessions import (
+    session, neighbor_session, neighbors, refresh_enemy_camp_timer,
+)
 from engine import timestamp_now
+from constants import Constant
 
 
 def _ensure_town_list(save):
@@ -33,6 +39,36 @@ def _sync_global_level(save):
             town["xp"], town["level"] = xp, level
 
 
+def _same_local_day(ts_a, ts_b):
+    if int(ts_a or 0) <= 0 or int(ts_b or 0) <= 0:
+        return False
+    return datetime.date.fromtimestamp(int(ts_a)) == datetime.date.fromtimestamp(int(ts_b))
+
+
+def _refresh_daily_animal_budget(save, now):
+    """Reset the client's per-subcategory spawn allowance once per local day.
+
+    Existing animals remain persisted map items, so the client only creates
+    animals which are actually missing, capped by ANIMALS_PER_DAY.
+    """
+    pstate = save["privateState"]
+    last = int(pstate.get("timestampAnimalsReset", 0) or 0)
+    if last > 0 and not _same_local_day(last, now):
+        pstate["arrayAnimals"] = {}
+    pstate.setdefault("arrayAnimals", {})
+    pstate["timestampAnimalsReset"] = int(now)
+
+
+def _sync_natural_resource_reload_marker(save, map_idx):
+    """Tell the patched SWF whether wild resources were already generated."""
+    animals = save["privateState"].setdefault("arrayAnimals", {})
+    marker = str(Constant.SUBCATFUNC_RESOURCE_REGEN)
+    if int(save["maps"][map_idx].get("naturalResourcesInitialized", 0) or 0):
+        animals[marker] = 1
+    else:
+        animals.pop(marker, None)
+
+
 def _clamp_map(save, map_number):
     """A valid map index for this village. Switching towns (or clicking
     "Town" with one town) requests map 1; an out-of-range index would 500
@@ -48,6 +84,7 @@ def get_player_info(USERID, map_number=None):
     # Update last logged in
     ts_now = timestamp_now()
     save = session(USERID)
+    _refresh_daily_animal_budget(save, ts_now)
     save["playerInfo"]["last_logged_in"] = ts_now
     # dartsHasFree means "free game claimed (darts_new_free) but not yet
     # thrown". The client reads it at login and, on a new local day, claims a
@@ -60,12 +97,7 @@ def get_player_info(USERID, map_number=None):
     last_claim = int(pState.get("timeStampDartsNewFree", 0) or 0)
     last_dart = int(pState.get("timeStampLastDart", 0) or 0)
     if pState.get("dartsHasFree") and last_claim > 0 and last_dart >= last_claim:
-        pState["dartsHasFree"] = 0
-    # Emit the flag as numeric 0/1, never a JSON bool: the old Flash client's
-    # JSON reader treats a bare `false` as a truthy object, so a consumed free
-    # game would still render the free "Play" button and let a reload throw
-    # again (charged as paid or rejected). Numeric flags read correctly.
-    pState["dartsHasFree"] = 1 if pState.get("dartsHasFree") else 0
+        pState["dartsHasFree"] = False
     # Supreme Bahamut Temple: ensure the fields the client reads on load exist,
     # so older saves get valid Temple state automatically (the client does
     # Utils.inArray(step, privateState["templeStep"]) and would break on an
@@ -83,25 +115,50 @@ def get_player_info(USERID, map_number=None):
         dm = int(pi.get("default_map", 0) or 0)
         if 0 <= dm < len(names) and names[dm]:
             pi["name"] = names[dm]
-    # Market "trades left today": the client shows MARKET_MAX_NUM_TRADES (20) -
-    # map.numTradesDone. If the map lacks numTradesDone it's undefined, and with
-    # no timestampLastTrade the 20h reset never fires, so it renders "NaN". Seed
-    # both per town; timestampLastTrade=0 makes the client reset the counter to
-    # 0 on load (trades aren't persisted server-side yet).
+    # Market state is a 20-hour period in the Flash client.
     for m in save["maps"]:
         m.setdefault("numTradesDone", 0)
         m.setdefault("timestampLastTrade", 0)
+        m.setdefault("resourcesTraded", {})
+        m.setdefault("resourceAlliesMarket", "n")
+        # Unit Warehouse state is per-town. Older/new saves omitted these
+        # fields, which made the client show zero slots and forget stored units
+        # after refresh.
+        m.setdefault("warehouseAditionalCapacitySingle", 0)
+        m.setdefault("warehousedUnits", {})
+        if (
+            int(m.get("warehouseAditionalCapacitySingle", 0) or 0) < 1
+            and any(
+                item
+                and int(item[0]) == Constant.ID_BUILDING_UNIT_WAREHOUSE
+                for item in m.get("items", [])
+            )
+        ):
+            # The building includes its first slot. The 2-cash action buys
+            # one *additional* slot, rather than activating a 20-cash shell.
+            m["warehouseAditionalCapacitySingle"] = 1
+        last_trade = int(m.get("timestampLastTrade", 0) or 0)
+        if last_trade and ts_now - last_trade >= 20 * 3600:
+            m["numTradesDone"] = 0
+            m["resourcesTraded"] = {}
+            m["timestampLastTrade"] = 0
     _ensure_town_list(save)
     _sync_global_level(save)
     # player
     map_idx = _clamp_map(save, map_number)
+    _sync_natural_resource_reload_marker(save, map_idx)
+    refresh_enemy_camp_timer(save["maps"][map_idx], ts_now)
+    response_pstate = copy.deepcopy(pState)
+    # The old Flash JSON reader treats a bare false as a truthy object. Keep
+    # Python/save state boolean, but emit this protocol flag as numeric 0/1.
+    response_pstate["dartsHasFree"] = 1 if pState.get("dartsHasFree") else 0
     player_info = {
         "result": "ok",
         "processed_errors": 0,
         "timestamp": ts_now,
         "playerInfo": save["playerInfo"],
         "map": save["maps"][map_idx],
-        "privateState": save["privateState"],
+        "privateState": response_pstate,
         "neighbors": neighbors(USERID)
     }
     return player_info

@@ -35,6 +35,166 @@ __saves = {}  # ALL saved villages
 
 __initial_village = json.load(open(os.path.join(VILLAGES_DIR, "initial.json")))
 
+# Enemy encounters are created by the Flash client and sent back as ordinary
+# free ``buy`` commands. These objective-only buildings identify a saved,
+# still-active camp.
+_ENEMY_CAMP_MARKER_IDS = frozenset({
+    Constant.ID_BUILDING_TREASURE_CHEST,
+    Constant.ID_BUILDING_PRISONER_PRINCESS,
+    Constant.ID_BUILDING_PRISONER_VILLAGERS,
+    Constant.ID_BUILDING_PRISONER_ARTHUR,
+    Constant.ID_BUILDING_PRISONER_ARCHERS,
+    Constant.ID_BUILDING_PRISONER_REBEL_TROLL,
+    Constant.ID_BUILDING_POWER_GEM,
+    Constant.ID_BUILDING_STATUE_GOLEM,
+    Constant.ID_BUILDING_PRISONER_KIDNAPPED_UNITS,
+    Constant.ID_BUILDING_TREASURE_TOTEM,
+    Constant.ID_BUILDING_TROLL_HUT,
+    Constant.ID_BUILDING_TROLL_CAVE,
+})
+
+_NATURAL_RESOURCE_IDS = frozenset({
+    Constant.ID_BUILDING_TREE_1,
+    Constant.ID_BUILDING_TREE_2,
+    Constant.ID_BUILDING_TREE_3,
+    Constant.ID_BUILDING_STONE_1,
+    Constant.ID_BUILDING_STONE_2,
+    Constant.ID_BUILDING_STONE_3,
+    Constant.ID_BUILDING_STONE_4,
+    Constant.ID_BUILDING_GOLD_1,
+    Constant.ID_BUILDING_GOLD_2,
+    Constant.ID_BUILDING_GOLD_3,
+    Constant.ID_BUILDING_GOLD_4,
+})
+
+_DEPLETED_RESOURCE_PLACEHOLDER_IDS = frozenset({
+    Constant.ID_BUILDING_REGEN_GOLD,
+    Constant.ID_BUILDING_REGEN_STONE,
+})
+
+
+def is_enemy_camp_marker(item_id: int) -> bool:
+    return int(item_id) in _ENEMY_CAMP_MARKER_IDS
+
+
+def is_natural_resource(item_id: int) -> bool:
+    return int(item_id) in _NATURAL_RESOURCE_IDS
+
+
+def is_depleted_resource_placeholder(item_id: int) -> bool:
+    return int(item_id) in _DEPLETED_RESOURCE_PLACEHOLDER_IDS
+
+
+def mark_enemy_camp_active(town: dict, now: int = None) -> None:
+    """Keep the client respawn gate closed while a saved camp is alive."""
+    town["enemyCampActive"] = 1
+    town["timestampLastTreasure"] = int(timestamp_now() if now is None else now)
+
+
+def refresh_enemy_camp_timer(town: dict, now: int) -> None:
+    """A live saved camp must not be replaced at a new random position."""
+    if int(town.get("enemyCampActive", 0) or 0):
+        town["timestampLastTreasure"] = int(now)
+
+
+def _repair_active_enemy_camps(save: dict) -> bool:
+    """Infer active state for saves made before enemyCampActive existed."""
+    changed = False
+    for town in save.get("maps", []):
+        if "enemyCampActive" in town:
+            continue
+        if any(is_enemy_camp_marker(item[0])
+               for item in town.get("items", []) if item):
+            mark_enemy_camp_active(town)
+            changed = True
+        else:
+            town["enemyCampActive"] = 0
+            changed = True
+    return changed
+
+
+def _repair_natural_resource_state(save: dict) -> bool:
+    """Remove obsolete stone/gold regrowth objects and recognize old maps."""
+    changed = False
+    deposit_ids = {
+        Constant.ID_BUILDING_STONE_1, Constant.ID_BUILDING_STONE_2,
+        Constant.ID_BUILDING_STONE_3, Constant.ID_BUILDING_STONE_4,
+        Constant.ID_BUILDING_GOLD_1, Constant.ID_BUILDING_GOLD_2,
+        Constant.ID_BUILDING_GOLD_3, Constant.ID_BUILDING_GOLD_4,
+    }
+    for town in save.get("maps", []):
+        items = town.get("items", [])
+        had_placeholder = any(
+            is_depleted_resource_placeholder(item[0]) for item in items if item
+        )
+        if had_placeholder:
+            town["items"] = [
+                item for item in items
+                if item and not is_depleted_resource_placeholder(item[0])
+            ]
+            changed = True
+        if ("naturalResourcesInitialized" not in town
+                and (had_placeholder or any(
+                    int(item[0]) in deposit_ids
+                    for item in town.get("items", []) if item
+                ))):
+            town["naturalResourcesInitialized"] = 1
+            changed = True
+    return changed
+
+
+def _repair_unit_warehouse_state(save: dict) -> bool:
+    """Normalize old/missing Unit Warehouse fields without dropping units."""
+    changed = False
+    for town in save.get("maps", []):
+        try:
+            capacity = max(0, int(
+                town.get("warehouseAditionalCapacitySingle", 0) or 0
+            ))
+        except (TypeError, ValueError):
+            capacity = 0
+        if town.get("warehouseAditionalCapacitySingle") != capacity:
+            town["warehouseAditionalCapacitySingle"] = capacity
+            changed = True
+
+        raw_units = town.get("warehousedUnits", {})
+        if isinstance(raw_units, dict):
+            units = {}
+            for raw_id, raw_count in raw_units.items():
+                try:
+                    unit_id = str(int(raw_id))
+                    count = int(raw_count)
+                except (TypeError, ValueError):
+                    continue
+                if count > 0:
+                    units[unit_id] = count
+        elif isinstance(raw_units, list):
+            units = {}
+            for raw_id in raw_units:
+                try:
+                    unit_id = str(int(raw_id))
+                except (TypeError, ValueError):
+                    continue
+                units[unit_id] = units.get(unit_id, 0) + 1
+        else:
+            units = {}
+        if "warehousedUnits" not in town or raw_units != units:
+            town["warehousedUnits"] = units
+            changed = True
+        if (
+            capacity < 1
+            and any(
+                item
+                and int(item[0]) == Constant.ID_BUILDING_UNIT_WAREHOUSE
+                for item in town.get("items", [])
+            )
+        ):
+            # A newly purchased Warehouse includes one slot; later slots cost
+            # the configured 2 cash each.
+            town["warehouseAditionalCapacitySingle"] = 1
+            changed = True
+    return changed
+
 # Load saved villages
 
 def load_saved_villages():
@@ -97,6 +257,12 @@ def load_saved_villages():
         modified = migrate_loaded_save(save) # check save version for migration
         if _repair_broken_troll_towns(save):
             modified = True
+        if _repair_active_enemy_camps(save):
+            modified = True
+        if _repair_natural_resource_state(save):
+            modified = True
+        if _repair_unit_warehouse_state(save):
+            modified = True
         if modified:
             save_session(USERID)
     
@@ -145,6 +311,7 @@ def fresh_town_map(race: str) -> dict:
     town["race"] = race
     town["timestamp"] = timestamp_now()
     town["idCurrentTreasure"] = 0
+    town["enemyCampActive"] = 0
     # Stamp "just cleared" so the enemy camp doesn't spawn immediately into a
     # brand-new town that has no army yet; it arrives after the normal 4h.
     town["timestampLastTreasure"] = timestamp_now()

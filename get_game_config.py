@@ -100,17 +100,23 @@ def refresh_darts_schedule() -> None:
         e["start_date"] = wk.strftime("%Y-%m-%d 00:00:00")
 
 def fix_resource_upgrades() -> None:
-    """Restore the missing upgrade links on the human resource buildings.
+    """Repair broken resource-building progression in the bundled config.
 
     The Mill, Gold Mine and Stone Mine tier chains ship with upgrades_to=0, so
     the client shows no "upgrade" button on them - unlike Lumber Mill, which is
     correctly linked I->II->III->IV. Wire each tier to the next by id so they
     upgrade like every other building. (Troll equivalents are already linked.)
+
+    The human crop chain is also out of order: Eggplant Field points back to
+    the weaker level-1 Farm Land. Its intended order follows both unlock level
+    and yield. Finally, Troll Mill II accidentally costs zero instead of the
+    same 200 wood as the human tier-II mill.
     """
     chains = [
         ["5", "6", "7", "202"],     # Mill I -> II -> III -> IV
         ["13", "14", "15", "203"],  # Gold Mine I -> II -> III -> IV
         ["16", "17", "18", "204"],  # Stone Mine I -> II -> III -> IV
+        ["10", "8", "9", "200", "201"],  # Farm -> Pumpkin -> Eggplant -> Carrot -> Watermelon
     ]
     by_id = {str(it.get("id")): it for it in __game_config.get("items", [])}
     for chain in chains:
@@ -118,6 +124,9 @@ def fix_resource_upgrades() -> None:
             it = by_id.get(lower)
             if it is not None:
                 it["upgrades_to"] = higher
+    troll_mill_ii = by_id.get("301")
+    if troll_mill_ii is not None:
+        troll_mill_ii["cost"] = "200"
 
 fix_resource_upgrades()
 

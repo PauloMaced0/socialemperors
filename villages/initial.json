@@ -29,11 +29,17 @@
             "skin": 0,
             "idCurrentTreasure": 0,
             "timestampLastTreasure": 0,
+            "enemyCampActive": 0,
             "resourcesTraded": {},
+            "resourceAlliesMarket": "n",
+            "numTradesDone": 0,
+            "timestampLastTrade": 0,
             "receivedAssists": {},
             "increasedPopulation": 0,
             "expirableUnitsTime": {},
             "universAttackWin": [],
+            "warehouseAditionalCapacitySingle": 0,
+            "warehousedUnits": {},
             "questTimes": [],
             "lastQuestTimes": [],
             "__#__ITEMS_hint": ["item_id", "x", "y", "orientation", "collected_at_timestamp", "level", "units_array []", "attributes_dict {}"],
@@ -107,6 +113,7 @@
             "tournament": null
         },
         "arrayAnimals": {},
+        "timestampAnimalsReset": 0,
         "strategy": 8,
         "survivalMaps": {
             "100000035": {

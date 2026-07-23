@@ -1,8 +1,13 @@
 import json
 import os
 import datetime
+import math
 
-from sessions import session, save_session, fresh_town_map
+from sessions import (
+    session, save_session, fresh_town_map,
+    is_enemy_camp_marker, mark_enemy_camp_active,
+    is_natural_resource, is_depleted_resource_placeholder,
+)
 from get_game_config import get_game_config, get_level_from_xp, get_name_from_item_id, get_attribute_from_mission_id, get_xp_from_level, get_attribute_from_item_id, get_item_from_subcat_functional
 from constants import Constant
 from engine import apply_cost, apply_collect, apply_collect_xp, timestamp_now
@@ -63,6 +68,110 @@ def _grant_resource(save, rtype, amount):
         save["playerInfo"]["cash"] = int(save["playerInfo"]["cash"]) + amount
 
 
+def _find_map_item(town, item_id, x, y):
+    return next((
+        item for item in town.get("items", [])
+        if item and int(item[0]) == int(item_id)
+        and item[1] == x and item[2] == y
+    ), None)
+
+
+def _item_attrs(item):
+    """Return the persisted item attributes object, creating missing slots."""
+    while len(item) < 6:
+        item.append(0)
+    if len(item) < 7:
+        item.append([])
+    if len(item) < 8:
+        item.append({})
+    elif not isinstance(item[7], dict):
+        item[7] = {}
+    return item[7]
+
+
+def _social_item(item_id):
+    return next((
+        social for social in get_game_config().get("social_items", [])
+        if int(social.get("id", -1)) == int(item_id)
+    ), None)
+
+
+def _social_worker_count(social):
+    workers = str(social.get("workers", "") or "")
+    return len([worker for worker in workers.split(",") if worker])
+
+
+def _unit_warehouse_state(town):
+    """Return normalized Unit Warehouse capacity and unit-count mapping.
+
+    The Flash client expects ``warehousedUnits`` to be an object whose keys
+    are unit ids and values are counts. Some original/sample saves use an
+    empty array instead, so accept that legacy representation too.
+    """
+    try:
+        capacity = max(0, int(
+            town.get("warehouseAditionalCapacitySingle", 0) or 0
+        ))
+    except (TypeError, ValueError):
+        capacity = 0
+
+    raw_units = town.get("warehousedUnits", {})
+    if isinstance(raw_units, list):
+        # An empty list is common in old saves. If a non-empty legacy list is
+        # encountered, treat it as a list of unit ids rather than losing it.
+        units = {}
+        for raw_id in raw_units:
+            try:
+                unit_id = str(int(raw_id))
+            except (TypeError, ValueError):
+                continue
+            units[unit_id] = units.get(unit_id, 0) + 1
+    elif isinstance(raw_units, dict):
+        units = {}
+        for raw_id, raw_count in raw_units.items():
+            try:
+                unit_id = str(int(raw_id))
+                count = int(raw_count)
+            except (TypeError, ValueError):
+                continue
+            if count > 0:
+                units[unit_id] = count
+    else:
+        units = {}
+
+    town["warehouseAditionalCapacitySingle"] = capacity
+    town["warehousedUnits"] = units
+    return capacity, units
+
+
+def _has_unit_warehouse(town):
+    return any(
+        item and int(item[0]) == Constant.ID_BUILDING_UNIT_WAREHOUSE
+        for item in town.get("items", [])
+    )
+
+
+def _initialize_unit_warehouse(town):
+    """A purchased/placed Warehouse includes its first usable unit slot."""
+    capacity, units = _unit_warehouse_state(town)
+    if _has_unit_warehouse(town) and capacity < 1:
+        capacity = 1
+        town["warehouseAditionalCapacitySingle"] = capacity
+    return capacity, units
+
+
+def _add_gifts(save, item_id, count=1):
+    """Add item counts to the client's sparse, id-indexed storage array."""
+    item_id = int(item_id)
+    count = int(count)
+    if item_id < 0 or count <= 0:
+        return
+    gifts = save["privateState"]["gifts"]
+    while len(gifts) <= item_id:
+        gifts.append(0)
+    gifts[item_id] += count
+
+
 def _log_unhandled(USERID, cmd, args):
     "Append an unimplemented command's payload for later implementation."
     try:
@@ -90,17 +199,55 @@ def command(USERID, data):
     tries = data["tries"]
     publishActions = data["publishActions"]
     commands = data["commands"]
+    initializing_resource_towns = set()
     
     try:
-        for i, comm in enumerate(commands):
+        i = 0
+        while i < len(commands):
+            comm = commands[i]
             cmd = comm["cmd"]
             args = comm["args"]
+
+            # The client reports the initial wild trees/stone/gold as one
+            # batch of free buys. Accept that batch once per town; later loads
+            # must not repopulate harvested deposits at random coordinates.
+            if (cmd == Constant.CMD_BUY and len(args) >= 6 and bool(args[5])
+                    and is_natural_resource(args[0])):
+                town_id = int(args[4])
+                town = session(USERID)["maps"][town_id]
+                if (int(town.get("naturalResourcesInitialized", 0) or 0)
+                        and town_id not in initializing_resource_towns):
+                    print(f" [+] COMMAND: buy({args}) -> Natural resource respawn ignored; map environment already initialized.")
+                    i += 1
+                    continue
+                initializing_resource_towns.add(town_id)
+
+            # PopupDarts queues a prize immediately before the shot which
+            # earned it. Validate the shot first so a rejected paid throw
+            # cannot still place its unit in storage.
+            if (cmd == Constant.CMD_STORE_ADD_ITEMS and i + 1 < len(commands)
+                    and commands[i + 1]["cmd"] == Constant.CMD_DARTS_SHOOT_BALLOON):
+                shot = commands[i + 1]
+                try:
+                    accepted = do_command(USERID, shot["cmd"], shot["args"])
+                    if accepted:
+                        do_command(USERID, cmd, args)
+                    else:
+                        print("Darts: prize rejected with its invalid throw.")
+                except Exception as e:
+                    print(f" [!] Darts prize/shot pair failed: {type(e).__name__}: {e}. Skipping.")
+                i += 2
+                continue
             try:
                 do_command(USERID, cmd, args)
             except Exception as e:
                 # One bad command must not discard the rest of the batch.
                 print(f" [!] Command '{cmd}' failed: {type(e).__name__}: {e}. Skipping.")
+            i += 1
     finally:
+        save = session(USERID)
+        for town_id in initializing_resource_towns:
+            save["maps"][town_id]["naturalResourcesInitialized"] = 1
         save_session(USERID) # Always persist successful mutations
 
 def do_command(USERID, cmd, args):
@@ -119,6 +266,9 @@ def do_command(USERID, cmd, args):
         bool_dont_modify_resources = bool(args[5]) # 1 if the game "buys" for you, so does not substract whatever the item cost is.
         price_multiplier = args[6]
         type = args[7]
+        if is_depleted_resource_placeholder(id):
+            print("Obsolete stone/gold regeneration placeholder rejected.")
+            return False
         print("Add", str(get_name_from_item_id(id)), "at", f"({x},{y})")
         collected_at_timestamp = timestamp_now()
         level = 0 # TODO 
@@ -129,6 +279,11 @@ def do_command(USERID, cmd, args):
             xp = int(get_attribute_from_item_id(id, "xp"))
             map["xp"] = map["xp"] + xp
         map["items"] += [[id, x, y, orientation, collected_at_timestamp, level]]
+        if int(id) == Constant.ID_BUILDING_UNIT_WAREHOUSE:
+            _initialize_unit_warehouse(map)
+        if bool_dont_modify_resources and is_enemy_camp_marker(id):
+            mark_enemy_camp_active(map, collected_at_timestamp)
+        return True
     
     elif cmd == Constant.CMD_COMPLETE_TUTORIAL:
         tutorial_step = args[0]
@@ -187,6 +342,10 @@ def do_command(USERID, cmd, args):
             if item[0] == id and item[1] == x and item[2] == y:
                 map["items"].remove(item)
                 break
+        # Upgrades are represented by the client as ``sell(old, "UPGR")``
+        # followed by ``buy(new)``. The client applies the normal 5% resale
+        # credit locally before charging the next tier's full listed price, so
+        # the authoritative save must do the same.
         if not bool_dont_modify_resources:
             price_multiplier = -0.05
             if get_attribute_from_item_id(id, "cost_type") != "c":
@@ -367,6 +526,106 @@ def do_command(USERID, cmd, args):
         else:
             save["maps"][0]["coins"] = max(save["maps"][0]["coins"] + amount, 0)
 
+    elif cmd == Constant.CMD_BUY_WAREHOUSE_CAPACITY_NEW:
+        # PopupUnitWarehouse buys one slot at a time for the configured cash
+        # price and sends [town_id]. The client changes cash/capacity locally,
+        # so the server must mirror both or refresh gives the cash back and
+        # resets the slot.
+        town_id = int(args[0])
+        town = save["maps"][town_id]
+        capacity, _ = _initialize_unit_warehouse(town)
+        globals_ = get_game_config()["globals"]
+        max_capacity = int(globals_.get("WAREHOUSE_MAX_CAPACITY", 1000))
+        price = int(globals_.get(
+            "WAREHOUSE_CAPACITY_INCREASE_PRICE_SINGLE", 2
+        ))
+        if not _has_unit_warehouse(town):
+            print("Unit Warehouse not present - slot purchase rejected.")
+            return False
+        if capacity >= max_capacity:
+            print("Unit Warehouse already at maximum capacity.")
+            return False
+        cash = int(save["playerInfo"].get("cash", 0) or 0)
+        if cash < price:
+            print("Not enough cash for a Unit Warehouse slot.")
+            return False
+        save["playerInfo"]["cash"] = cash - price
+        town["warehouseAditionalCapacitySingle"] = capacity + 1
+        print(
+            "Unit Warehouse capacity:",
+            f"{capacity} -> {capacity + 1}; cash -{price}.",
+        )
+        return True
+
+    elif cmd == Constant.CMD_ADD_UNIT_WAREHOUSE:
+        # IsoBuilding.pushUnitToWarehause sends
+        # [unit_x, unit_y, town_id, unit_id]. Remove that exact deployed unit;
+        # its absence from map.items is what frees its population.
+        unit_x, unit_y = args[0], args[1]
+        town_id, unit_id = int(args[2]), int(args[3])
+        town = save["maps"][town_id]
+        capacity, units = _initialize_unit_warehouse(town)
+        if not _has_unit_warehouse(town):
+            print("Unit Warehouse not present - store rejected.")
+            return False
+        if sum(units.values()) >= capacity:
+            print("Unit Warehouse is full - store rejected.")
+            return False
+        if get_attribute_from_item_id(unit_id, "type") != "u":
+            print("Only units can enter the Unit Warehouse.")
+            return False
+        deployed = _find_map_item(town, unit_id, unit_x, unit_y)
+        if deployed is None:
+            print("Deployed unit not found - store rejected.")
+            return False
+        town["items"].remove(deployed)
+        key = str(unit_id)
+        units[key] = units.get(key, 0) + 1
+        print("Store", str(get_name_from_item_id(unit_id)), "in Unit Warehouse.")
+        return True
+
+    elif cmd == Constant.CMD_PLACE_WAREHOUSED_ITEM:
+        # PopupUnitWarehouse sends [unit_id, x, y, orientation, town_id].
+        # Consume the stored copy before spawning it to prevent free units.
+        unit_id = int(args[0])
+        x, y, orientation = args[1], args[2], int(args[3])
+        town_id = int(args[4])
+        town = save["maps"][town_id]
+        _, units = _unit_warehouse_state(town)
+        key = str(unit_id)
+        if not _has_unit_warehouse(town):
+            print("Unit Warehouse not present - deployment rejected.")
+            return False
+        if get_attribute_from_item_id(unit_id, "type") != "u":
+            print("Warehouse item is not a unit - deployment rejected.")
+            return False
+        if units.get(key, 0) <= 0:
+            print("Unit not in warehouse - deployment rejected.")
+            return False
+        units[key] -= 1
+        if units[key] <= 0:
+            units.pop(key, None)
+        town["items"].append([
+            unit_id, x, y, orientation, timestamp_now(), 0
+        ])
+        print("Deploy", str(get_name_from_item_id(unit_id)), "from Unit Warehouse.")
+        return True
+
+    elif cmd == Constant.CMD_RESET_WAREHOUSE:
+        # When the Warehouse building is moved into normal storage, Base.as
+        # transfers all its contained units to Gifts/Storage and then clears
+        # the warehouse list. Mirror that server-side. Purchased capacity is
+        # account/town progress and the client deliberately keeps it.
+        town_id = int(args[0])
+        town = save["maps"][town_id]
+        _, units = _unit_warehouse_state(town)
+        for raw_id, count in list(units.items()):
+            _add_gifts(save, int(raw_id), int(count))
+        moved = sum(units.values())
+        town["warehousedUnits"] = {}
+        print(f"Reset Unit Warehouse; moved {moved} unit(s) to storage.")
+        return True
+
     elif cmd == Constant.CMD_STORE_ITEM or cmd == Constant.CMD_STORE_ITEM_FROMBUG:
         # store_item_frombug is the client relocating a colliding/out-of-bounds
         # item to storage; it uses the same [x, y, town, id] args as store_item.
@@ -382,22 +641,14 @@ def do_command(USERID, cmd, args):
             if item[0] == item_id and item[1] == x and item[2] == y:
                 map["items"].remove(item)
                 break
-        length = len(save["privateState"]["gifts"])
-        if length <= item_id:
-            for i in range(item_id - length + 1):
-                save["privateState"]["gifts"].append(0)
-        save["privateState"]["gifts"][item_id] += 1
+        _add_gifts(save, item_id)
 
     elif cmd == Constant.CMD_STORE_ADD_ITEMS:
         # A batch of item ids to drop into storage (gifts). Used by darts prizes,
         # offer packs, etc. args[0] is a JSON-encoded array of item ids.
         item_ids = json.loads(args[0]) if args and args[0] else []
-        gifts = save["privateState"]["gifts"]
         for raw_id in item_ids:
-            item_id = int(raw_id)
-            while len(gifts) <= item_id:
-                gifts.append(0)
-            gifts[item_id] += 1
+            _add_gifts(save, int(raw_id))
         print("Store add items:", item_ids)
 
     elif cmd == Constant.CMD_DARTS_NEW_FREE:
@@ -410,10 +661,11 @@ def do_command(USERID, cmd, args):
         last_claim = int(pState.get("timeStampDartsNewFree", 0) or 0)
         if _same_local_day(last_claim, now) and not pState.get("dartsHasFree"):
             print("Darts: free game already used today - claim rejected.")
-            return
+            return False
         print("Darts: claim daily free game.")
         pState["timeStampDartsNewFree"] = now
-        pState["dartsHasFree"] = 1
+        pState["dartsHasFree"] = True
+        return True
 
     elif cmd == Constant.CMD_DARTS_RESET:
         # Sent when a new weekly prize set started (client checks its stored
@@ -425,13 +677,14 @@ def do_command(USERID, cmd, args):
         set_start = _current_darts_set_start(now)
         if set_start is not None and int(pState.get("timeStampDartsReset", 0) or 0) >= set_start:
             print("Darts: board already reset for this week's set - rejected.")
-            return
+            return False
         print("Darts: reset board for new weekly set.")
         pState["timeStampDartsReset"] = now
         pState["timeStampDartsNewFree"] = now
         pState["dartsBalloonsShot"] = []
         pState["dartsRandomSeed"] = int(args[0]) if args else 0
-        pState["dartsHasFree"] = 1
+        pState["dartsHasFree"] = True
+        return True
 
     elif cmd == Constant.CMD_DARTS_SHOOT_BALLOON:
         # The daily free game (claimed via darts_new_free) covers one throw;
@@ -444,7 +697,7 @@ def do_command(USERID, cmd, args):
         pState = save["privateState"]
         now = timestamp_now()
         if pState.get("dartsHasFree"):
-            pState["dartsHasFree"] = 0
+            pState["dartsHasFree"] = False
             pState["timeStampLastDart"] = now
             print("Darts: free daily throw.")
         else:
@@ -452,7 +705,7 @@ def do_command(USERID, cmd, args):
             cash = int(save["playerInfo"]["cash"])
             if cash < price:
                 print(f"Darts: extra throw rejected - needs {price} cash, has {cash}.")
-                return
+                return False
             save["playerInfo"]["cash"] = cash - price
             pState["timeStampLastDart"] = now
             print(f"Darts: extra throw billed {price} cash ({cash} -> {cash - price}).")
@@ -461,6 +714,7 @@ def do_command(USERID, cmd, args):
         if not isinstance(pState.get("dartsBalloonsShot"), list):
             pState["dartsBalloonsShot"] = []
         pState["dartsBalloonsShot"].append(balloon_index)
+        return True
 
     elif cmd == Constant.CMD_PLACE_GIFT or cmd == Constant.CMD_PLACE_STORED_ITEM:
         # place_gift: [id, x, y, town, ?] - place_stored_item: [id, x, y, frame, town].
@@ -481,6 +735,8 @@ def do_command(USERID, cmd, args):
         collected_at_timestamp = timestamp_now()
         level = 0
         items += [[item_id, x, y, orientation, collected_at_timestamp, level]]#maybe make function for adding items
+        if item_id == Constant.ID_BUILDING_UNIT_WAREHOUSE:
+            _initialize_unit_warehouse(save["maps"][town_id])
         gifts[item_id] -= 1
         while len(gifts) != 0 and gifts[-1] == 0: #removes excess zeros at end if necessary
             gifts.pop()
@@ -862,6 +1118,136 @@ def do_command(USERID, cmd, args):
                 if int(posicion) not in map["universAttackWin"]:
                     map["universAttackWin"].append(int(posicion))
 
+    elif cmd == Constant.CMD_BUY_SI_HELP:
+        # [x, y, town, item]. The client deducts 2 cash and appends a zero
+        # placeholder locally; persist both or refresh reopens the staffing
+        # window with every worker missing.
+        x, y, town_id, item_id = args[0], args[1], int(args[2]), int(args[3])
+        town = save["maps"][town_id]
+        item = _find_map_item(town, item_id, x, y)
+        social = _social_item(item_id)
+        if item is None or social is None:
+            print("Social worker purchase rejected - building/config not found.")
+            return False
+        attrs = _item_attrs(item)
+        if "si" in attrs and attrs["si"] is None:
+            # null is the client's marker for an already-opened building.
+            print("Social worker purchase ignored - building already opened.")
+            return False
+        staff = attrs.setdefault("si", [])
+        if not isinstance(staff, list):
+            staff = []
+            attrs["si"] = staff
+        required = _social_worker_count(social)
+        if len(staff) >= required:
+            print("Social worker purchase ignored - staffing already complete.")
+            return False
+        price = int(social.get("worker_cost", 0) or 0)
+        cash = int(save["playerInfo"].get("cash", 0) or 0)
+        if cash < price:
+            print(f"Social worker purchase rejected - needs {price} cash, has {cash}.")
+            return False
+        save["playerInfo"]["cash"] = cash - price
+        staff.append(0)
+        print(f"Bought worker {len(staff)}/{required} for {get_name_from_item_id(item_id)}.")
+        return True
+
+    elif cmd == Constant.CMD_FINISH_SI:
+        # [x, y, town, item, ...]. Once all worker slots are filled the
+        # client sets attrs.si=null and routes future clicks to the real
+        # building popup instead of PopupSocialBuilding.
+        x, y, town_id, item_id = args[0], args[1], int(args[2]), int(args[3])
+        town = save["maps"][town_id]
+        item = _find_map_item(town, item_id, x, y)
+        social = _social_item(item_id)
+        if item is None or social is None:
+            print("Social building finish rejected - building/config not found.")
+            return False
+        attrs = _item_attrs(item)
+        staff = attrs.setdefault("si", [])
+        required = _social_worker_count(social)
+        if staff is None:
+            print("Social building already opened.")
+            return True
+        if not isinstance(staff, list) or len(staff) < required:
+            print(f"Social building finish rejected - {len(staff) if isinstance(staff, list) else 0}/{required} workers.")
+            return False
+        if item_id == Constant.ID_BUILDING_SUMMIT or len(args) > 4:
+            # Summit/social-feed helpers are a repeatable reward cycle. The
+            # client clears both arrays after collection instead of opening
+            # the building permanently.
+            attrs["si"] = []
+            attrs["sif"] = []
+            print(f"Reset completed social helper cycle for {get_name_from_item_id(item_id)}.")
+            return True
+        attrs["si"] = None
+        print(f"Opened staffed social building {get_name_from_item_id(item_id)}.")
+        return True
+
+    elif cmd == Constant.CMD_SET_RESOURCE_ALLIES:
+        # [resource, x, y, town, item]. This choice belongs to the map, while
+        # the hire list remains on the building item.
+        resource, x, y = str(args[0]), args[1], args[2]
+        town_id, item_id = int(args[3]), int(args[4])
+        if resource not in ("f", "w", "s", "g"):
+            print(f"Allies Market resource '{resource}' rejected.")
+            return False
+        town = save["maps"][town_id]
+        item = _find_map_item(town, item_id, x, y)
+        if item is None:
+            print("Allies Market resource rejected - building not found.")
+            return False
+        town["resourceAlliesMarket"] = resource
+        item[4] = 0  # the first collection is ready, matching the client
+        print(f"Allies Market resource set to '{resource}'.")
+        return True
+
+    elif cmd == Constant.CMD_TRADE_RESOURCE:
+        # [town, resource, sell, amount]. Reproduce ButtonMarket.refreshCost:
+        # base * amount/100, then 2% per prior trade pressure; selling pays 75%.
+        town_id, resource = int(args[0]), str(args[1])
+        selling, amount = bool(int(args[2])), int(args[3])
+        if resource not in ("f", "w", "s") or amount <= 0:
+            print("Market trade rejected - invalid resource/amount.")
+            return False
+        town = save["maps"][town_id]
+        now = timestamp_now()
+        last = int(town.get("timestampLastTrade", 0) or 0)
+        if last and now - last >= 20 * 3600:
+            town["numTradesDone"] = 0
+            town["resourcesTraded"] = {}
+        done = int(town.get("numTradesDone", 0) or 0)
+        if done >= 20:
+            print("Market trade rejected - daily trade limit reached.")
+            return False
+        pressure_by_resource = town.setdefault("resourcesTraded", {})
+        pressure = int(pressure_by_resource.get(resource, 0) or 0)
+        base_cost = int(get_game_config()["globals"]["MARKET_BASE_COSTS"][resource])
+        cost = math.floor((base_cost * amount / 100.0) * (1 + pressure * 0.02) + 0.5)
+        if selling:
+            cost = math.floor(cost * 0.75 + 0.5)
+            current = int(town[{"f": "food", "w": "wood", "s": "stone"}[resource]])
+            if current < amount:
+                print(f"Market sale rejected - needs {amount} '{resource}', has {current}.")
+                return False
+            town[{"f": "food", "w": "wood", "s": "stone"}[resource]] = current - amount
+            town["coins"] = int(town["coins"]) + cost
+            pressure = max(-25, pressure - 1)
+        else:
+            coins = int(town["coins"])
+            if coins < cost:
+                print(f"Market purchase rejected - needs {cost} gold, has {coins}.")
+                return False
+            town["coins"] = coins - cost
+            key = {"f": "food", "w": "wood", "s": "stone"}[resource]
+            town[key] = int(town[key]) + amount
+            pressure = min(200, pressure + 1)
+        pressure_by_resource[resource] = pressure
+        town["numTradesDone"] = done + 1
+        town["timestampLastTrade"] = now
+        print(f"Market {'sold' if selling else 'bought'} {amount} '{resource}' for {cost} gold.")
+        return True
+
     elif cmd == Constant.CMD_ADD_COLLECTABLE:
         collection_id = args[0]
         collectible_id = args[1]
@@ -970,6 +1356,7 @@ def do_command(USERID, cmd, args):
         # TIMER_OGRES_VILLAGE (Base.as reads it on load, MapInitializer.Init
         # respawns the camp when the timer hits 0). Without persisting this a
         # reload sees 0 and respawns the camp the player just cleared.
+        map["enemyCampActive"] = 0
         map["timestampLastTreasure"] = timestamp_now()
         print(f"Treasure collected: +{gold}g +{xp}xp +{food}f +{stone}s, next quest {quest_id}. Stamped {map['timestampLastTreasure']}.")
 

@@ -86,6 +86,52 @@ def test_levelup_single_step_grants_only_that_level(tmp):
     assert sessions.session(UID)["playerInfo"]["cash"] == 1, "level 5 should grant exactly 1 cash"
 
 
+# --- Building upgrades and resource progression --------------------------
+# The Flash client upgrades in a two-command batch:
+#   sell(old, reason="UPGR"), buy(next, multiplier=1)
+# It charges the next tier's full configured price and gives the ordinary 5%
+# resale credit for the old tier. It does not merely charge the price
+# difference between the two tiers.
+
+def test_upgrade_charges_next_tier_less_resale_credit(tmp):
+    save = sessions.session(UID)
+    save["maps"][0]["wood"] = 100
+    _do(Constant.CMD_SELL, [44, 50, 1, 0, 0, Constant.SELL_REASON_UPGRADE])
+    _do(Constant.CMD_BUY, [2, 44, 50, 1, 0, 0, 1, "b"])
+
+    town = save["maps"][0]
+    assert town["wood"] == 41, \
+        f"House I -> II should charge 60 wood minus a 1-wood resale credit, got {100 - town['wood']}"
+    assert any(item[0] == 2 and item[1:3] == [44, 50] for item in town["items"]), \
+        "upgraded House II was not persisted"
+    assert not any(item[0] == 1 and item[1:3] == [44, 50] for item in town["items"]), \
+        "old House I remained after upgrade"
+
+
+def test_normal_sale_still_refunds_five_percent(tmp):
+    save = sessions.session(UID)
+    save["maps"][0]["wood"] = 0
+    _do(Constant.CMD_SELL, [44, 50, 1, 0, 0, "SELL"])
+    # int(30 * 0.05) truncates to one wood, matching the client/server rule.
+    assert save["maps"][0]["wood"] == 1, \
+        "ordinary sale lost its configured 5% refund"
+
+
+def test_resource_upgrade_chains_are_monotonic(tmp):
+    items = {int(item["id"]): item for item in get_game_config()["items"]}
+    crop_chain = [10, 8, 9, 200, 201]
+    for lower, higher in zip(crop_chain, crop_chain[1:]):
+        assert int(items[lower]["upgrades_to"]) == higher
+    assert [int(items[item_id]["min_level"]) for item_id in crop_chain] == \
+        sorted(int(items[item_id]["min_level"]) for item_id in crop_chain), \
+        "crop upgrade chain goes backwards in level"
+    assert [int(items[item_id]["collect"]) for item_id in crop_chain] == \
+        sorted(int(items[item_id]["collect"]) for item_id in crop_chain), \
+        "crop upgrade chain lowers food yield"
+    assert int(items[301]["cost"]) == 200 and items[301]["cost_type"] == "w", \
+        "Troll Mill II is still a free upgrade"
+
+
 # --- GD-05: daily bonus ---------------------------------------------------
 # The client (PopupNewDaily/Utils.isDailyBonusReady) gates the popup by UTC
 # CALENDAR DAY and displays reward index (bonusNextId - 1) % 5. The server
@@ -261,6 +307,9 @@ TESTS = [
     test_levelup_grants_cash_at_level_5,
     test_levelup_is_idempotent,
     test_levelup_single_step_grants_only_that_level,
+    test_upgrade_charges_next_tier_less_resale_credit,
+    test_normal_sale_still_refunds_five_percent,
+    test_resource_upgrade_chains_are_monotonic,
     test_daily_bonus_uses_config_not_client,
     test_daily_bonus_cooldown_blocks_second_claim,
     test_daily_bonus_next_day_gives_next_reward,
