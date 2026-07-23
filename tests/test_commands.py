@@ -326,6 +326,36 @@ def test_collect_gated_on_opened_social_mine(tmp):
     assert m["stone"] == 175, f"opened mine did not produce base stone, got {m['stone']}"
 
 
+def test_market_trade_requires_open_market(tmp):
+    # Market I (id 23) needs Butcher/Fishmonger/Greengrocer before it opens.
+    # Trading must be refused until the market is staffed & opened (si == None),
+    # so a reload cannot let an unstaffed market trade.
+    save = sessions.session(UID)
+    m = save["maps"][0]
+    m["coins"] = 100000
+    m["wood"] = 0
+    # Unstaffed Market I present: trade must be refused.
+    m["items"].append([23, 20, 20, 0, 1, 0, [], {"si": []}])
+    ok = command.do_command(UID, Constant.CMD_TRADE_RESOURCE, [0, "w", 0, 100])
+    assert ok is False, "trade allowed with an unstaffed market"
+    assert m["wood"] == 0, "wood bought through an unstaffed market"
+    # Open it: trade now works.
+    m["items"][-1][7]["si"] = None
+    ok = command.do_command(UID, Constant.CMD_TRADE_RESOURCE, [0, "w", 0, 100])
+    assert ok is True and m["wood"] == 100, f"opened market trade failed (wood={m['wood']})"
+
+
+def test_market_II_needs_no_staff(tmp):
+    # Market II (id 188) is not a social building: it opens without helpers.
+    save = sessions.session(UID)
+    m = save["maps"][0]
+    m["coins"] = 100000
+    m["wood"] = 0
+    m["items"].append([188, 30, 30, 0, 1, 0])
+    ok = command.do_command(UID, Constant.CMD_TRADE_RESOURCE, [0, "w", 0, 100])
+    assert ok is True and m["wood"] == 100, "non-social Market II should trade freely"
+
+
 def test_loading_scrubs_leaked_playerinfo_fields(tmp):
     polluted = _template_save()
     polluted["playerInfo"]["coins"] = 123
@@ -361,6 +391,8 @@ TESTS = [
     test_save_info_level_derived_from_xp,
     test_static_scenarios_are_not_social_players,
     test_collect_gated_on_opened_social_mine,
+    test_market_trade_requires_open_market,
+    test_market_II_needs_no_staff,
     test_loading_scrubs_leaked_playerinfo_fields,
 ]
 
