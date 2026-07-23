@@ -550,6 +550,17 @@ def do_command(USERID, cmd, args):
             current for current in map["items"]
             if current[0] == id and current[1] == x and current[2] == y
         ), None)
+        # A socially-gated producer (e.g. Stone Mine: Geologist + Miner) does
+        # not produce until it is fully staffed and opened (attrs.si == None).
+        # The client marks an open building with si=None; a missing key or a
+        # (partial) list means the staffing window is still pending. Reject the
+        # collect so a reload that drops the client-side overlay cannot harvest
+        # an unstaffed building.
+        if item is not None and _social_item(id) is not None:
+            si_state = _item_attrs(item).get("si", [])
+            if si_state is not None:
+                print(f"Collect rejected - {get_name_from_item_id(id)} is not staffed/opened.")
+                return False
         # PopupCollect time options use the same fixed multipliers in the
         # original Flash client: 30m, 1h, 4h, 8h => 0.5x, 1x, 2x, 3x.
         production_multiplier = 1

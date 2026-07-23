@@ -309,6 +309,23 @@ def test_static_scenarios_are_not_social_players(tmp):
     ), "removed AcidCaos sample account is still a PvP opponent"
 
 
+def test_collect_gated_on_opened_social_mine(tmp):
+    # Stone Mine (id 16) is a social building requiring Geologist + Miner.
+    # It must not produce until it is opened (attrs.si == None). A reload that
+    # dropped the client-side staffing overlay must not let it be collected.
+    save = sessions.session(UID)
+    m = save["maps"][0]
+    m["stone"] = 0
+    # Placed but only partially staffed (0/2): si is an incomplete list.
+    m["items"].append([16, 10, 10, 0, 1, 0, [], {"si": []}])
+    command.do_command(UID, Constant.CMD_COLLECT, [10, 10, 0, 16, 0, 1])
+    assert m["stone"] == 0, "unopened social mine produced stone (reload bypass)"
+    # Once opened, collection works.
+    m["items"][-1][7]["si"] = None
+    command.do_command(UID, Constant.CMD_COLLECT, [10, 10, 0, 16, 0, 1])
+    assert m["stone"] == 175, f"opened mine did not produce base stone, got {m['stone']}"
+
+
 def test_loading_scrubs_leaked_playerinfo_fields(tmp):
     polluted = _template_save()
     polluted["playerInfo"]["coins"] = 123
@@ -343,6 +360,7 @@ TESTS = [
     test_load_repairs_broken_troll_town,
     test_save_info_level_derived_from_xp,
     test_static_scenarios_are_not_social_players,
+    test_collect_gated_on_opened_social_mine,
     test_loading_scrubs_leaked_playerinfo_fields,
 ]
 
