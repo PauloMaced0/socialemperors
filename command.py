@@ -1012,14 +1012,16 @@ def do_command(USERID, cmd, args):
         return True
 
     elif cmd == Constant.CMD_PLACE_GIFT or cmd == Constant.CMD_PLACE_STORED_ITEM:
-        # place_gift: [id, x, y, town, ?] - place_stored_item: [id, x, y, frame, town].
-        # Both take one unit out of storage (gifts) and put it on the map. The
-        # storage check must happen BEFORE the item is placed: placing first
-        # and crashing on the decrement would persist a free item.
+        # Both are [id, x, y, frame, town] (Base.finishPlacing). The town id is
+        # the last element for BOTH commands; place_gift previously read args[3]
+        # (the frame) as the town, so any non-zero frame placed the gift in the
+        # wrong or an out-of-range town. Fall back to args[3] only for a legacy
+        # 4-element command. Storage is checked BEFORE placing so a crash on the
+        # decrement cannot persist a free item.
         item_id = int(args[0])
         x = args[1]
         y = args[2]
-        town_id = int(args[4]) if cmd == Constant.CMD_PLACE_STORED_ITEM else int(args[3])
+        town_id = int(args[4]) if len(args) > 4 else int(args[3])
         gifts = save["privateState"]["gifts"]
         if item_id < 0 or item_id >= len(gifts) or gifts[item_id] <= 0:
             print("None of", str(get_name_from_item_id(item_id)), "in storage - placement rejected.")

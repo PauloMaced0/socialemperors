@@ -345,6 +345,20 @@ def test_market_trade_requires_open_market(tmp):
     assert ok is True and m["wood"] == 100, f"opened market trade failed (wood={m['wood']})"
 
 
+def test_place_gift_uses_town_arg_not_frame(tmp):
+    # Client layout for both place_gift and place_stored_item is
+    # [id, x, y, frame, townID]. place_gift wrongly read town from args[3]
+    # (the frame), so a non-zero frame placed the gift in a wrong/out-of-range
+    # town. Town must come from args[4].
+    save = sessions.session(UID)
+    save["privateState"]["gifts"] = [0] * RANGER + [1]
+    m0 = save["maps"][0]
+    n = len(m0["items"])
+    command.do_command(UID, Constant.CMD_PLACE_GIFT, [RANGER, 12, 12, 5, 0])
+    assert len(m0["items"]) == n + 1, "gift not placed in town 0 (frame misread as town)"
+    assert m0["items"][-1][0] == RANGER, "wrong item placed"
+
+
 def test_market_II_needs_no_staff(tmp):
     # Market II (id 188) is not a social building: it opens without helpers.
     save = sessions.session(UID)
@@ -391,6 +405,7 @@ TESTS = [
     test_save_info_level_derived_from_xp,
     test_static_scenarios_are_not_social_players,
     test_collect_gated_on_opened_social_mine,
+    test_place_gift_uses_town_arg_not_frame,
     test_market_trade_requires_open_market,
     test_market_II_needs_no_staff,
     test_loading_scrubs_leaked_playerinfo_fields,
