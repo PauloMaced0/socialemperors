@@ -111,6 +111,11 @@
                     // play.html -> ruffle.html redirect.
                     allowFullscreen: true,
                     autoplay: "on",
+                    // Suppress Ruffle's "Click to unmute" overlay. autoplay is
+                    // already "on"; the overlay only exists to satisfy the
+                    // browser audio-gesture policy, and the game has its own
+                    // in-HUD sound toggle, so the extra click is just noise.
+                    unmuteOverlay: "hidden",
                     // Perf: "low" disables Ruffle's bitmap smoothing / anti-
                     // aliasing, the biggest per-pixel cost when a big fight
                     // puts many animated sprites on screen. wmode opaque skips

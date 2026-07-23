@@ -287,6 +287,7 @@ def test_ruffle_page_uses_current_origin_and_supported_autoplay():
     assert "flash/SELoader.swf?build=20260723" in html
     assert 'autoplay: "on"' in html
     assert "autoplay: true" not in html
+    assert 'unmuteOverlay: "hidden"' in html, "Click-to-unmute overlay not suppressed"
     assert 'swftoload: "http://localhost:5099/' in html
     assert 'staticUrl: "http://localhost:5099/' in html
     assert 'dynamicUrl: "http://localhost:5099/' in html
