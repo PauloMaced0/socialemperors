@@ -306,6 +306,32 @@ def test_deployed_unit_sale_refund_and_removal_survive_reload(tmp):
     ), "sold deployed unit returned after refresh"
 
 
+def test_collectible_drop_and_collection_shape_survive_reload(tmp):
+    # Old saves may have neither field. Player-info must seed all 24 collection
+    # slots before a PvP/harvest drop is persisted.
+    save = sessions.session(UID)
+    save["privateState"].pop("collections", None)
+    save["privateState"].pop("collectionsCompleted", None)
+    get_player_info.get_player_info(UID)
+    assert len(save["privateState"]["collections"]) == 24
+
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_ADD_COLLECTABLE, "args": [5, 3]},
+        {"cmd": Constant.CMD_ADD_COLLECTABLE, "args": [5, 3]},
+    ]))
+    reloaded = _reload()["privateState"]
+    assert reloaded["collections"][5][3] == 2, \
+        "earned collectible count disappeared or was stored at the wrong slot"
+    assert reloaded["collectionsCompleted"] == []
+
+
+def test_merge_did_not_duplicate_social_staffing_handler(tmp):
+    source = open(command.__file__).read()
+    marker = "elif cmd == Constant.CMD_BUY_SI_HELP:"
+    assert source.count(marker) == 1, \
+        "merge introduced duplicate/dead buy_si_help command handlers"
+
+
 def test_unit_warehouse_store_deploy_and_capacity_persist(tmp):
     warehouse_id, wx, wy = Constant.ID_BUILDING_UNIT_WAREHOUSE, 60, 60
     unit_id, ux, uy = 533, 57, 57
@@ -388,6 +414,8 @@ TESTS = [
     test_natural_resources_initialize_once_and_do_not_regrow,
     test_destroyed_wall_is_removed_and_stays_removed,
     test_deployed_unit_sale_refund_and_removal_survive_reload,
+    test_collectible_drop_and_collection_shape_survive_reload,
+    test_merge_did_not_duplicate_social_staffing_handler,
     test_unit_warehouse_store_deploy_and_capacity_persist,
     test_storing_unit_warehouse_moves_units_to_general_storage,
 ]

@@ -3,5 +3,13 @@
 	{ "op": "add", "path": "/localization_strings/-", "value": { "id": 1551, "name": "POPUP_DAILYBONUS_TODAY", "text": "Today" } },
 	{ "op": "add", "path": "/localization_strings/-", "value": { "id": 1552, "name": "POPUP_DAILYBONUS_TOMORROW", "text": "Tomorrow" } },
 	{ "op": "add", "path": "/localization_strings/-", "value": { "id": 1553, "name": "POPUP_DAILYBONUS_DESC", "text": "Come back every day for a bigger prize!" } },
-	{ "op": "add", "path": "/localization_strings/-", "value": { "id": 1522, "name": "KOMPU_RESULT_SHARE", "text": "Share!" } }
+	{ "op": "add", "path": "/localization_strings/-", "value": { "id": 1522, "name": "KOMPU_RESULT_SHARE", "text": "Share!" } },
+	{ "op": "add", "path": "/localization_strings/-", "value": { "id": 1554, "name": "POPUP_HURRY_UP_ASK_HELP", "text": "Hurry up! Ask your friends to help you finish faster." } },
+	{ "op": "add", "path": "/localization_strings/-", "value": { "id": 1555, "name": "POPUP_AUX_HELP", "text": "Ask for help" } },
+	{ "op": "add", "path": "/localization_strings/-", "value": { "id": 1556, "name": "AUX_DAYS", "text": "days" } },
+	{ "op": "add", "path": "/localization_strings/-", "value": { "id": 1557, "name": "AUX_HOURS", "text": "hours" } },
+	{ "op": "add", "path": "/localization_strings/-", "value": { "id": 1558, "name": "AUX_MINUTES", "text": "minutes" } },
+	{ "op": "add", "path": "/localization_strings/-", "value": { "id": 1559, "name": "AUX_SECONDS", "text": "seconds" } },
+	{ "op": "add", "path": "/localization_strings/-", "value": { "id": 1560, "name": "AUX_ALL", "text": "All" } },
+	{ "op": "add", "path": "/localization_strings/-", "value": { "id": 1561, "name": "AUX_GET_MORE_CASH", "text": "Get More Cash" } }
 ]

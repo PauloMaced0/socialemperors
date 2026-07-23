@@ -10,7 +10,12 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tools.patch_attack_click_swf import DEFAULT_SWF, is_patched, patch_swf_bytes
+from tools.patch_attack_click_swf import (
+    DEFAULT_SWF,
+    is_patched,
+    merged_ui_fixes_present,
+    patch_swf_bytes,
+)
 
 
 def test_enemy_click_dispatches_an_attack_instead_of_a_ground_move():
@@ -54,6 +59,14 @@ def test_remove_tool_accepts_deployed_units_with_confirmation():
     )
 
 
+def test_remote_ui_fixes_survive_the_binary_merge():
+    data = DEFAULT_SWF.read_bytes()
+    assert merged_ui_fixes_present(data), (
+        "the merged SWF lost the formatted cash HUD, non-negative enemy "
+        "count, or special-attack tooltip methods"
+    )
+
+
 def test_attack_click_patch_is_idempotent():
     data = DEFAULT_SWF.read_bytes()
     result, changed = patch_swf_bytes(data)
@@ -67,6 +80,7 @@ TESTS = [
     test_natural_stone_and_gold_do_not_install_regrowth_timers,
     test_established_town_does_not_repopulate_resources_on_reload,
     test_remove_tool_accepts_deployed_units_with_confirmation,
+    test_remote_ui_fixes_survive_the_binary_merge,
     test_attack_click_patch_is_idempotent,
 ]
 

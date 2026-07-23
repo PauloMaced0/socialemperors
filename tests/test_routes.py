@@ -188,6 +188,15 @@ def test_present_asset_served():
     assert r.status_code == 200 and len(r.data) > 0, "bundled asset not served"
 
 
+def test_mini_fireball_combat_asset_served():
+    c = server.app.test_client()
+    r = c.get(f"{ASSETS}/fx/p.miniFireball2.swf")
+    assert r.status_code == 200, \
+        "miniFireball2 combat effect still returns 404"
+    assert r.data[:3] in (b"FWS", b"CWS", b"ZWS") and len(r.data) > 100, \
+        "miniFireball2 route did not return a valid SWF"
+
+
 TESTS = [
     test_command_requires_login,
     test_command_ignores_posted_userid,
@@ -200,6 +209,7 @@ TESTS = [
     test_missing_asset_returns_404_not_500,
     test_missing_asset_is_cached,
     test_present_asset_served,
+    test_mini_fireball_combat_asset_served,
 ]
 
 

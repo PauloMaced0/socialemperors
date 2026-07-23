@@ -164,6 +164,15 @@ TOKEN_CLICK_CONSUME_PATCHED = bytes.fromhex(
     "d6 d1 20 13 0a 00 00 60 01 66 0b 26 61 a5 57 02 02 "
     "60 01 66 0b 66 d9 0a"
 )
+# origin/main implements the same null-guarded assignment through a normal
+# ActionScript recompile. It retains redundant local initializers, so its
+# bytecode signature differs while the behavior is already correct.
+TOKEN_CLICK_CONSUME_REMOTE_PATCHED = bytes.fromhex(
+    "24 00 73 d6 20 80 06 d7 24 00 73 63 04 "
+    "24 00 73 63 05 20 85 63 08 "
+    "d1 20 13 08 00 00 60 01 66 0b 26 61 a5 57 "
+    "60 01 66 0b 66 d9 0a"
+)
 
 # In Base.startMovementsObjective's selected-unit loop, this is the original
 # generic contextual action. It is correct for villagers, construction,
@@ -338,6 +347,25 @@ PATCHES = (
      UNIT_SELL_CONFIRM_PATCHED),
 )
 
+PATCHED_ALTERNATIVES = {
+    "reward token click consumption": (
+        TOKEN_CLICK_CONSUME_REMOTE_PATCHED,
+    ),
+}
+
+# Features carried by origin/main's recompiled UI classes. These signatures
+# are checked separately because they are already present in that binary rather
+# than transformations performed by this patcher.
+MERGED_CASH_HUD_FORMATTED = bytes.fromhex(
+    "60 13 d0 66 b0 0b d0 d1 66 bf bd 01 66 c2 bd 01 "
+    "46 8f 0c 01 4f 14 02"
+)
+MERGED_OGRE_COUNT_CLAMPED = bytes.fromhex(
+    "d1 24 00 0c 04 00 00 24 00 73 d5 d2 20 14 28 00 00"
+)
+MERGED_SPECIAL_ATTACK_OVER_METHOD = b"GUI:PortraitSpecialAttack/overItem"
+MERGED_SPECIAL_ATTACK_OUT_METHOD = b"GUI:PortraitSpecialAttack/outItem"
+
 
 # These two patches insert a guard, so unlike PATCHES they deliberately grow
 # their AVM2 method bodies by 21 bytes. The signatures include method-body
@@ -365,6 +393,22 @@ INIT_RESOURCE_METHOD_PATCHED = (
     + INIT_RESOURCE_METHOD_ORIGINAL[10:]
 )
 
+# origin/main's SWF was recompiled while adding unrelated UI fixes, which
+# renumbered AVM2 method indexes without changing this method's behavior.
+# Importing the three non-overlapping remote UI classes into the locally
+# patched client renumbers the method once more. Accept both layouts so this
+# patcher can upgrade the remote client and remains idempotent on the merged
+# client instead of mistaking harmless method-index changes for lost guards.
+INIT_RESOURCE_METHOD_REMOTE_ORIGINAL = (
+    bytes.fromhex("8b 11") + INIT_RESOURCE_METHOD_ORIGINAL[2:]
+)
+INIT_RESOURCE_METHOD_REMOTE_PATCHED = (
+    bytes.fromhex("8b 11") + INIT_RESOURCE_METHOD_PATCHED[2:]
+)
+INIT_RESOURCE_METHOD_MERGED_PATCHED = (
+    bytes.fromhex("b2 11") + INIT_RESOURCE_METHOD_PATCHED[2:]
+)
+
 REMAINING_RESOURCE_METHOD_ORIGINAL = bytes.fromhex(
     "cf 12 08 09 03 04 b5 06 "
     "d0 30 24 00 10 0e 00 00 c2 06 a7 c3 06 c2 06 08 07 c6 d6 d0 92 04 d6"
@@ -372,6 +416,16 @@ REMAINING_RESOURCE_METHOD_ORIGINAL = bytes.fromhex(
 REMAINING_RESOURCE_METHOD_PATCHED = (
     bytes.fromhex("cf 12 08 09 03 04 ca 06")
     + REMAINING_RESOURCE_METHOD_ORIGINAL[8:]
+)
+
+REMAINING_RESOURCE_METHOD_REMOTE_ORIGINAL = (
+    bytes.fromhex("8c 11") + REMAINING_RESOURCE_METHOD_ORIGINAL[2:]
+)
+REMAINING_RESOURCE_METHOD_REMOTE_PATCHED = (
+    bytes.fromhex("8c 11") + REMAINING_RESOURCE_METHOD_PATCHED[2:]
+)
+REMAINING_RESOURCE_METHOD_MERGED_PATCHED = (
+    bytes.fromhex("b3 11") + REMAINING_RESOURCE_METHOD_PATCHED[2:]
 )
 
 # v10 put the same guard at method entry. That skipped creation of
@@ -439,33 +493,80 @@ def _patch_resource_reload_guards(raw: bytes) -> tuple[bytes, bool]:
     growth_offsets = []
 
     init_original = raw.count(INIT_RESOURCE_METHOD_ORIGINAL)
+    init_remote_original = raw.count(INIT_RESOURCE_METHOD_REMOTE_ORIGINAL)
     init_patched = raw.count(INIT_RESOURCE_METHOD_PATCHED)
-    if init_original == 1 and init_patched == 0:
-        growth_offsets.append(raw.find(INIT_RESOURCE_METHOD_ORIGINAL))
+    init_remote_patched = raw.count(INIT_RESOURCE_METHOD_REMOTE_PATCHED)
+    init_merged_patched = raw.count(INIT_RESOURCE_METHOD_MERGED_PATCHED)
+    init_original_total = init_original + init_remote_original
+    init_patched_total = (
+        init_patched + init_remote_patched + init_merged_patched
+    )
+    if init_original_total == 1 and init_patched_total == 0:
+        source = (
+            INIT_RESOURCE_METHOD_ORIGINAL
+            if init_original
+            else INIT_RESOURCE_METHOD_REMOTE_ORIGINAL
+        )
+        target = (
+            INIT_RESOURCE_METHOD_PATCHED
+            if init_original
+            else INIT_RESOURCE_METHOD_REMOTE_PATCHED
+        )
+        growth_offsets.append(raw.find(source))
         patched_raw = patched_raw.replace(
-            INIT_RESOURCE_METHOD_ORIGINAL, INIT_RESOURCE_METHOD_PATCHED, 1
+            source, target, 1
         )
         delta += 21
         changed = True
-    elif not (init_original == 0 and init_patched == 1):
+    elif not (init_original_total == 0 and init_patched_total == 1):
         raise ValueError(
             "initial resource population guard signature mismatch: "
-            f"original={init_original}, patched={init_patched}"
+            f"original={init_original}, "
+            f"remote_original={init_remote_original}, "
+            f"patched={init_patched}, "
+            f"remote_patched={init_remote_patched}, "
+            f"merged_patched={init_merged_patched}"
         )
 
     remaining_original = raw.count(REMAINING_RESOURCE_METHOD_ORIGINAL)
+    remaining_remote_original = raw.count(
+        REMAINING_RESOURCE_METHOD_REMOTE_ORIGINAL
+    )
     remaining_patched = raw.count(REMAINING_RESOURCE_METHOD_PATCHED)
+    remaining_remote_patched = raw.count(
+        REMAINING_RESOURCE_METHOD_REMOTE_PATCHED
+    )
+    remaining_merged_patched = raw.count(
+        REMAINING_RESOURCE_METHOD_MERGED_PATCHED
+    )
     remaining_v10 = raw.count(REMAINING_RESOURCE_METHOD_V10)
     boundary_original = raw.count(REMAINING_TREE_BOUNDARY_ORIGINAL)
     boundary_patched = raw.count(REMAINING_TREE_BOUNDARY_PATCHED)
+    remaining_original_total = (
+        remaining_original + remaining_remote_original
+    )
+    remaining_patched_total = (
+        remaining_patched
+        + remaining_remote_patched
+        + remaining_merged_patched
+    )
 
-    if (remaining_original == 1 and remaining_patched == 0
+    if (remaining_original_total == 1 and remaining_patched_total == 0
             and remaining_v10 == 0 and boundary_original == 1
             and boundary_patched == 0):
+        source = (
+            REMAINING_RESOURCE_METHOD_ORIGINAL
+            if remaining_original
+            else REMAINING_RESOURCE_METHOD_REMOTE_ORIGINAL
+        )
+        target = (
+            REMAINING_RESOURCE_METHOD_PATCHED
+            if remaining_original
+            else REMAINING_RESOURCE_METHOD_REMOTE_PATCHED
+        )
         growth_offsets.append(raw.find(REMAINING_TREE_BOUNDARY_ORIGINAL))
         patched_raw = patched_raw.replace(
-            REMAINING_RESOURCE_METHOD_ORIGINAL,
-            REMAINING_RESOURCE_METHOD_PATCHED, 1
+            source, target, 1
         )
         patched_raw = patched_raw.replace(
             REMAINING_TREE_BOUNDARY_ORIGINAL,
@@ -473,7 +574,7 @@ def _patch_resource_reload_guards(raw: bytes) -> tuple[bytes, bool]:
         )
         delta += 21
         changed = True
-    elif (remaining_original == 0 and remaining_patched == 1
+    elif (remaining_original_total == 0 and remaining_patched_total == 1
           and remaining_v10 == 0 and boundary_original == 0
           and boundary_patched == 1):
         pass
@@ -494,6 +595,9 @@ def _patch_resource_reload_guards(raw: bytes) -> tuple[bytes, bool]:
         raise ValueError(
             "remaining resource population guard signature mismatch: "
             f"original={remaining_original}, patched={remaining_patched}, "
+            f"remote_original={remaining_remote_original}, "
+            f"remote_patched={remaining_remote_patched}, "
+            f"merged_patched={remaining_merged_patched}, "
             f"v10={remaining_v10}, boundary_original={boundary_original}, "
             f"boundary_patched={boundary_patched}"
         )
@@ -589,12 +693,18 @@ def patch_swf_bytes(data: bytes) -> tuple[bytes, bool]:
     for name, original, patched in PATCHES:
         original_count = patched_raw.count(original)
         patched_count = patched_raw.count(patched)
-        if original_count == 0 and patched_count == 1:
+        alternatives = PATCHED_ALTERNATIVES.get(name, ())
+        alternative_count = sum(
+            patched_raw.count(signature) for signature in alternatives
+        )
+        patched_total = patched_count + alternative_count
+        if original_count == 0 and patched_total == 1:
             continue
-        if original_count != 1 or patched_count != 0:
+        if original_count != 1 or patched_total != 0:
             raise ValueError(
                 f"{name} signature mismatch: "
-                f"original={original_count}, patched={patched_count}"
+                f"original={original_count}, patched={patched_count}, "
+                f"alternatives={alternative_count}"
             )
         patched_raw = patched_raw.replace(original, patched, 1)
         changed = True
@@ -614,21 +724,49 @@ def patch_swf_bytes(data: bytes) -> tuple[bytes, bool]:
 def is_patched(data: bytes) -> bool:
     raw, _ = _uncompress(data)
     equal_length_patches = all(
-        raw.count(patched) == 1 and raw.count(original) == 0
-        for _, original, patched in PATCHES
+        (
+            raw.count(patched)
+            + sum(
+                raw.count(signature)
+                for signature in PATCHED_ALTERNATIVES.get(name, ())
+            )
+        ) == 1
+        and raw.count(original) == 0
+        for name, original, patched in PATCHES
     )
     reload_guards = all(
         condition for condition in (
-            raw.count(INIT_RESOURCE_METHOD_PATCHED) == 1,
+            sum(raw.count(signature) for signature in (
+                INIT_RESOURCE_METHOD_PATCHED,
+                INIT_RESOURCE_METHOD_REMOTE_PATCHED,
+                INIT_RESOURCE_METHOD_MERGED_PATCHED,
+            )) == 1,
             raw.count(INIT_RESOURCE_METHOD_ORIGINAL) == 0,
-            raw.count(REMAINING_RESOURCE_METHOD_PATCHED) == 1,
+            raw.count(INIT_RESOURCE_METHOD_REMOTE_ORIGINAL) == 0,
+            sum(raw.count(signature) for signature in (
+                REMAINING_RESOURCE_METHOD_PATCHED,
+                REMAINING_RESOURCE_METHOD_REMOTE_PATCHED,
+                REMAINING_RESOURCE_METHOD_MERGED_PATCHED,
+            )) == 1,
             raw.count(REMAINING_RESOURCE_METHOD_ORIGINAL) == 0,
+            raw.count(REMAINING_RESOURCE_METHOD_REMOTE_ORIGINAL) == 0,
             raw.count(REMAINING_RESOURCE_METHOD_V10) == 0,
             raw.count(REMAINING_TREE_BOUNDARY_PATCHED) == 1,
             raw.count(REMAINING_TREE_BOUNDARY_ORIGINAL) == 0,
         )
     )
     return equal_length_patches and reload_guards
+
+
+def merged_ui_fixes_present(data: bytes) -> bool:
+    """Verify the non-overlapping UI fixes brought in from origin/main."""
+    raw, _ = _uncompress(data)
+    return all((
+        raw.count(MERGED_CASH_HUD_FORMATTED) == 1,
+        raw.count(MERGED_OGRE_COUNT_CLAMPED) == 1,
+        raw.count(MERGED_SPECIAL_ATTACK_OVER_METHOD) == 1,
+        raw.count(MERGED_SPECIAL_ATTACK_OUT_METHOD) == 1,
+    ))
 
 
 def main() -> None:

@@ -142,6 +142,15 @@ def get_player_info(USERID, map_number=None):
             m["numTradesDone"] = 0
             m["resourcesTraded"] = {}
             m["timestampLastTrade"] = 0
+    # Item collectibles: the client loads privateState.collections (per
+    # collection: [completedFlag, count, count, ...]) and collectionsCompleted.
+    # Without them the client's load silently fails (try/catch) and collected
+    # items vanish on reload. Seed the structures (NUM_COLLECTIONS = 23, so 24
+    # slots) so add_collectable has somewhere to persist.
+    pState.setdefault("collectionsCompleted", [])
+    colls = pState.setdefault("collections", [])
+    while len(colls) < 24:
+        colls.append([0])
     _ensure_town_list(save)
     _sync_global_level(save)
     # player
