@@ -471,6 +471,85 @@ def unlink_friend(USERID: str, other_id: str) -> bool:
     return changed
 
 
+def _friend_request_list(owner_id: str) -> list:
+    """The owner's incoming friend-request queue (requester uids)."""
+    ps = __saves[owner_id]["privateState"]
+    reqs = ps.get("friendRequests")
+    if not isinstance(reqs, list):
+        reqs = []
+        ps["friendRequests"] = reqs
+    return reqs
+
+
+def request_friend(USERID: str, other_id: str) -> str:
+    """Send a local friend request. Real Facebook had an async invite/accept
+    handshake; recreate it between saved players. A request sits in the target's
+    queue until accepted. If the target already requested us, accept at once.
+    Returns a status code: requested / accepted / pending / already_friends /
+    invalid."""
+    USERID, other_id = str(USERID), str(other_id)
+    if USERID == other_id or USERID not in __saves or other_id not in __saves:
+        return "invalid"
+    if is_friend(USERID, other_id):
+        return "already_friends"
+    # They already asked us -> accepting our own send completes the link.
+    if other_id in [str(value) for value in _friend_request_list(USERID)]:
+        accept_friend(USERID, other_id)
+        return "accepted"
+    target_queue = _friend_request_list(other_id)
+    if USERID in [str(value) for value in target_queue]:
+        return "pending"
+    target_queue.append(USERID)
+    save_session(other_id)
+    return "requested"
+
+
+def accept_friend(USERID: str, other_id: str) -> bool:
+    """Accept an incoming request: create the reciprocal link and clear the
+    request from both queues."""
+    USERID, other_id = str(USERID), str(other_id)
+    if USERID not in __saves or other_id not in __saves:
+        return False
+    if other_id not in [str(value) for value in _friend_request_list(USERID)]:
+        return False
+    link_friend(USERID, other_id)
+    for owner_id, requester_id in ((USERID, other_id), (other_id, USERID)):
+        queue = _friend_request_list(owner_id)
+        filtered = [value for value in queue if str(value) != requester_id]
+        if filtered != queue:
+            __saves[owner_id]["privateState"]["friendRequests"] = filtered
+            save_session(owner_id)
+    return True
+
+
+def decline_friend(USERID: str, other_id: str) -> bool:
+    """Remove an incoming request without linking."""
+    USERID, other_id = str(USERID), str(other_id)
+    if USERID not in __saves:
+        return False
+    queue = _friend_request_list(USERID)
+    filtered = [value for value in queue if str(value) != other_id]
+    if filtered == queue:
+        return False
+    __saves[USERID]["privateState"]["friendRequests"] = filtered
+    save_session(USERID)
+    return True
+
+
+def incoming_friend_requests(USERID: str) -> list:
+    """Players who have asked to be this player's friend and are not linked yet."""
+    USERID = str(USERID)
+    if USERID not in __saves:
+        return []
+    linked = set(_linked_player_ids(USERID))
+    requests = []
+    for uid in list(_friend_request_list(USERID)):
+        uid = str(uid)
+        if uid in __saves and uid != USERID and uid not in linked:
+            requests.append(save_info(uid))
+    return requests
+
+
 def friend_candidates(USERID: str) -> list:
     """Saved players available to add through the local Friends page."""
     USERID = str(USERID)
@@ -481,6 +560,11 @@ def friend_candidates(USERID: str) -> list:
             continue
         info = save_info(uid)
         info["linked"] = uid in linked
+        # A pending outgoing request means our id sits in their inbox.
+        info["requested"] = (
+            not info["linked"]
+            and USERID in [str(value) for value in _friend_request_list(uid)]
+        )
         candidates.append(info)
     return candidates
 

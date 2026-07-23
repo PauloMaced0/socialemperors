@@ -20,6 +20,7 @@ from sessions import (
     load_saved_villages, all_saves_userid, all_saves_info, save_info,
     new_village, fb_friends_str, pvp_profiles, friend_candidates,
     link_friend, unlink_friend,
+    request_friend, accept_friend, decline_friend, incoming_friend_requests,
 )
 from auth import has_password, set_password, check_password, change_password
 load_saved_villages()
@@ -212,11 +213,25 @@ def friends_page():
     if request.method == "POST":
         other_id = str(request.form.get("friend_id", ""))
         action = request.form.get("action")
-        if action == "add":
+        if action == "request":
+            message = {
+                "requested": "Friend request sent.",
+                "accepted": "Request matched — you are now friends.",
+                "pending": "A request to that player is already pending.",
+                "already_friends": "You are already friends.",
+                "invalid": "Unable to send that request.",
+            }.get(request_friend(USERID, other_id), "Unable to send that request.")
+        elif action == "accept":
             message = (
-                "Friend added."
-                if link_friend(USERID, other_id)
-                else "Unable to add that player."
+                "Friend request accepted."
+                if accept_friend(USERID, other_id)
+                else "No such request to accept."
+            )
+        elif action == "decline":
+            message = (
+                "Friend request declined."
+                if decline_friend(USERID, other_id)
+                else "No such request to decline."
             )
         elif action == "remove":
             message = (
@@ -228,6 +243,7 @@ def friends_page():
         "friends.html",
         save_info=save_info(USERID),
         candidates=friend_candidates(USERID),
+        requests=incoming_friend_requests(USERID),
         message=message,
     )
 

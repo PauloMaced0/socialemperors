@@ -2,51 +2,183 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Social Empires — Friends</title>
-    <link rel="stylesheet" href="css/facebook.css">
+    <style>
+        :root {
+            --bg: #eef1e6;
+            --card: #ffffff;
+            --ink: #2f3a22;
+            --muted: #78846a;
+            --line: #e2e6d6;
+            --accent: #6a9c2c;
+            --accent-dark: #517a1f;
+            --gold: #d9a520;
+            --danger: #b1481f;
+            --shadow: 0 1px 3px rgba(47, 58, 34, .12), 0 6px 20px rgba(47, 58, 34, .08);
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: 'Segoe UI', 'lucida grande', tahoma, verdana, arial, sans-serif;
+            background: linear-gradient(180deg, #f6f8ef 0%, var(--bg) 100%);
+            color: var(--ink);
+            min-height: 100vh;
+        }
+        main { max-width: 680px; margin: 0 auto; padding: 40px 20px 64px; }
+        header.page { display: flex; align-items: center; gap: 14px; margin-bottom: 6px; }
+        header.page .crest {
+            width: 46px; height: 46px; border-radius: 12px; flex: none;
+            background: linear-gradient(160deg, var(--accent), var(--accent-dark));
+            display: grid; place-items: center; color: #fff; font-size: 24px;
+            box-shadow: var(--shadow);
+        }
+        header.page h1 { font-size: 22px; margin: 0; line-height: 1.1; }
+        header.page .sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
+        .hint { color: var(--muted); font-size: 13px; margin: 14px 2px 22px; line-height: 1.5; }
+        .flash {
+            background: #f0f7e4; border: 1px solid #cfe3ad; color: var(--accent-dark);
+            padding: 11px 14px; border-radius: 10px; font-size: 14px; font-weight: 600;
+            margin-bottom: 22px;
+        }
+        section { margin-bottom: 30px; }
+        .sec-head { display: flex; align-items: center; gap: 8px; margin: 0 2px 12px; }
+        .sec-head h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .06em;
+            color: var(--muted); margin: 0; font-weight: 700; }
+        .count {
+            background: var(--accent); color: #fff; font-size: 12px; font-weight: 700;
+            min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px;
+            display: inline-grid; place-items: center;
+        }
+        .list { display: flex; flex-direction: column; gap: 10px; }
+        .row {
+            display: flex; align-items: center; gap: 14px;
+            background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+            padding: 12px 14px; box-shadow: var(--shadow);
+        }
+        .avatar {
+            width: 42px; height: 42px; border-radius: 50%; flex: none;
+            display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 17px;
+            background: linear-gradient(160deg, #8bb84a, #5f8f26);
+        }
+        .who { flex: 1 1 auto; min-width: 0; }
+        .who .name { font-weight: 700; font-size: 15px; white-space: nowrap;
+            overflow: hidden; text-overflow: ellipsis; }
+        .who .lvl { color: var(--muted); font-size: 12.5px; margin-top: 1px; }
+        .actions { display: flex; align-items: center; gap: 8px; flex: none; }
+        button {
+            font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+            border: 0; border-radius: 8px; padding: 8px 14px; color: #fff;
+            transition: filter .12s ease;
+        }
+        button:hover { filter: brightness(1.06); }
+        button:active { filter: brightness(.94); }
+        .btn-primary { background: var(--accent); }
+        .btn-accept { background: var(--accent); }
+        .btn-decline, .btn-remove { background: transparent; color: var(--danger);
+            border: 1px solid #e6c3b6; }
+        .badge {
+            font-size: 12px; font-weight: 700; padding: 5px 11px; border-radius: 20px;
+        }
+        .badge-friend { background: #eaf4d8; color: var(--accent-dark); }
+        .badge-pending { background: #fbf1d6; color: #8a6a12; }
+        .empty {
+            background: var(--card); border: 1px dashed var(--line); border-radius: 12px;
+            padding: 22px; text-align: center; color: var(--muted); font-size: 14px;
+        }
+        form.inline { display: inline; margin: 0; }
+        .back { display: inline-block; margin-top: 8px; color: var(--accent-dark);
+            font-weight: 600; text-decoration: none; font-size: 14px; }
+        .back:hover { text-decoration: underline; }
+    </style>
 </head>
-<body style="font-family: 'lucida grande',tahoma,verdana,arial,sans-serif">
-<main style="width: 620px; margin: 40px auto;">
-    <h2>Friends for {{ save_info.name }}</h2>
-    <p>
-        Only players added here appear as neighbours or can fill
-        <em>Hire friends</em> building roles.
+<body>
+<main>
+    <header class="page">
+        <div class="crest">&#9876;</div>
+        <div>
+            <h1>Friends</h1>
+            <div class="sub">{{ save_info.name }}</div>
+        </div>
+    </header>
+    <p class="hint">
+        Only players linked here appear as neighbours and can fill
+        <em>Hire friends</em> building roles. Send a request; it becomes a
+        friendship once the other empire accepts.
     </p>
+
     {% if message %}
-    <p style="font-weight: bold;">{{ message }}</p>
+    <div class="flash">{{ message }}</div>
     {% endif %}
-    {% if candidates %}
-    <table style="width: 100%; border-collapse: collapse;">
-        <thead>
-            <tr>
-                <th style="text-align: left; border-bottom: 1px solid #bbb;">Empire</th>
-                <th style="text-align: left; border-bottom: 1px solid #bbb;">Level</th>
-                <th style="border-bottom: 1px solid #bbb;">Status</th>
-            </tr>
-        </thead>
-        <tbody>
-        {% for player in candidates %}
-            <tr>
-                <td style="padding: 8px 0;">{{ player.name }}</td>
-                <td>{{ player.level }}</td>
-                <td style="text-align: right;">
-                    <form method="post" style="display: inline;">
+
+    <section>
+        <div class="sec-head">
+            <h2>Friend requests</h2>
+            {% if requests %}<span class="count">{{ requests|length }}</span>{% endif %}
+        </div>
+        {% if requests %}
+        <div class="list">
+            {% for player in requests %}
+            <div class="row">
+                <div class="avatar">{{ player.name[0]|upper }}</div>
+                <div class="who">
+                    <div class="name">{{ player.name }}</div>
+                    <div class="lvl">Level {{ player.level }} &middot; wants to be your friend</div>
+                </div>
+                <div class="actions">
+                    <form class="inline" method="post">
                         <input type="hidden" name="friend_id" value="{{ player.userid }}">
-                        {% if player.linked %}
-                        <button type="submit" name="action" value="remove">Remove friend</button>
-                        {% else %}
-                        <button type="submit" name="action" value="add">Add friend</button>
-                        {% endif %}
+                        <button class="btn-accept" type="submit" name="action" value="accept">Accept</button>
                     </form>
-                </td>
-            </tr>
-        {% endfor %}
-        </tbody>
-    </table>
-    {% else %}
-    <p>Create another saved empire before adding a local friend.</p>
-    {% endif %}
-    <p style="margin-top: 24px;"><a href="/play.html">Return to the game</a></p>
+                    <form class="inline" method="post">
+                        <input type="hidden" name="friend_id" value="{{ player.userid }}">
+                        <button class="btn-decline" type="submit" name="action" value="decline">Decline</button>
+                    </form>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty">No pending friend requests.</div>
+        {% endif %}
+    </section>
+
+    <section>
+        <div class="sec-head"><h2>All empires</h2></div>
+        {% if candidates %}
+        <div class="list">
+            {% for player in candidates %}
+            <div class="row">
+                <div class="avatar">{{ player.name[0]|upper }}</div>
+                <div class="who">
+                    <div class="name">{{ player.name }}</div>
+                    <div class="lvl">Level {{ player.level }}</div>
+                </div>
+                <div class="actions">
+                    {% if player.linked %}
+                    <span class="badge badge-friend">&#10003; Friend</span>
+                    <form class="inline" method="post">
+                        <input type="hidden" name="friend_id" value="{{ player.userid }}">
+                        <button class="btn-remove" type="submit" name="action" value="remove">Remove</button>
+                    </form>
+                    {% elif player.requested %}
+                    <span class="badge badge-pending">Request sent</span>
+                    {% else %}
+                    <form class="inline" method="post">
+                        <input type="hidden" name="friend_id" value="{{ player.userid }}">
+                        <button class="btn-primary" type="submit" name="action" value="request">Add friend</button>
+                    </form>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty">Create another saved empire before adding a local friend.</div>
+        {% endif %}
+    </section>
+
+    <a class="back" href="/play.html">&larr; Return to the game</a>
 </main>
 </body>
 </html>
