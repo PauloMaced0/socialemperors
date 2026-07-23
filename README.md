@@ -35,6 +35,20 @@ This project is dedicated to preserving this Flash game so that it's not lost to
 
 :information_source: To play on GNU/Linux check [this page](LINUX.md).
 
+### Running from source
+
+```sh
+python3 server.py
+```
+
+The server listens on `127.0.0.1:5050` by default. `SE_BIND` and `SE_PORT`
+change the bind address and port.
+
+When publishing the game through Nginx, the application now derives every
+Ruffle, SWF, asset and API URL from the forwarded browser-facing origin.
+No response-body `sub_filter` is required. See the
+[reverse-proxy example](docs/reverse-proxy.md).
+
 ## Tools
 
 :penguin: [Social Empires on GNU/Linux](LINUX.md)

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Social Empires — Friends</title>
+    <link rel="stylesheet" href="css/facebook.css">
+</head>
+<body style="font-family: 'lucida grande',tahoma,verdana,arial,sans-serif">
+<main style="width: 620px; margin: 40px auto;">
+    <h2>Friends for {{ save_info.name }}</h2>
+    <p>
+        Only players added here appear as neighbours or can fill
+        <em>Hire friends</em> building roles.
+    </p>
+    {% if message %}
+    <p style="font-weight: bold;">{{ message }}</p>
+    {% endif %}
+    {% if candidates %}
+    <table style="width: 100%; border-collapse: collapse;">
+        <thead>
+            <tr>
+                <th style="text-align: left; border-bottom: 1px solid #bbb;">Empire</th>
+                <th style="text-align: left; border-bottom: 1px solid #bbb;">Level</th>
+                <th style="border-bottom: 1px solid #bbb;">Status</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for player in candidates %}
+            <tr>
+                <td style="padding: 8px 0;">{{ player.name }}</td>
+                <td>{{ player.level }}</td>
+                <td style="text-align: right;">
+                    <form method="post" style="display: inline;">
+                        <input type="hidden" name="friend_id" value="{{ player.userid }}">
+                        {% if player.linked %}
+                        <button type="submit" name="action" value="remove">Remove friend</button>
+                        {% else %}
+                        <button type="submit" name="action" value="add">Add friend</button>
+                        {% endif %}
+                    </form>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p>Create another saved empire before adding a local friend.</p>
+    {% endif %}
+    <p style="margin-top: 24px;"><a href="/play.html">Return to the game</a></p>
+</main>
+</body>
+</html>

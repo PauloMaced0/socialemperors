@@ -294,11 +294,19 @@ def test_save_info_level_derived_from_xp(tmp):
     assert sessions.save_info(UID)["level"] == 99, "village list did not derive level from xp"
 
 
-def test_neighbors_does_not_pollute_playerinfo(tmp):
-    sessions.neighbors(UID)
-    static = sessions.neighbor_session("1111")  # AcidCaos static village
-    for k in ("coins", "xp", "level", "stone", "wood", "food"):
-        assert k not in static["playerInfo"], f"neighbors() leaked '{k}' into stored playerInfo"
+def test_static_scenarios_are_not_social_players(tmp):
+    arthur = str(Constant.NEIGHBOUR_ARTHUR_GUINEVERE_1)
+    assert sessions.neighbor_session(arthur) is not None, \
+        "Arthur scenario is unavailable for its scripted visit"
+    assert not sessions.is_friend(UID, arthur)
+    assert not any(
+        str(entry["pid"]) == arthur for entry in sessions.neighbors(UID)
+    ), "scripted Arthur scenario leaked into the social neighbour list"
+    assert sessions.neighbor_session("1111") is None, \
+        "removed AcidCaos sample account is still loaded at runtime"
+    assert all(
+        str(entry["user_id"]) != "1111" for entry in sessions.pvp_profiles()
+    ), "removed AcidCaos sample account is still a PvP opponent"
 
 
 def test_loading_scrubs_leaked_playerinfo_fields(tmp):
@@ -334,7 +342,7 @@ TESTS = [
     test_buy_map_insufficient_gold_rejected,
     test_load_repairs_broken_troll_town,
     test_save_info_level_derived_from_xp,
-    test_neighbors_does_not_pollute_playerinfo,
+    test_static_scenarios_are_not_social_players,
     test_loading_scrubs_leaked_playerinfo_fields,
 ]
 

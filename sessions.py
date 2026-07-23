@@ -253,6 +253,11 @@ def load_saved_villages():
         # accident via aliasing in neighbors()).
         for leaked in ("coins", "xp", "level", "stone", "wood", "food"):
             save["playerInfo"].pop(leaked, None)
+        # Local save files are separate players, not automatically Facebook
+        # friends.  Older builds exposed every save as a neighbour, which made
+        # private villages appear on friend cards and let social buildings post
+        # to people the current player had never added.
+        save["privateState"].setdefault("neighbors", [])
         __saves[str(USERID)] = save
         modified = migrate_loaded_save(save) # check save version for migration
         if _repair_broken_troll_towns(save):
@@ -284,6 +289,7 @@ def new_village() -> str:
     # misreads a bare `false` as truthy. 0 = no unclaimed free game; the client
     # claims the daily free game itself on a new local day (darts_new_free).
     village["privateState"]["dartsHasFree"] = 0
+    village["privateState"]["neighbors"] = []
     # Memory saves
     __saves[USERID] = village
     # Generate save file
@@ -403,23 +409,88 @@ def _friend_entry(vill: dict) -> dict:
     }
 
 
+def _linked_player_ids(USERID: str) -> list:
+    """Explicit local-player friendships for ``USERID``.
+
+    Saved player villages only appear when their id is present in
+    privateState.neighbors; merely creating another login/save must never
+    create a friendship. Static scenario maps are never social users.
+    """
+    owner = __saves.get(str(USERID))
+    if owner is None:
+        return []
+    raw = owner.get("privateState", {}).get("neighbors", [])
+    if not isinstance(raw, list):
+        return []
+    result = []
+    for value in raw:
+        uid = str(value)
+        if uid != str(USERID) and uid in __saves and uid not in result:
+            result.append(uid)
+    return result
+
+
+def is_friend(USERID: str, other_id: str) -> bool:
+    """Whether a social action may target ``other_id``."""
+    return str(other_id) in _linked_player_ids(str(USERID))
+
+
+def link_friend(USERID: str, other_id: str) -> bool:
+    """Create a reciprocal friendship between two real saved players."""
+    USERID, other_id = str(USERID), str(other_id)
+    if USERID == other_id or USERID not in __saves or other_id not in __saves:
+        return False
+    changed = False
+    for owner_id, friend_id in ((USERID, other_id), (other_id, USERID)):
+        linked = __saves[owner_id]["privateState"].setdefault("neighbors", [])
+        if not isinstance(linked, list):
+            linked = []
+            __saves[owner_id]["privateState"]["neighbors"] = linked
+        if friend_id not in [str(value) for value in linked]:
+            linked.append(friend_id)
+            save_session(owner_id)
+            changed = True
+    return changed
+
+
+def unlink_friend(USERID: str, other_id: str) -> bool:
+    """Remove a reciprocal friendship without altering completed staffing."""
+    USERID, other_id = str(USERID), str(other_id)
+    if USERID not in __saves or other_id not in __saves:
+        return False
+    changed = False
+    for owner_id, friend_id in ((USERID, other_id), (other_id, USERID)):
+        linked = __saves[owner_id]["privateState"].get("neighbors", [])
+        if not isinstance(linked, list):
+            continue
+        filtered = [value for value in linked if str(value) != friend_id]
+        if filtered != linked:
+            __saves[owner_id]["privateState"]["neighbors"] = filtered
+            save_session(owner_id)
+            changed = True
+    return changed
+
+
+def friend_candidates(USERID: str) -> list:
+    """Saved players available to add through the local Friends page."""
+    USERID = str(USERID)
+    linked = set(_linked_player_ids(USERID))
+    candidates = []
+    for uid in sorted(__saves):
+        if uid == USERID:
+            continue
+        info = save_info(uid)
+        info["linked"] = uid in linked
+        candidates.append(info)
+    return candidates
+
+
 def fb_friends_str(USERID: str) -> list:
     friends = []
-    # static villages
-    for key in __villages:
-        vill = __villages[key]
-        # Avoid Arthur being loaded as friend.
-        if vill["playerInfo"]["pid"] == Constant.NEIGHBOUR_ARTHUR_GUINEVERE_1 \
-        or vill["playerInfo"]["pid"] == Constant.NEIGHBOUR_ARTHUR_GUINEVERE_2 \
-        or vill["playerInfo"]["pid"] == Constant.NEIGHBOUR_ARTHUR_GUINEVERE_3:
-            continue
-        friends += [_friend_entry(vill)]
-    # other players
-    for key in __saves:
-        vill = __saves[key]
-        if vill["playerInfo"]["pid"] == USERID:
-            continue
-        friends += [_friend_entry(vill)]
+    # Explicitly linked local players only. Static scenarios and unrelated
+    # save files are not Facebook friends.
+    for key in _linked_player_ids(USERID):
+        friends += [_friend_entry(__saves[key])]
     return friends
 
 def _display_name(vill: dict) -> str:
@@ -428,11 +499,19 @@ def _display_name(vill: dict) -> str:
     Two kinds of village disagree on where the real name lives:
       - Player saves keep playerInfo["name"] at the hardcoded default
         "Emperor" and carry the real identity in map_names (the town name).
-      - Static neighbours (AcidCaos, Arthur) have a personalised
+      - Static scenario maps have a personalised
         playerInfo["name"] but a generic map_names ("My Empire", "Boss").
     So trust playerInfo["name"] when it's been personalised, and only fall
     back to the default town's name when it's still the generic "Emperor"."""
     pi = vill["playerInfo"]
+    # Player saves use the empire/town name as their only locally editable
+    # identity.  Always read it live, so renaming a town also fixes cards that
+    # previously remained stuck on "Emperor" or an older name.
+    if str(pi.get("pid")) in __saves:
+        names = pi.get("map_names") or []
+        dm = int(pi.get("default_map", 0) or 0)
+        if 0 <= dm < len(names) and names[dm]:
+            return str(names[dm])
     name = pi.get("name")
     if name and name != "Emperor":
         return str(name)
@@ -445,30 +524,9 @@ def _display_name(vill: dict) -> str:
 
 def neighbors(USERID: str) -> list:
     neighbors = []
-    # static villages
-    for key in __villages:
-        vill = __villages[key]
-        # Avoid Arthur being loaded as multiple neigtbors.
-        if vill["playerInfo"]["pid"] == Constant.NEIGHBOUR_ARTHUR_GUINEVERE_1 \
-        or vill["playerInfo"]["pid"] == Constant.NEIGHBOUR_ARTHUR_GUINEVERE_2 \
-        or vill["playerInfo"]["pid"] == Constant.NEIGHBOUR_ARTHUR_GUINEVERE_3:
-            continue
-        # Copy: mutating playerInfo in place leaks these transient fields
-        # into the stored village and gets persisted on the next save.
-        neigh = dict(vill["playerInfo"])
-        neigh["name"] = _display_name(vill)
-        neigh["coins"] = vill["maps"][0]["coins"]
-        neigh["xp"] = vill["maps"][0]["xp"]
-        neigh["level"] = vill["maps"][0]["level"]
-        neigh["stone"] = vill["maps"][0]["stone"]
-        neigh["wood"] = vill["maps"][0]["wood"]
-        neigh["food"] = vill["maps"][0]["food"]
-        neighbors += [neigh]
-    # other players
-    for key in __saves:
+    # Explicitly linked local players only.
+    for key in _linked_player_ids(USERID):
         vill = __saves[key]
-        if vill["playerInfo"]["pid"] == USERID:
-            continue
         neigh = dict(vill["playerInfo"])
         neigh["name"] = _display_name(vill)
         neigh["coins"] = vill["maps"][0]["coins"]
@@ -479,6 +537,37 @@ def neighbors(USERID: str) -> list:
         neigh["food"] = vill["maps"][0]["food"]
         neighbors += [neigh]
     return neighbors
+
+
+def pvp_profiles() -> list:
+    """Serializable player profiles used by the PvP continent.
+
+    PvP opponents are deliberately independent from friendship: all saved
+    villages can be matched in battle without being injected into the social
+    neighbour bar.
+    """
+    from get_game_config import get_level_from_xp
+
+    profiles = []
+    # PvP is between real saved players. Static scenario maps are never
+    # surfaced as accounts or opponents.
+    candidates = sorted(__saves.items(), key=lambda pair: pair[0])
+    for uid, vill in candidates:
+        pi = vill["playerInfo"]
+        maps = vill.get("maps") or [{}]
+        dm = int(pi.get("default_map", 0) or 0)
+        if dm < 0 or dm >= len(maps):
+            dm = 0
+        town = maps[dm]
+        profiles.append({
+            "user_id": str(uid),
+            "name": _display_name(vill),
+            "level": max(1, int(get_level_from_xp(int(town.get("xp", 0) or 0)))),
+            "race": town.get("race", "h"),
+            "map": dm,
+            "pic": pi.get("pic") or "",
+        })
+    return profiles
 
 # Check for valid village
 # The reason why this was implemented is to warn the user if a save game from Social Wars was used by accident

@@ -6,6 +6,7 @@ from sessions import (
 )
 from engine import timestamp_now
 from constants import Constant
+from get_game_config import get_level_from_xp
 
 
 def _ensure_town_list(save):
@@ -30,11 +31,17 @@ def _sync_global_level(save):
     low level and levelling there would overwrite the main town. Keep the
     default town as canonical and copy its xp/level to the others."""
     maps = save["maps"]
-    if len(maps) < 2:
-        return
-    canonical = maps[int(save["playerInfo"].get("default_map", 0) or 0)]
-    xp, level = canonical.get("xp", 0), canonical.get("level", 1)
-    for i, town in enumerate(maps):
+    default = int(save["playerInfo"].get("default_map", 0) or 0)
+    if default < 0 or default >= len(maps):
+        default = 0
+    canonical = maps[default]
+    xp = max(0, int(canonical.get("xp", 0) or 0))
+    # The level field in old saves can drift from XP.  The HUD uses both
+    # values to choose its min/max thresholds, so normalize the level before
+    # the client computes the within-level progress bar.
+    level = max(1, int(get_level_from_xp(xp)))
+    canonical["xp"], canonical["level"] = xp, level
+    for town in maps:
         if town is not canonical:
             town["xp"], town["level"] = xp, level
 
@@ -105,21 +112,46 @@ def get_player_info(USERID, map_number=None):
     # last-step time that gates the 48h wait.
     pState.setdefault("templeStep", [])
     pState.setdefault("timeStampTemple", 0)
-    # Player card name: playerInfo["name"] is the hardcoded default "Emperor"
-    # on player saves, so the own card reads "Emperor". When it's still that
-    # default, show the real identity - the default town's name. (Leave an
-    # already-personalised name alone.)
+    # PvP client code iterates these lists and performs arithmetic on the
+    # counters during every load; missing/null legacy values break histories,
+    # cooldowns and goal progress.
+    if not isinstance(pState.get("attacksSent"), list):
+        pState["attacksSent"] = []
+    if not isinstance(pState.get("attacksReceived"), list):
+        pState["attacksReceived"] = []
+    for pvp_key in (
+        "attacksWon", "attacksLost", "honor", "tsAttacksReset",
+        "attacksPack", "spyingsPack", "tsSpyingsReset",
+    ):
+        try:
+            pState[pvp_key] = int(pState.get(pvp_key, 0) or 0)
+        except (TypeError, ValueError):
+            pState[pvp_key] = 0
+    if not isinstance(pState.get("spyings"), list):
+        pState["spyings"] = []
+    # The local server has no separate Facebook display name, so the editable
+    # default-town name is the player's identity. Keep it synchronized after
+    # every rename; otherwise cards stay stuck on "Emperor" or an older name.
     pi = save["playerInfo"]
-    if not pi.get("name") or pi.get("name") == "Emperor":
-        names = pi.get("map_names") or []
-        dm = int(pi.get("default_map", 0) or 0)
-        if 0 <= dm < len(names) and names[dm]:
-            pi["name"] = names[dm]
+    names = pi.get("map_names") or []
+    dm = int(pi.get("default_map", 0) or 0)
+    if 0 <= dm < len(names) and names[dm]:
+        pi["name"] = names[dm]
     # Market state is a 20-hour period in the Flash client.
     for m in save["maps"]:
-        m.setdefault("numTradesDone", 0)
-        m.setdefault("timestampLastTrade", 0)
-        m.setdefault("resourcesTraded", {})
+        try:
+            trades_done = int(m.get("numTradesDone", 0) or 0)
+        except (TypeError, ValueError):
+            trades_done = 0
+        m["numTradesDone"] = min(max(trades_done, 0), 20)
+        try:
+            m["timestampLastTrade"] = max(
+                0, int(m.get("timestampLastTrade", 0) or 0)
+            )
+        except (TypeError, ValueError):
+            m["timestampLastTrade"] = 0
+        if not isinstance(m.get("resourcesTraded"), dict):
+            m["resourcesTraded"] = {}
         m.setdefault("resourceAlliesMarket", "n")
         # Unit Warehouse state is per-town. Older/new saves omitted these
         # fields, which made the client show zero slots and forget stored units
@@ -176,7 +208,16 @@ def get_neighbor_info(userid, map_number):
     save = neighbor_session(userid)
     if save is None:
         return ({"result": "error", "error": "unknown_user"}, 404)
+    # Visiting a local save must show the same editable empire name and global
+    # level as its owner sees. Previously only the self-load path repaired
+    # these fields, leaving visit/player cards stuck on the legacy "Emperor".
+    pi = save["playerInfo"]
+    names = pi.get("map_names") or []
+    default = int(pi.get("default_map", 0) or 0)
+    if 0 <= default < len(names) and names[default]:
+        pi["name"] = names[default]
     _ensure_town_list(save)
+    _sync_global_level(save)
     map_idx = _clamp_map(save, map_number)
     neighbor_info = {
         "result": "ok",

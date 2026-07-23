@@ -16,7 +16,11 @@ from get_game_config import get_game_config, patch_game_config, refresh_darts_sc
 
 print (" [+] Loading players...")
 from get_player_info import get_player_info, get_neighbor_info
-from sessions import load_saved_villages, all_saves_userid, all_saves_info, save_info, new_village, fb_friends_str
+from sessions import (
+    load_saved_villages, all_saves_userid, all_saves_info, save_info,
+    new_village, fb_friends_str, pvp_profiles, friend_candidates,
+    link_friend, unlink_friend,
+)
 from auth import has_password, set_password, check_password, change_password
 load_saved_villages()
 
@@ -25,6 +29,7 @@ WORKING_GAMEVERSION = "SocialEmpires0926bsec.swf"
 print (" [+] Loading server...")
 from flask import Flask, render_template, send_from_directory, request, redirect, session
 from flask.debughelpers import attach_enctype_error_multidict
+from werkzeug.middleware.proxy_fix import ProxyFix
 from command import command
 from engine import timestamp_now
 from version import version_name
@@ -33,18 +38,23 @@ from quests import get_quest_map
 from tournaments import get_tournament_info, join_tournament_full, tournament_ok
 from bundle import ASSETS_DIR, STUB_DIR, TEMPLATES_DIR, BASE_DIR
 
-# host    = address the server BINDS to (0.0.0.0 to accept LAN/Tailscale peers)
-# port    = listen port (also hard-coded as :5050 in the templates' asset URLs,
-#           so keep it 5050 unless you also change those)
-# serverip = address baked into the page's asset URLs; must be what CLIENTS
-#           reach the server on (e.g. the Pi's Tailscale IP), NOT 127.0.0.1,
-#           or a friend's browser fetches from its own machine and gets nothing.
-# Defaults preserve the old local-only behaviour; override via env on the Pi.
+# host = address the server BINDS to (0.0.0.0 to accept LAN/Tailscale peers).
+# port = listen port. Public asset/API URLs are derived from the request,
+# including the forwarded host/protocol supplied by one trusted reverse proxy.
 host = os.environ.get('SE_BIND', '127.0.0.1')
 port = int(os.environ.get('SE_PORT', '5050'))
-serverip = os.environ.get('SE_SERVER_IP', '127.0.0.1')
 
 app = Flask(__name__, template_folder=TEMPLATES_DIR)
+# The normal deployment binds Flask to loopback behind Nginx. Trust exactly
+# one proxy hop so request.url_root reflects X-Forwarded-Proto/Host rather than
+# leaking http://127.0.0.1:5050 into Ruffle flashvars.
+app.wsgi_app = ProxyFix(
+    app.wsgi_app,
+    x_for=1,
+    x_proto=1,
+    x_host=1,
+    x_port=1,
+)
 
 
 @app.after_request
@@ -182,7 +192,44 @@ def ruffle():
     # Real friends list (JSON) for the client's friendsInfo flashvar - names,
     # levels and pics for neighbour cards and the "ask friends to help" box.
     friends_json = json.dumps(fb_friends_str(USERID), separators=(",", ":"))
-    return render_template("ruffle.html", save_info=save_info(USERID), serverTime=timestamp_now(), version=version_name, GAMEVERSION=GAMEVERSION, SERVERIP=serverip, friendsInfo=friends_json)
+    return render_template(
+        "ruffle.html",
+        save_info=save_info(USERID),
+        serverTime=timestamp_now(),
+        version=version_name,
+        GAMEVERSION=GAMEVERSION,
+        SERVERURL=request.url_root.rstrip("/"),
+        friendsInfo=friends_json,
+    )
+
+
+@app.route("/friends", methods=["GET", "POST"])
+def friends_page():
+    USERID = session.get("USERID")
+    if not USERID or USERID not in all_saves_userid():
+        return redirect("/")
+    message = None
+    if request.method == "POST":
+        other_id = str(request.form.get("friend_id", ""))
+        action = request.form.get("action")
+        if action == "add":
+            message = (
+                "Friend added."
+                if link_friend(USERID, other_id)
+                else "Unable to add that player."
+            )
+        elif action == "remove":
+            message = (
+                "Friend removed."
+                if unlink_friend(USERID, other_id)
+                else "Unable to remove that player."
+            )
+    return render_template(
+        "friends.html",
+        save_info=save_info(USERID),
+        candidates=friend_candidates(USERID),
+        message=message,
+    )
 
 
 @app.route("/new.html")
@@ -388,27 +435,42 @@ def command_response():
 @app.route("/dynamic.flash1.dev.socialpoint.es/appsfb/socialempiresdev/srvempires/get_continent_ranking.php")
 def get_continent_ranking_response():
 
-    USERID = request.values['USERID']
-    worldChange = request.values['worldChange']
+    # As with every other game endpoint, the logged-in session is
+    # authoritative.  The client-supplied USERID is only legacy metadata.
+    USERID = session.get("USERID")
+    if not USERID or USERID not in all_saves_userid():
+        return ({"result": "error", "error": "not_logged_in"}, 403)
+    worldChange = request.values.get('worldChange', 0)
     if 'spdebug' in request.values:
         spdebug = request.values['spdebug']
-    town_id = request.values['map']
-    user_key = request.values['user_key']
+    town_id = request.values.get('map', 0)
+    user_key = request.values.get('user_key', '')
 
-    # TODO - stub
-    response = {
-        "world_id": 0,
-        "continent": [
-            {"posicion": 0, "nivel": 1, "user_id": 1111}, # villages/AcidCaos
-            {"posicion": 1, "nivel": 0},
-            {"posicion": 2, "nivel": 0},
-            {"posicion": 3, "nivel": 0},
-            {"posicion": 4, "nivel": 0},
-            {"posicion": 5, "nivel": 0},
-            {"posicion": 6, "nivel": 0},
-            {"posicion": 7, "nivel": 0}
-        ]
-    }
+    profiles = pvp_profiles()
+    own = next((p for p in profiles if p["user_id"] == str(USERID)), None)
+    try:
+        requested_level = int(request.values.get("level_id", 0) or 0)
+    except (TypeError, ValueError):
+        requested_level = 0
+    continent_level = requested_level or (own["level"] if own else 1)
+    continent_level = min(max(continent_level, 1), 50)
+
+    # Keep positions deterministic across reloads. The current player is not
+    # forced to slot zero; adding a save therefore does not reshuffle all
+    # existing positions from one request to the next.
+    profiles.sort(key=lambda profile: profile["user_id"])
+    if own is not None and own not in profiles[:8]:
+        profiles = profiles[:7] + [own]
+    else:
+        profiles = profiles[:8]
+    continent = []
+    for position, profile in enumerate(profiles):
+        entry = dict(profile)
+        entry["posicion"] = position
+        entry["nivel"] = continent_level
+        continent.append(entry)
+
+    response = {"world_id": 0, "continent": continent}
     return(response)
 
 ## TOURNAMENTS

@@ -4,7 +4,7 @@ import datetime
 import math
 
 from sessions import (
-    session, save_session, fresh_town_map,
+    session, save_session, fresh_town_map, neighbor_session, is_friend,
     is_enemy_camp_marker, mark_enemy_camp_active,
     is_natural_resource, is_depleted_resource_placeholder,
 )
@@ -101,6 +101,139 @@ def _social_worker_count(social):
     return len([worker for worker in workers.split(",") if worker])
 
 
+def _hire_social_friend(save, USERID, x, y, town_id, item_id, friend_id):
+    """Fill one social-building role with an explicitly linked player."""
+    friend_id = str(friend_id)
+    if not is_friend(str(USERID), friend_id):
+        print(f"Social hire rejected - {friend_id} is not a linked friend.")
+        return False
+    if town_id < 0 or town_id >= len(save["maps"]):
+        return False
+    town = save["maps"][town_id]
+    item = _find_map_item(town, item_id, x, y)
+    social = _social_item(item_id)
+    if item is None or social is None:
+        print("Social hire rejected - building/config not found.")
+        return False
+    attrs = _item_attrs(item)
+    staff = attrs.setdefault("si", [])
+    if staff is None:
+        print("Social hire ignored - building is already open.")
+        return False
+    if not isinstance(staff, list):
+        staff = []
+        attrs["si"] = staff
+    required = _social_worker_count(social)
+    if friend_id in [str(value) for value in staff]:
+        print(f"Social hire ignored - {friend_id} already works here.")
+        return False
+    if len(staff) >= required:
+        print("Social hire ignored - staffing is already complete.")
+        return False
+    staff.append(friend_id)
+    print(
+        f"Hired friend {friend_id} ({len(staff)}/{required}) for "
+        f"{get_name_from_item_id(item_id)}."
+    )
+    return True
+
+
+_PRODUCTION_SECONDS = {
+    1: 30 * 60,
+    2: 60 * 60,
+    3: 4 * 60 * 60,
+    4: 8 * 60 * 60,
+}
+
+
+def _contained_worker_count(item):
+    if len(item) > 6 and isinstance(item[6], list):
+        return max(1, len(item[6]))
+    return 1
+
+
+def _start_production_cycle(item, now=None):
+    """Snapshot the beginning of a mine/mill production cycle.
+
+    `workerSeconds` is accumulated whenever staffing changes. This makes the
+    final bonus proportional to actual participation instead of trusting the
+    worker count sent by the Flash client at collection time.
+    """
+    attrs = _item_attrs(item)
+    try:
+        option = int(attrs.get("cp", 0) or 0)
+    except (TypeError, ValueError):
+        option = 0
+    if option not in _PRODUCTION_SECONDS:
+        attrs.pop("productionLabor", None)
+        return None
+    start = int(timestamp_now() if now is None else now)
+    attrs["productionLabor"] = {
+        "start": start,
+        "last": start,
+        "workers": _contained_worker_count(item),
+        "workerSeconds": 0,
+    }
+    return attrs["productionLabor"]
+
+
+def _update_production_labor(item, now=None):
+    """Accumulate staffed time up to now or the cycle's completion."""
+    attrs = _item_attrs(item)
+    try:
+        option = int(attrs.get("cp", 0) or 0)
+        started = int(item[4] or 0)
+    except (TypeError, ValueError, IndexError):
+        return None
+    duration = _PRODUCTION_SECONDS.get(option)
+    if duration is None or started <= 0:
+        return None
+    cycle = attrs.get("productionLabor")
+    if not isinstance(cycle, dict) or int(cycle.get("start", -1)) != started:
+        # Saves created before labour accounting do not tell us when their
+        # current workers entered. Count one baseline worker for that one
+        # in-flight cycle instead of granting a full late-worker bonus.
+        cycle = {
+            "start": started,
+            "last": started,
+            "workers": 1,
+            "workerSeconds": 0,
+        }
+        attrs["productionLabor"] = cycle
+    current = int(timestamp_now() if now is None else now)
+    horizon = min(max(current, started), started + duration)
+    last = min(max(int(cycle.get("last", started) or started), started), horizon)
+    workers = max(1, int(cycle.get("workers", 1) or 1))
+    cycle["workerSeconds"] = max(
+        0, int(cycle.get("workerSeconds", 0) or 0)
+    ) + workers * max(0, horizon - last)
+    cycle["last"] = horizon
+    return cycle
+
+
+def _set_production_workers(item):
+    attrs = _item_attrs(item)
+    cycle = attrs.get("productionLabor")
+    if isinstance(cycle, dict):
+        cycle["workers"] = _contained_worker_count(item)
+
+
+def _effective_production_workers(item, now=None):
+    """Average workers that participated before the resource became ready."""
+    cycle = _update_production_labor(item, now)
+    if not isinstance(cycle, dict):
+        return float(_contained_worker_count(item))
+    started = int(cycle["start"])
+    horizon = int(cycle.get("last", started) or started)
+    elapsed = max(0, horizon - started)
+    if elapsed == 0:
+        return float(max(1, int(cycle.get("workers", 1) or 1)))
+    return max(
+        1.0,
+        float(cycle.get("workerSeconds", 0) or 0) / float(elapsed),
+    )
+
+
 def _unit_warehouse_state(town):
     """Return normalized Unit Warehouse capacity and unit-count mapping.
 
@@ -170,6 +303,100 @@ def _add_gifts(save, item_id, count=1):
     while len(gifts) <= item_id:
         gifts.append(0)
     gifts[item_id] += count
+
+
+def _battle_counts(row):
+    """Return (item id, initial, killed, recovered) from a counted-array row."""
+    if not isinstance(row, (list, tuple)) or not row:
+        return None
+    try:
+        values = [int(row[i]) if i < len(row) else 0 for i in range(4)]
+    except (TypeError, ValueError):
+        return None
+    return values
+
+
+def _find_open_unit_position(town):
+    """Find a deterministic free map tile for a unit reward."""
+    occupied = {
+        (int(item[1]), int(item[2]))
+        for item in town.get("items", [])
+        if item and len(item) >= 3
+    }
+    # Start around the initial Town Hall and expand in rings. Exact client
+    # placement is cosmetic; persistence only needs a legal unoccupied tile.
+    for radius in range(1, 40):
+        for dx, dy in (
+            (radius, 0), (-radius, 0), (0, radius), (0, -radius),
+            (radius, radius), (-radius, radius),
+            (radius, -radius), (-radius, -radius),
+        ):
+            pos = (52 + dx, 52 + dy)
+            if 1 <= pos[0] < 99 and 1 <= pos[1] < 99 and pos not in occupied:
+                return pos
+    return (50, 50)
+
+
+def _reconcile_battle_units(town, counted_units):
+    """Persist casualties and explicit rescued/free units from a battle.
+
+    The Flash counted array is [id, initial, killed, recovered]. Units already
+    exist on the home map while the temporary quest/PvP map runs. Therefore
+    only ``killed - recovered`` must be removed. A row with recovery greater
+    than its killed count represents newly rescued/free units and is added.
+    """
+    if not isinstance(counted_units, list):
+        return {"removed": 0, "added": 0}
+    removed = added = 0
+    for raw in counted_units:
+        values = _battle_counts(raw)
+        if values is None:
+            continue
+        unit_id, _initial, killed, recovered = values
+        losses = max(0, killed - recovered)
+        bonuses = max(0, recovered - killed)
+        for _ in range(losses):
+            victim = next((
+                item for item in town.get("items", [])
+                if item and int(item[0]) == unit_id
+            ), None)
+            if victim is None:
+                break
+            town["items"].remove(victim)
+            removed += 1
+        for _ in range(bonuses):
+            x, y = _find_open_unit_position(town)
+            town["items"].append([
+                unit_id, x, y, 0, timestamp_now(), 0, [], {},
+            ])
+            added += 1
+    return {"removed": removed, "added": added}
+
+
+def _pvp_state(save):
+    """Repair and return the persistent PvP fields consumed by the client."""
+    state = save["privateState"]
+    if not isinstance(state.get("attacksSent"), list):
+        state["attacksSent"] = []
+    if not isinstance(state.get("attacksReceived"), list):
+        state["attacksReceived"] = []
+    for key in ("attacksWon", "attacksLost", "honor", "tsAttacksReset"):
+        try:
+            state[key] = int(state.get(key, 0) or 0)
+        except (TypeError, ValueError):
+            state[key] = 0
+    return state
+
+
+def _pending_attack_entry(state, victim_id):
+    victim_id = str(victim_id)
+    for attack in reversed(state["attacksSent"]):
+        if (
+            str(attack.get("victim_id")) == victim_id
+            and attack.get("description") is None
+        ):
+            return attack
+    return None
 
 
 def _log_unhandled(USERID, cmd, args):
@@ -315,19 +542,45 @@ def do_command(USERID, cmd, args):
         y = args[1]
         town_id = args[2]
         id = args[3]
-        num_units_contained_when_harvested = args[4]#TODO does this affect multiplier?
-        resource_multiplier = args[5]
-        cash_to_substract = args[6]
+        resource_multiplier = int(args[5]) if len(args) > 5 else 1
+        cash_to_substract = int(args[6]) if len(args) > 6 else 0
         print("Collect", str(get_name_from_item_id(id)))
         map = save["maps"][town_id]
-        apply_collect(save["playerInfo"], map, id, resource_multiplier)
+        item = next((
+            current for current in map["items"]
+            if current[0] == id and current[1] == x and current[2] == y
+        ), None)
+        # PopupCollect time options use the same fixed multipliers in the
+        # original Flash client: 30m, 1h, 4h, 8h => 0.5x, 1x, 2x, 3x.
+        production_multiplier = 1
+        worker_count = (
+            float(_contained_worker_count(item)) if item is not None else 1.0
+        )
+        if item is not None and len(item) > 7 and isinstance(item[7], dict):
+            try:
+                collect_option = int(item[7].get("cp", 0) or 0)
+            except (TypeError, ValueError):
+                collect_option = 0
+            if 1 <= collect_option <= 4:
+                production_multiplier = (0.5, 1, 2, 3)[collect_option - 1]
+                worker_count = _effective_production_workers(item)
+        apply_collect(
+            save["playerInfo"],
+            map,
+            id,
+            resource_multiplier,
+            worker_count,
+            production_multiplier,
+        )
         save["playerInfo"]["cash"] = max(save["playerInfo"]["cash"] - cash_to_substract, 0)
         # Advance the item's collect timestamp so it enters cooldown and is not
         # re-offered after a reload (client computes "ready" from serverTime - item[4]).
-        for item in map["items"]:
-            if item[0] == id and item[1] == x and item[2] == y:
-                item[4] = timestamp_now()
-                break
+        if item is not None:
+            item[4] = timestamp_now()
+            # Collection immediately starts the next cycle with the workers
+            # currently assigned. Late additions affect that next cycle, not
+            # the completed one.
+            _start_production_cycle(item, item[4])
 
     elif cmd == Constant.CMD_SELL:
         x = args[0]
@@ -396,9 +649,11 @@ def do_command(USERID, cmd, args):
         # Unit into building
         for item in map["items"]:
             if item[1] == b_x and item[2] == b_y:
+                _update_production_labor(item)
                 if len(item) < 7:
                     item += [[]]
                 item[6] += [unit_id]
+                _set_production_workers(item)
                 break
         # Remove unit
         for item in map["items"]:
@@ -423,7 +678,9 @@ def do_command(USERID, cmd, args):
             if item[1] == b_x and item[2] == b_y:
                 if len(item) < 7:
                     break
+                _update_production_labor(item)
                 item[6].remove(unit_id)
+                _set_production_workers(item)
                 break
         if place_popped_unit:
             # Spawn unit outside
@@ -1028,6 +1285,45 @@ def do_command(USERID, cmd, args):
         save["privateState"]["strategy"] = strategy_type
         print(f"Set defense strategy type to {type_name}")
 
+    elif cmd == Constant.CMD_ATTACK_PLAYER:
+        victim_id = str(args[0])
+        state = _pvp_state(save)
+        now = timestamp_now()
+        recent = [
+            attack for attack in state["attacksSent"]
+            if now - int(attack.get("time", 0) or 0) < 6 * 3600
+        ]
+        same_target = any(
+            str(attack.get("victim_id")) == victim_id
+            and now - int(attack.get("time", 0) or 0) < 4 * 3600
+            for attack in state["attacksSent"]
+        )
+        if victim_id == str(USERID) or neighbor_session(victim_id) is None:
+            state["pendingAttackRejected"] = victim_id
+            print(f"Attack rejected - unknown/self target {victim_id}.")
+            return False
+        if len(recent) >= 3 or same_target:
+            state["pendingAttackRejected"] = victim_id
+            print("Attack rejected - attack limit or opponent cooldown.")
+            return False
+        entry = {"time": now, "victim_id": victim_id}
+        state["attacksSent"].append(entry)
+        # Ten entries are enough for the client history popup and prevent
+        # unbounded save growth while preserving the active 6-hour window.
+        state["attacksSent"] = state["attacksSent"][-20:]
+        state["pendingAttackTarget"] = victim_id
+        state.pop("pendingAttackRejected", None)
+        print(f"Attack started against {victim_id}.")
+        return True
+
+    elif cmd == Constant.CMD_CLEAN_ATTACKS:
+        state = _pvp_state(save)
+        for attack in state["attacksReceived"]:
+            if isinstance(attack, dict):
+                attack.pop("viewPending", None)
+        print("Marked received attacks as viewed.")
+        return True
+
     elif cmd == Constant.CMD_START_QUEST:
         quest_id = args[0]
         town_id = args[1]
@@ -1050,6 +1346,7 @@ def do_command(USERID, cmd, args):
         # Resources
         save["maps"][town_id]["coins"] += int(gold_gained)
         save["maps"][town_id]["xp"] += int(xp_gained)
+        unit_result = _reconcile_battle_units(save["maps"][town_id], units)
 
         # Update quests data
         save["privateState"]["unlockedQuestIndex"] = max(quest_id + 1, save["privateState"]["unlockedQuestIndex"], 0)
@@ -1066,7 +1363,11 @@ def do_command(USERID, cmd, args):
         # save["maps"]["questTimes"] [quest_id] = TODO min (... , duration_sec)
         # save["maps"]["lastQuestTimes"] [quest_id] = TODO min (... , duration_sec)
 
-        print(f"Ended quest {quest_id}.", "WIN" if win else "loss", f"difficulty {difficulty}")
+        print(
+            f"Ended quest {quest_id}.", "WIN" if win else "loss",
+            f"difficulty {difficulty}; casualties {unit_result['removed']}, "
+            f"rescued {unit_result['added']}",
+        )
 
     elif cmd == Constant.CMD_UNIT_COLLECTION_COMPLETED:
         collection_id = args[0]
@@ -1100,13 +1401,88 @@ def do_command(USERID, cmd, args):
         resources = data.get("resources", {})
         gold_gained = int(resources.get("g", 0))
         xp_gained = int(resources.get("x", 0))
-        town_id = save["playerInfo"].get("default_map", 0)
+        state = _pvp_state(save)
+        victim = data.get("victim") or {}
+        victim_id = str(
+            victim.get("user_id")
+            or state.get("pendingAttackTarget")
+            or ""
+        )
+        rejected = str(state.get("pendingAttackRejected", ""))
+        if victim_id and rejected == victim_id:
+            print(f"End attack ignored - start against {victim_id} was rejected.")
+            state.pop("pendingAttackRejected", None)
+            return False
+
+        town_id = int(save["playerInfo"].get("default_map", 0) or 0)
         if town_id >= len(save["maps"]):
             town_id = 0
         map = save["maps"][town_id]
         map["coins"] += gold_gained
         map["xp"] += xp_gained
-        print("End attack.", "WIN" if win else "loss", f"(+{gold_gained}g, +{xp_gained}xp)")
+        casualties = _reconcile_battle_units(
+            map, data.get("attacker_units") or []
+        )
+        if not victim_id:
+            # Older clients and the enemy-camp return flow reuse end_attack
+            # without a player opponent. Apply the reported battle result, but
+            # do not consume a PvP attempt or create a blank history card.
+            print(
+                "End non-player battle.", "WIN" if win else "loss",
+                f"(+{gold_gained}g, +{xp_gained}xp, "
+                f"{casualties['removed']} permanent casualties)",
+            )
+            return True
+
+        # History uses the original client's misspelled `oponent` field.
+        description = dict(data)
+        description["oponent"] = victim
+        entry = _pending_attack_entry(state, victim_id)
+        if entry is None:
+            entry = {"time": timestamp_now(), "victim_id": victim_id}
+            state["attacksSent"].append(entry)
+        entry["description"] = description
+        state["attacksWon" if win else "attacksLost"] += 1
+        try:
+            state["honor"] += int(data.get("honor", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+        state.pop("pendingAttackTarget", None)
+
+        # Store the corresponding defender history and casualties when the
+        # target is another writable local player. Static scenario villages
+        # are read-only and only produce attacker-side history.
+        defender = session(victim_id) if victim_id else None
+        if defender is not None and victim_id != str(USERID):
+            defender_state = _pvp_state(defender)
+            defender_description = dict(description)
+            defender_description["win"] = 0 if win else 1
+            defender_description["oponent"] = data.get("attacker") or {
+                "user_id": str(USERID),
+                "name": save["playerInfo"].get("name", "Emperor"),
+            }
+            defender_state["attacksReceived"].append({
+                "time": timestamp_now(),
+                "victim_id": victim_id,
+                "description": defender_description,
+                "viewPending": 1,
+            })
+            defender_state["attacksReceived"] = defender_state["attacksReceived"][-20:]
+            defender_state["attacksLost" if win else "attacksWon"] += 1
+            defender_map_id = int(victim.get("map", 0) or 0)
+            if defender_map_id < 0 or defender_map_id >= len(defender["maps"]):
+                defender_map_id = 0
+            _reconcile_battle_units(
+                defender["maps"][defender_map_id],
+                data.get("victim_units") or [],
+            )
+            save_session(victim_id)
+
+        print(
+            "End attack.", "WIN" if win else "loss",
+            f"(+{gold_gained}g, +{xp_gained}xp, "
+            f"{casualties['removed']} permanent casualties)",
+        )
         # On a win, record the conquered island position so the PvP map shows it
         # complete. The client reads map["universAttackWin"] to mark conquered slots.
         if win:
@@ -1117,6 +1493,54 @@ def do_command(USERID, cmd, args):
                     map["universAttackWin"] = []
                 if int(posicion) not in map["universAttackWin"]:
                     map["universAttackWin"].append(int(posicion))
+
+    elif cmd == Constant.CMD_HIRE_WORKER:
+        # Local replacement for the original Facebook callback:
+        # [x, y, town, building, friend_id]. Only explicitly linked players
+        # may fill a role and one friend can fill at most one slot per building.
+        if len(args) < 5:
+            print("Social hire rejected - malformed args.")
+            return False
+        return _hire_social_friend(
+            save, USERID, args[0], args[1], int(args[2]), int(args[3]), args[4]
+        )
+
+    elif cmd == Constant.CMD_ASSIST_SEND_FEED:
+        # Round Table request: [x, y, town, building, friend_id]. Only a real
+        # friend may be targeted. The original Facebook acceptance callback is
+        # unavailable in the local game, so a linked local friend accepts the
+        # role immediately and both request/staff state survive a refresh.
+        if len(args) < 5:
+            print("Social feed rejected - malformed args.")
+            return False
+        x, y, town_id, item_id = args[0], args[1], int(args[2]), int(args[3])
+        friend_id = str(args[4])
+        if not is_friend(USERID, friend_id):
+            print(f"Social feed rejected - {friend_id} is not a friend.")
+            return False
+        town = save["maps"][town_id]
+        item = _find_map_item(town, item_id, x, y)
+        if item is None or item_id != Constant.ID_BUILDING_ROUND_TABLE:
+            print("Social feed rejected - Round Table not found.")
+            return False
+        attrs = _item_attrs(item)
+        sent = attrs.get("sif")
+        if isinstance(sent, list):
+            sent = {str(value): True for value in sent}
+        elif not isinstance(sent, dict):
+            sent = {}
+        if friend_id not in sent and len(sent) >= int(
+            get_game_config()["globals"].get("MAX_FEEDS_ROUND_TABLE", 8)
+        ):
+            print("Social feed rejected - daily request limit reached.")
+            return False
+        sent[friend_id] = True
+        attrs["sif"] = sent
+        _hire_social_friend(
+            save, USERID, x, y, town_id, item_id, friend_id
+        )
+        print(f"Social help request accepted by {friend_id}.")
+        return True
 
     elif cmd == Constant.CMD_BUY_SI_HELP:
         # [x, y, town, item]. The client deducts 2 cash and appends a zero
@@ -1176,6 +1600,25 @@ def do_command(USERID, cmd, args):
             # Summit/social-feed helpers are a repeatable reward cycle. The
             # client clears both arrays after collection instead of opening
             # the building permanently.
+            if item_id == Constant.ID_BUILDING_ROUND_TABLE:
+                count = len(staff)
+                gold = 1000 if count >= 4 else 0
+                xp = 100 if count >= 6 else 0
+                town["coins"] = int(town.get("coins", 0)) + gold
+                town["xp"] = int(town.get("xp", 0)) + xp
+                allowed = {
+                    Constant.ID_UNIT_XENA,
+                    Constant.ID_UNIT_ARTHUR,
+                    Constant.ID_UNIT_RANGER,
+                    Constant.ID_UNIT_MERLIN,
+                }
+                requested = int(args[6]) if len(args) > 6 else 0
+                if count >= 8 and requested in allowed:
+                    _add_gifts(save, requested)
+                print(
+                    f"Round Table reward: {gold} gold, {xp} xp"
+                    + (f", unit {requested}" if count >= 8 and requested in allowed else "")
+                )
             attrs["si"] = []
             attrs["sif"] = []
             print(f"Reset completed social helper cycle for {get_name_from_item_id(item_id)}.")
@@ -1297,6 +1740,9 @@ def do_command(USERID, cmd, args):
                 item[7]["cp"] = time_option
                 if time_option:
                     item[4] = timestamp_now()   # production start
+                    _start_production_cycle(item, item[4])
+                else:
+                    item[7].pop("productionLabor", None)
                 break
 
     elif cmd == Constant.CMD_COLLECT_MONDAY_BONUS or cmd == Constant.CMD_COLLECT_COMEBACK_BONUS:

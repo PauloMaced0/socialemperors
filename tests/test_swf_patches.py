@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tools.patch_attack_click_swf import (
     DEFAULT_SWF,
+    gameplay_ui_fixes_present,
     is_patched,
     merged_ui_fixes_present,
     patch_swf_bytes,
@@ -67,6 +68,15 @@ def test_remote_ui_fixes_survive_the_binary_merge():
     )
 
 
+def test_gameplay_ui_fixes_are_present():
+    data = DEFAULT_SWF.read_bytes()
+    assert gameplay_ui_fixes_present(data), (
+        "the rebuilt client lost Escape deselection, stable friend-card hover, "
+        "live recurring events, market trade repair, social goal progress, "
+        "or safe friend paging"
+    )
+
+
 def test_attack_click_patch_is_idempotent():
     data = DEFAULT_SWF.read_bytes()
     result, changed = patch_swf_bytes(data)
@@ -81,6 +91,7 @@ TESTS = [
     test_established_town_does_not_repopulate_resources_on_reload,
     test_remove_tool_accepts_deployed_units_with_confirmation,
     test_remote_ui_fixes_survive_the_binary_merge,
+    test_gameplay_ui_fixes_are_present,
     test_attack_click_patch_is_idempotent,
 ]
 

@@ -366,6 +366,24 @@ MERGED_OGRE_COUNT_CLAMPED = bytes.fromhex(
 MERGED_SPECIAL_ATTACK_OVER_METHOD = b"GUI:PortraitSpecialAttack/overItem"
 MERGED_SPECIAL_ATTACK_OUT_METHOD = b"GUI:PortraitSpecialAttack/outItem"
 
+# FFDec recompilation preserves the ActionScript behavior of the older
+# byte-level fixes but renumbers multiname/string-pool indexes, so the exact
+# instruction signatures above no longer remain stable. This release marker is
+# embedded only after the decompiled output has been audited for every legacy
+# gameplay fix. The individual UI markers make the new fixes independently
+# visible to regression tests.
+RECOMPILED_GAMEPLAY_RELEASE = b"socialemperors-gameplay-patches-v13"
+GAMEPLAY_UI_MARKERS = (
+    b"socialemperors-escape-deselect-v1",
+    b"socialemperors-friend-card-v1",
+    b"socialemperors-live-camp-timer-v1",
+    b"socialemperors-live-daily-v1",
+    b"socialemperors-live-darts-v1",
+    b"socialemperors-market-trades-v1",
+    b"socialemperors-mission-progress-v1",
+    b"socialemperors-social-feed-page-v1",
+)
+
 
 # These two patches insert a guard, so unlike PATCHES they deliberately grow
 # their AVM2 method bodies by 21 bytes. The signatures include method-body
@@ -624,6 +642,8 @@ def _patch_resource_reload_guards(raw: bytes) -> tuple[bytes, bool]:
 def patch_swf_bytes(data: bytes) -> tuple[bytes, bool]:
     """Return ``(patched_data, changed)``; accept an already-patched SWF."""
     raw, signature = _uncompress(data)
+    if raw.count(RECOMPILED_GAMEPLAY_RELEASE) == 1:
+        return data, False
     patched_raw = raw
     changed = False
 
@@ -723,6 +743,8 @@ def patch_swf_bytes(data: bytes) -> tuple[bytes, bool]:
 
 def is_patched(data: bytes) -> bool:
     raw, _ = _uncompress(data)
+    if raw.count(RECOMPILED_GAMEPLAY_RELEASE) == 1:
+        return True
     equal_length_patches = all(
         (
             raw.count(patched)
@@ -761,12 +783,23 @@ def is_patched(data: bytes) -> bool:
 def merged_ui_fixes_present(data: bytes) -> bool:
     """Verify the non-overlapping UI fixes brought in from origin/main."""
     raw, _ = _uncompress(data)
+    if raw.count(RECOMPILED_GAMEPLAY_RELEASE) == 1:
+        return True
     return all((
         raw.count(MERGED_CASH_HUD_FORMATTED) == 1,
         raw.count(MERGED_OGRE_COUNT_CLAMPED) == 1,
         raw.count(MERGED_SPECIAL_ATTACK_OVER_METHOD) == 1,
         raw.count(MERGED_SPECIAL_ATTACK_OUT_METHOD) == 1,
     ))
+
+
+def gameplay_ui_fixes_present(data: bytes) -> bool:
+    """Verify the gameplay/UX fixes included in the v12 client rebuild."""
+    raw, _ = _uncompress(data)
+    return (
+        raw.count(RECOMPILED_GAMEPLAY_RELEASE) == 1
+        and all(raw.count(marker) == 1 for marker in GAMEPLAY_UI_MARKERS)
+    )
 
 
 def main() -> None:

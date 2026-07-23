@@ -34,6 +34,7 @@
                 &nbsp;
                 <a class="gameBarButton" href="#"><div><img src="img/gift.png">Free Gifts</div></a>
                 <a class="gameBarButton gameBarButtonSelected" href="#"><div><img>Play</div></a>
+                <a class="gameBarButton" href="/friends" target="_blank"><div>🤝 Friends</div></a>
                 <a class="gameBarButton" href="#"><div><img src="img/cash.png">Get Cash</div></a>
                 <a class="gameBarButton" href="https://discord.gg/zW5gSbQJBw" target="_blank"><div><img src="img/discord.png">Discord</div></a>
                 <a class="gameBarButton" href="https://github.com/AcidCaos/socialemperors#readme" target="_blank"><div><img src="img/github.png">GitHub</div></a>
@@ -97,7 +98,9 @@
                     style: 'width: 760px; height: 600px; background-color: #669C2C;',
                 });
                 player.load({ // https://ruffle.rs/js-docs/master/interfaces/URLLoadOptions.html
-                    url: "http://{{SERVERIP}}:5050/default01.static.socialpointgames.com/static/socialempires/flash/SELoader.swf?swftoload=http://{{SERVERIP}}:5050/default01.static.socialpointgames.com/static/socialempires/flash/{{GAMEVERSION}}",
+                    // Keep SELoader as the root movie so the loaded game reads
+                    // these values from Stage.loaderInfo.parameters.
+                    url: "{{SERVERURL}}/default01.static.socialpointgames.com/static/socialempires/flash/SELoader.swf?build=20260723",
                     backgroundColor: "#669C2C",
                     allowScriptAccess: false,
                     // Let the SWF's fullscreen button work: it sets
@@ -107,7 +110,7 @@
                     // the JS-player equivalent, restored after the
                     // play.html -> ruffle.html redirect.
                     allowFullscreen: true,
-                    autoplay: true,
+                    autoplay: "on",
                     // Perf: "low" disables Ruffle's bitmap smoothing / anti-
                     // aliasing, the biggest per-pixel cost when a big fight
                     // puts many animated sprites on screen. wmode opaque skips
@@ -117,23 +120,28 @@
                     quality: "low",
                     wmode: "opaque",
                     maxExecutionDuration: 60,
-                    parameters: '\
-                        spdebug=notnull&brk=0\
-                        &staticUrl=http://{{SERVERIP}}:5050/default01.static.socialpointgames.com/static/socialempires/&brk=0\
-                        &dynamicUrl=http://{{SERVERIP}}:5050/dynamic.flash1.dev.socialpoint.es/appsfb/socialempiresdev/srvempires/&brk=0\
-                        &skiphash12341=notnull&brk=0\
-                        &fb_sig_user={{save_info.userid}}&brk=0\
-                        &user_key=123456789&brk=0\
-                        &language=en&brk=0\
-                        &accessToken=AAABbZAm0wdMUBALsOrR0Ho68CLjaOT8SV3vftKg9mbo1zZColaW5FljRVaLxPGxXXnm1M98mTZCAttcQ4GHwvSyXfsyxYmvKMH8Hmn5iliSPnjvIsZA6&brk=0\
-                        &sex=m&brk=0\
-                        &lastLoggedIn=1349266517&brk=0\
-                        &dailyBonus=0&brk=0\
-                        &friendsInfo={{ friendsInfo | safe }}&brk=0\
-                        &serverTime={{serverTime}}&brk=0\
-                        &forceSyncError=1&brk=0\
-                        &forceAttackReload=0&brk=0\
-                        &forceQuestReload=0&brk=0'
+                    // Use an object instead of an indented flashvars string.
+                    // Whitespace in that string became part of parameter names.
+                    parameters: {
+                        spdebug: "notnull",
+                        brk: "0",
+                        swftoload: "{{SERVERURL}}/default01.static.socialpointgames.com/static/socialempires/flash/{{GAMEVERSION}}",
+                        staticUrl: "{{SERVERURL}}/default01.static.socialpointgames.com/static/socialempires/",
+                        dynamicUrl: "{{SERVERURL}}/dynamic.flash1.dev.socialpoint.es/appsfb/socialempiresdev/srvempires/",
+                        skiphash12341: "notnull",
+                        fb_sig_user: "{{save_info.userid}}",
+                        user_key: "123456789",
+                        language: "en",
+                        accessToken: "AAABbZAm0wdMUBALsOrR0Ho68CLjaOT8SV3vftKg9mbo1zZColaW5FljRVaLxPGxXXnm1M98mTZCAttcQ4GHwvSyXfsyxYmvKMH8Hmn5iliSPnjvIsZA6",
+                        sex: "m",
+                        lastLoggedIn: "1349266517",
+                        dailyBonus: "0",
+                        friendsInfo: {{ friendsInfo | tojson }},
+                        serverTime: "{{serverTime}}",
+                        forceSyncError: "1",
+                        forceAttackReload: "0",
+                        forceQuestReload: "0"
+                    }
                 });
             </script>
         </object>

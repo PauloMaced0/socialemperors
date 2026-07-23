@@ -16,8 +16,32 @@ def apply_cost(playerInfo: dict, map: dict, id: int, price_multiplier: int) -> N
     elif cost_type == "f":
         map["food"] = max(map["food"] - cost, 0)
 
-def apply_collect(playerInfo: dict, map: dict, id: int, resource_multiplier: int) -> None:
-    collect = int(resource_multiplier * int(get_attribute_from_item_id(id, "collect")))
+def apply_collect(
+    playerInfo: dict,
+    map: dict,
+    id: int,
+    resource_multiplier: int = 1,
+    worker_count: float = 1,
+    production_multiplier: float = 1,
+) -> None:
+    """Persist the same resource yield the Flash client displays.
+
+    The client adds 20% of the base yield for every contained worker after
+    the first, then applies the selected mine/mill duration multiplier.
+    Keeping the calculation here prevents those visible bonuses disappearing
+    on the next server synchronization.
+    """
+    base_collect = int(
+        resource_multiplier * int(get_attribute_from_item_id(id, "collect"))
+    )
+    worker_count = max(1.0, float(worker_count or 1))
+    collect = int(
+        (
+            base_collect
+            + (worker_count - 1) * base_collect * 0.2
+        )
+        * float(production_multiplier)
+    )
     collect_type = get_attribute_from_item_id(id, "collect_type")
     apply_collect_xp(map, id)
     if collect_type == "w":

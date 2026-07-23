@@ -20,15 +20,16 @@ OTHER = "test-route-9999"
 _TMP = tempfile.mkdtemp(prefix="se_routes_")
 
 
-def _make_save(uid):
+def _make_save(uid, name):
     save = json.load(open(os.path.join("villages", "initial.json")))
     save["playerInfo"]["pid"] = uid
+    save["playerInfo"]["map_names"] = [name]
     save["maps"][0]["coins"] = 0
     json.dump(save, open(os.path.join(_TMP, f"{uid}.save.json"), "w"), indent=4)
 
 
-_make_save(UID)
-_make_save(OTHER)
+_make_save(UID, "Route Test Empire")
+_make_save(OTHER, "Route Rival")
 sessions.SAVES_DIR = _TMP
 
 import server  # noqa: E402  (loads villages from the patched SAVES_DIR)
@@ -160,6 +161,160 @@ def test_own_town_out_of_range_falls_back():
     assert r.get_json()["result"] == "ok"
 
 
+def test_other_saves_are_pvp_opponents_not_automatic_neighbors():
+    c = _client(logged_in_as=UID)
+    player = c.post(
+        API + "/get_player_info.php",
+        data={
+            "USERID": UID, "user_key": "k", "language": "en",
+            "client_id": "1",
+        },
+    ).get_json()
+    assert not any(
+        str(entry["pid"]) == OTHER for entry in player["neighbors"]
+    ), "unrelated save leaked into the social neighbour list"
+
+    r = c.get(
+        API + "/get_continent_ranking.php",
+        query_string={
+            "USERID": OTHER, "worldChange": "0", "map": "0",
+            "user_key": "k", "level_id": "7",
+        },
+    )
+    assert r.status_code == 200
+    body = r.get_json()
+    ids = {str(entry["user_id"]) for entry in body["continent"]}
+    assert UID in ids and OTHER in ids, \
+        "real saved villages are missing from PvP matchmaking"
+    assert all(
+        entry.get("name") and entry.get("race") and entry.get("level")
+        and entry.get("nivel") == 7
+        for entry in body["continent"]
+    ), f"PvP continent still contains blank/stub players: {body}"
+
+
+def test_friends_page_links_and_unlinks_real_players_reciprocally():
+    c = _client(logged_in_as=UID)
+    page = c.get("/friends")
+    assert page.status_code == 200
+    html = page.get_data(as_text=True)
+    assert "Route Rival" in html and "Add friend" in html
+
+    added = c.post(
+        "/friends",
+        data={"action": "add", "friend_id": OTHER},
+    )
+    assert added.status_code == 200
+    assert "Friend added." in added.get_data(as_text=True)
+    assert sessions.is_friend(UID, OTHER)
+    assert sessions.is_friend(OTHER, UID), \
+        "Friends page created a one-way relationship"
+    game_html = c.get("/ruffle.html").get_data(as_text=True)
+    assert "Route Rival" in game_html, \
+        "linked friend did not reach the Ruffle friendsInfo payload"
+
+    removed = c.post(
+        "/friends",
+        data={"action": "remove", "friend_id": OTHER},
+    )
+    assert removed.status_code == 200
+    assert "Friend removed." in removed.get_data(as_text=True)
+    assert not sessions.is_friend(UID, OTHER)
+    assert not sessions.is_friend(OTHER, UID)
+
+
+def test_pvp_continent_requires_login():
+    r = _client().get(
+        API + "/get_continent_ranking.php",
+        query_string={
+            "USERID": UID, "worldChange": "0", "map": "0", "user_key": "k",
+        },
+    )
+    assert r.status_code == 403
+
+
+def test_player_cards_and_visits_use_the_saved_empire_name():
+    rival = sessions.session(OTHER)
+    rival["playerInfo"]["map_names"][0] = "Rival Kingdom"
+    rival["playerInfo"]["name"] = "Emperor"
+    sessions.save_session(OTHER)
+    c = _client(logged_in_as=UID)
+
+    visit = c.post(
+        API + "/get_player_info.php",
+        data={
+            "USERID": UID, "user": OTHER, "map": "0",
+            "user_key": "k", "language": "en", "client_id": "1",
+        },
+    )
+    assert visit.status_code == 200
+    assert visit.get_json()["playerInfo"]["name"] == "Rival Kingdom"
+
+    ranking = c.get(
+        API + "/get_continent_ranking.php",
+        query_string={"USERID": UID, "user_key": "k", "level_id": "7"},
+    ).get_json()["continent"]
+    card = next(entry for entry in ranking if str(entry["user_id"]) == OTHER)
+    assert card["name"] == "Rival Kingdom"
+
+
+def test_level_14_arthur_village_finishes_loading():
+    c = _client(logged_in_as=UID)
+    r = c.post(
+        API + "/get_player_info.php",
+        data={
+            "USERID": UID, "user": "100000031", "map": "0",
+            "user_key": "k", "language": "en", "client_id": "1",
+        },
+    )
+    assert r.status_code == 200, "Arthur's level 11-20 village failed to load"
+    body = r.get_json()
+    assert body["result"] == "ok"
+    assert body["playerInfo"]["name"] and isinstance(body["map"]["items"], list)
+
+
+def test_ruffle_page_uses_current_origin_and_supported_autoplay():
+    c = _client(logged_in_as=UID)
+    # Keep the host used by Flask's test-session cookie; the non-default port
+    # is what proves the template no longer assumes :5050.
+    r = c.get("/ruffle.html", base_url="http://localhost:5099")
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert (
+        "http://localhost:5099/default01.static.socialpointgames.com/"
+        "static/socialempires/flash/x" in html
+    ), "Ruffle game URL still assumes port 5050"
+    assert "flash/SELoader.swf?build=20260723" in html
+    assert 'autoplay: "on"' in html
+    assert "autoplay: true" not in html
+    assert 'swftoload: "http://localhost:5099/' in html
+    assert 'staticUrl: "http://localhost:5099/' in html
+    assert 'dynamicUrl: "http://localhost:5099/' in html
+
+
+def test_nginx_forwarded_origin_needs_no_body_substitution():
+    c = server.app.test_client()
+    public_origin = "http://social-empires.local"
+    with c.session_transaction(base_url=public_origin) as s:
+        s["USERID"] = UID
+        s["GAMEVERSION"] = "x"
+    r = c.get(
+        "/ruffle.html",
+        base_url=public_origin,
+        headers={
+            "X-Forwarded-For": "192.0.2.10",
+            "X-Forwarded-Proto": "https",
+        },
+    )
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'swftoload: "https://social-empires.local/' in html
+    assert 'staticUrl: "https://social-empires.local/' in html
+    assert 'dynamicUrl: "https://social-empires.local/' in html
+    assert "127.0.0.1:5050" not in html
+    assert "localhost:5050" not in html
+
+
 ASSETS = "/default01.static.socialpointgames.com/static/socialempires"
 
 
@@ -206,6 +361,13 @@ TESTS = [
     test_switch_to_own_second_town_no_500,
     test_second_town_shows_global_level,
     test_own_town_out_of_range_falls_back,
+    test_other_saves_are_pvp_opponents_not_automatic_neighbors,
+    test_friends_page_links_and_unlinks_real_players_reciprocally,
+    test_pvp_continent_requires_login,
+    test_player_cards_and_visits_use_the_saved_empire_name,
+    test_level_14_arthur_village_finishes_loading,
+    test_ruffle_page_uses_current_origin_and_supported_autoplay,
+    test_nginx_forwarded_origin_needs_no_body_substitution,
     test_missing_asset_returns_404_not_500,
     test_missing_asset_is_cached,
     test_present_asset_served,
