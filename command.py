@@ -884,6 +884,44 @@ def do_command(USERID, cmd, args):
         coll[collectible_id] += 1
         print(f"Collectible stored: collection {collection_id}, item {collectible_id} (x{coll[collectible_id]}).")
 
+    elif cmd == Constant.CMD_BUY_SI_HELP:
+        # Hire a friend to help a social building (Round Table / allies-type
+        # buildings that need N friends before they open). The client charges
+        # cash and appends to the building's attrs.si list; persist that append
+        # so hire progress survives reload and the building can complete - this
+        # was unhandled, so every hire was lost and the buildings never worked.
+        # args = [tx, ty, town_id, item_id].
+        try:
+            tx, ty, town_id, item_id = int(args[0]), int(args[1]), int(args[2]), int(args[3])
+        except (ValueError, IndexError, TypeError):
+            print("buy_si_help: bad args", args)
+            return
+        if town_id < 0 or town_id >= len(save["maps"]):
+            town_id = int(save["playerInfo"].get("default_map", 0) or 0)
+        town = save["maps"][town_id]
+        for item in town["items"]:
+            if item[0] == item_id and item[1] == tx and item[2] == ty:
+                # item = [id, x, y, orient, collected_at, level, units[], attrs{}]
+                while len(item) <= 6:
+                    item.append([] if len(item) == 6 else 0)
+                if len(item) <= 7 or not isinstance(item[7], dict):
+                    if len(item) <= 7:
+                        item.append({})
+                    else:
+                        item[7] = {}
+                attrs = item[7]
+                if not isinstance(attrs.get("si"), list):
+                    attrs["si"] = []
+                attrs["si"].append(0)
+                # Charge the per-friend cash the client already spent locally.
+                price = int(get_attribute_from_item_id(item_id, "cost_unit_cash") or 0)
+                if price > 0:
+                    save["playerInfo"]["cash"] = max(int(save["playerInfo"]["cash"]) - price, 0)
+                print(f"Hired friend for social building {item_id} at ({tx},{ty}); {len(attrs['si'])} hired.")
+                break
+        else:
+            print(f"buy_si_help: no building {item_id} at ({tx},{ty}) in town {town_id}.")
+
     elif cmd == Constant.CMD_ACTIVATE:
         x = args[0]
         y = args[1]
