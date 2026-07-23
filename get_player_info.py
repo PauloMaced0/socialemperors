@@ -3,6 +3,7 @@ import datetime
 
 from sessions import (
     session, neighbor_session, neighbors, refresh_enemy_camp_timer,
+    _display_name,
 )
 from engine import timestamp_now
 from constants import Constant
@@ -229,3 +230,48 @@ def get_neighbor_info(userid, map_number):
         "neighbors": neighbors(userid)
     }
     return neighbor_info
+
+
+def get_public_player_info(userid):
+    """Public PvP profile served at get_public_player_info.php.
+
+    PopupPlayerProfile reads these exact keys: name, level, map_names[0]
+    (empire), honor_points, country, last_logged_in (unix seconds),
+    attacks_won, attacks_lost and pid. The PvP counters live in the target
+    player's privateState and are updated by end_attack for both attacker and
+    defender, so this profile reflects the latest battle results instead of the
+    old empty stub."""
+    save = neighbor_session(str(userid))
+    if save is None:
+        return ({"result": "error", "error": "unknown_user"}, 404)
+    pi = save.get("playerInfo", {}) or {}
+    ps = save.get("privateState", {}) or {}
+    maps = save.get("maps") or [{}]
+    default = int(pi.get("default_map", 0) or 0)
+    if default < 0 or default >= len(maps):
+        default = 0
+    town = maps[default]
+
+    def _int(value):
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    map_names = pi.get("map_names")
+    if not isinstance(map_names, list) or not map_names:
+        map_names = [_display_name(save)]
+    return {
+        "result": "ok",
+        "pid": str(userid),
+        "name": _display_name(save),
+        "level": max(1, int(get_level_from_xp(_int(town.get("xp", 0))))),
+        "map_names": map_names,
+        "honor_points": _int(ps.get("honor")),
+        "attacks_won": _int(ps.get("attacksWon")),
+        "attacks_lost": _int(ps.get("attacksLost")),
+        "country": str(pi.get("country") or ""),
+        "last_logged_in": _int(
+            pi.get("last_logged_in") or ps.get("lastLogin") or timestamp_now()
+        ),
+    }

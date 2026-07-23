@@ -15,7 +15,7 @@ print (" [+] Loading game config...")
 from get_game_config import get_game_config, patch_game_config, refresh_darts_schedule
 
 print (" [+] Loading players...")
-from get_player_info import get_player_info, get_neighbor_info
+from get_player_info import get_player_info, get_neighbor_info, get_public_player_info
 from sessions import (
     load_saved_villages, all_saves_userid, all_saves_info, save_info,
     new_village, fb_friends_str, pvp_profiles, friend_candidates,
@@ -368,6 +368,19 @@ def get_player_info_response():
     # Neighbor
     else:
         return (get_neighbor_info(user, map), 200)
+
+@app.route("/dynamic.flash1.dev.socialpoint.es/appsfb/socialempiresdev/srvempires/get_public_player_info.php")
+def get_public_player_info_response():
+    # Opponent profile shown by PopupPlayerProfile before an attack. The viewer
+    # must be logged in; the profile TARGET is the USERID query param the client
+    # appends via getURLWithUserID (this is a different value from the acting
+    # session, so it is not spoofable into acting as another player - it only
+    # reads public stats).
+    viewer = session.get("USERID")
+    if not viewer or viewer not in all_saves_userid():
+        return ({"result": "error", "error": "not_logged_in"}, 403)
+    target = request.values.get("USERID") or viewer
+    return get_public_player_info(str(target))
 
 @app.route("/dynamic.flash1.dev.socialpoint.es/appsfb/socialempiresdev/srvempires/sync_error_track.php", methods=['POST'])
 def sync_error_track_response():
