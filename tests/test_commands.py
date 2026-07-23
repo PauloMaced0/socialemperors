@@ -345,6 +345,27 @@ def test_market_trade_requires_open_market(tmp):
     assert ok is True and m["wood"] == 100, f"opened market trade failed (wood={m['wood']})"
 
 
+def test_tutorial_village_keeps_initial_resource_spawn(tmp):
+    # The client skips its one-time resource/animal spawn when
+    # arrayAnimals[SUBCATFUNC_RESOURCE_REGEN] is set. A fresh tutorial village
+    # (decorative trees present -> naturalResourcesInitialized) must NOT set
+    # that marker, or the tutorial arrow points at a tree/goblin never spawned.
+    from get_player_info import get_player_info
+    marker = str(Constant.SUBCATFUNC_RESOURCE_REGEN)
+    save = sessions.session(UID)
+    save["playerInfo"]["completed_tutorial"] = 0
+    save["maps"][0]["naturalResourcesInitialized"] = 1
+    save["privateState"].setdefault("arrayAnimals", {})
+    get_player_info(UID, 0)
+    assert marker not in save["privateState"]["arrayAnimals"], \
+        "initial spawn suppressed during tutorial (arrow points at nothing)"
+    # Once the tutorial is done, the reload guard applies for the town.
+    save["playerInfo"]["completed_tutorial"] = 1
+    get_player_info(UID, 0)
+    assert save["privateState"]["arrayAnimals"].get(marker) == 1, \
+        "reload guard not restored after tutorial completion"
+
+
 def test_assist_neighbour_grants_reward(tmp):
     # Assisting a neighbour credits ASSIST_REWARD_GOLD + ASSIST_REWARD_XP; the
     # command must persist it (client applies it locally). Batched _new scales
@@ -426,6 +447,7 @@ TESTS = [
     test_save_info_level_derived_from_xp,
     test_static_scenarios_are_not_social_players,
     test_collect_gated_on_opened_social_mine,
+    test_tutorial_village_keeps_initial_resource_spawn,
     test_assist_neighbour_grants_reward,
     test_place_gift_uses_town_arg_not_frame,
     test_market_trade_requires_open_market,

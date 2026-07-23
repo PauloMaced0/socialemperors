@@ -68,10 +68,21 @@ def _refresh_daily_animal_budget(save, now):
 
 
 def _sync_natural_resource_reload_marker(save, map_idx):
-    """Tell the patched SWF whether wild resources were already generated."""
+    """Tell the patched SWF whether wild resources were already generated.
+
+    The client skips its one-time initial resource/animal spawn
+    (MapInitializer.spawnInitResources / spawnRemainingResources) when
+    arrayAnimals[SUBCATFUNC_RESOURCE_REGEN] is set. A brand-new village ships
+    with decorative trees, so the reload guard used to treat it as already
+    initialized and suppressed that first spawn - which left the tutorial arrow
+    pointing at a tree/goblin that was never created. Withhold the marker until
+    the tutorial is complete so the first spawn runs during the tutorial (as
+    before), then apply the reload guard normally for established towns."""
     animals = save["privateState"].setdefault("arrayAnimals", {})
     marker = str(Constant.SUBCATFUNC_RESOURCE_REGEN)
-    if int(save["maps"][map_idx].get("naturalResourcesInitialized", 0) or 0):
+    tutorial_done = int(save["playerInfo"].get("completed_tutorial", 0) or 0)
+    initialized = int(save["maps"][map_idx].get("naturalResourcesInitialized", 0) or 0)
+    if tutorial_done and initialized:
         animals[marker] = 1
     else:
         animals.pop(marker, None)
