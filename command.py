@@ -101,6 +101,33 @@ def _social_worker_count(social):
     return len([worker for worker in workers.split(",") if worker])
 
 
+def _town_has_open_market(town):
+    """True if the town has an operational market.
+
+    A market that is a social building (Market I/III, Troll Market I/III) opens
+    only once fully staffed (attrs.si == None). A market that is not a social
+    building (e.g. Market II) has no helper requirement and is operational as
+    soon as it is placed. Trading is refused unless at least one such market is
+    open, so a reload cannot trade through an unstaffed market.
+    """
+    for it in town.get("items", []):
+        try:
+            item_id = int(it[0])
+        except (TypeError, ValueError, IndexError):
+            continue
+        try:
+            functional = int(get_attribute_from_item_id(item_id, "subcat_functional"))
+        except (TypeError, ValueError):
+            continue
+        if functional != Constant.SUBCATFUNC_BUILDING_MARKET:
+            continue
+        if _social_item(item_id) is None:
+            return True  # no staffing requirement (e.g. Market II)
+        if _item_attrs(it).get("si", []) is None:
+            return True  # staffed and opened
+    return False
+
+
 def _hire_social_friend(save, USERID, x, y, town_id, item_id, friend_id):
     """Fill one social-building role with an explicitly linked player."""
     friend_id = str(friend_id)
@@ -1665,6 +1692,9 @@ def do_command(USERID, cmd, args):
             print("Market trade rejected - invalid resource/amount.")
             return False
         town = save["maps"][town_id]
+        if not _town_has_open_market(town):
+            print("Market trade rejected - no staffed/open market in town.")
+            return False
         now = timestamp_now()
         last = int(town.get("timestampLastTrade", 0) or 0)
         if last and now - last >= 20 * 3600:
