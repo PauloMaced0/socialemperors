@@ -1949,6 +1949,19 @@ def do_command(USERID, cmd, args):
         pState["timeStampTemple"] = 0
         print("Temple: progress reset.")
 
+    elif cmd == Constant.CMD_INCREASE_POPULATION:
+        # Recruitment complete (hired the required friends): raise the town's
+        # population limit, up to POPULATION_INCREASE_QTY times. Persist the
+        # per-town increasedPopulation counter (client reads map
+        # increasedPopulation); was unhandled, so the raise reverted on reload.
+        town_id = int(args[0]) if args else int(save["playerInfo"].get("default_map", 0) or 0)
+        if town_id < 0 or town_id >= len(save["maps"]):
+            town_id = int(save["playerInfo"].get("default_map", 0) or 0)
+        town = save["maps"][town_id]
+        cap = int(get_game_config()["globals"].get("POPULATION_INCREASE_QTY", 5))
+        town["increasedPopulation"] = min(int(town.get("increasedPopulation", 0)) + 1, cap)
+        print(f"Population limit raised (town {town_id}): +{town['increasedPopulation']} step(s).")
+
     else:
         print(f"Unhandled command '{cmd}' -> args", args)
         _log_unhandled(USERID, cmd, args)
