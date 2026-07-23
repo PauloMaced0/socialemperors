@@ -200,15 +200,24 @@ def test_friends_page_links_and_unlinks_real_players_reciprocally():
     html = page.get_data(as_text=True)
     assert "Route Rival" in html and "Add friend" in html
 
-    added = c.post(
-        "/friends",
-        data={"action": "add", "friend_id": OTHER},
+    sessions.unlink_friend(UID, OTHER)
+    sessions.session(UID)["privateState"]["friendRequests"] = []
+    sessions.session(OTHER)["privateState"]["friendRequests"] = []
+
+    # Sending a request does not link yet; the target must accept.
+    sent = c.post("/friends", data={"action": "request", "friend_id": OTHER})
+    assert sent.status_code == 200
+    assert "Friend request sent." in sent.get_data(as_text=True)
+    assert not sessions.is_friend(UID, OTHER), "request linked without acceptance"
+
+    accepted = _client(logged_in_as=OTHER).post(
+        "/friends", data={"action": "accept", "friend_id": UID},
     )
-    assert added.status_code == 200
-    assert "Friend added." in added.get_data(as_text=True)
+    assert accepted.status_code == 200
+    assert "Friend request accepted." in accepted.get_data(as_text=True)
     assert sessions.is_friend(UID, OTHER)
     assert sessions.is_friend(OTHER, UID), \
-        "Friends page created a one-way relationship"
+        "Accepting created a one-way relationship"
     game_html = c.get("/ruffle.html").get_data(as_text=True)
     assert "Route Rival" in game_html, \
         "linked friend did not reach the Ruffle friendsInfo payload"
@@ -377,6 +386,53 @@ def test_public_player_profile_returns_stats():
     assert isinstance(body.get("map_names"), list) and body["map_names"], "map_names missing"
 
 
+def test_friend_request_and_accept_flow():
+    s = sessions
+    s.unlink_friend(UID, OTHER)
+    s.session(UID)["privateState"]["friendRequests"] = []
+    s.session(OTHER)["privateState"]["friendRequests"] = []
+    assert s.request_friend(UID, OTHER) == "requested"
+    assert not s.is_friend(UID, OTHER), "request should not link immediately"
+    assert any(r["userid"] == UID for r in s.incoming_friend_requests(OTHER)), "request not in target inbox"
+    assert not s.incoming_friend_requests(UID), "request leaked into sender inbox"
+    assert s.request_friend(UID, OTHER) == "pending", "duplicate request not detected"
+    assert s.accept_friend(OTHER, UID) is True
+    assert s.is_friend(UID, OTHER) and s.is_friend(OTHER, UID), "accept did not create reciprocal link"
+    assert not s.incoming_friend_requests(OTHER), "inbox not cleared after accept"
+    s.unlink_friend(UID, OTHER)
+
+
+def test_friend_request_decline():
+    s = sessions
+    s.unlink_friend(UID, OTHER)
+    s.session(UID)["privateState"]["friendRequests"] = []
+    s.session(OTHER)["privateState"]["friendRequests"] = []
+    assert s.request_friend(UID, OTHER) == "requested"
+    assert s.decline_friend(OTHER, UID) is True
+    assert not s.is_friend(UID, OTHER), "decline should not link"
+    assert not s.incoming_friend_requests(OTHER), "declined request still in inbox"
+
+
+def test_mutual_request_auto_accepts():
+    s = sessions
+    s.unlink_friend(UID, OTHER)
+    s.session(UID)["privateState"]["friendRequests"] = []
+    s.session(OTHER)["privateState"]["friendRequests"] = []
+    assert s.request_friend(UID, OTHER) == "requested"
+    # OTHER also requests UID -> the pending request matches and links at once.
+    assert s.request_friend(OTHER, UID) == "accepted"
+    assert s.is_friend(UID, OTHER) and s.is_friend(OTHER, UID)
+    s.unlink_friend(UID, OTHER)
+
+
+def test_friends_page_renders_with_sections():
+    c = _client(logged_in_as=UID)
+    r = c.get("/friends")
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert "Friend requests" in html and "All empires" in html, "friends page sections missing"
+
+
 TESTS = [
     test_command_requires_login,
     test_command_ignores_posted_userid,
@@ -399,6 +455,10 @@ TESTS = [
     test_mini_fireball_combat_asset_served,
     test_public_player_profile_requires_login,
     test_public_player_profile_returns_stats,
+    test_friend_request_and_accept_flow,
+    test_friend_request_decline,
+    test_mutual_request_auto_accepts,
+    test_friends_page_renders_with_sections,
 ]
 
 
