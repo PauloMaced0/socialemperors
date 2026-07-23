@@ -863,9 +863,26 @@ def do_command(USERID, cmd, args):
                     map["universAttackWin"].append(int(posicion))
 
     elif cmd == Constant.CMD_ADD_COLLECTABLE:
-        collection_id = args[0]
-        collectible_id = args[1]
-        # TODO
+        # A collectible drop (from PvP, harvesting, etc). args =
+        # [collection_id, collectible_index]. Persist the count in
+        # privateState.collections (per-collection [completedFlag, count,
+        # count, ...]) so earned collectibles survive a reload - this was a
+        # no-op TODO, so they were shown client-side then lost.
+        try:
+            collection_id = int(args[0])
+            collectible_id = int(args[1])
+        except (ValueError, IndexError, TypeError):
+            print("add_collectable: bad args", args)
+            return
+        pState = save["privateState"]
+        collections = pState.setdefault("collections", [])
+        while len(collections) <= collection_id:
+            collections.append([0])
+        coll = collections[collection_id]
+        while len(coll) <= collectible_id:
+            coll.append(0)
+        coll[collectible_id] += 1
+        print(f"Collectible stored: collection {collection_id}, item {collectible_id} (x{coll[collectible_id]}).")
 
     elif cmd == Constant.CMD_ACTIVATE:
         x = args[0]
