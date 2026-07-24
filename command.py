@@ -7,6 +7,7 @@ from sessions import (
     session, save_session, fresh_town_map, neighbor_session, is_friend,
     is_enemy_camp_marker, mark_enemy_camp_active,
     is_natural_resource, is_depleted_resource_placeholder,
+    is_regrowable_resource,
 )
 from get_game_config import get_game_config, get_level_from_xp, get_name_from_item_id, get_attribute_from_mission_id, get_xp_from_level, get_attribute_from_item_id, get_item_from_subcat_functional
 from constants import Constant
@@ -657,6 +658,21 @@ def do_command(USERID, cmd, args):
             if item[0] == id and item[1] == x and item[2] == y:
                 map["items"].remove(item)
                 break
+        # A fully harvested wild stone/gold deposit (the client's regrowth timer
+        # was patched out of the SWF) is scheduled to reappear at the same tile
+        # after TIMER_RESOURCE_REGEN_SECONDS. get_player_info re-populates it on
+        # the next map load. Only natural depletion (HARV) regrows - a bulldoze
+        # or upgrade sale of the same tile must not.
+        if reason == Constant.SELL_REASON_HARVEST and is_regrowable_resource(id):
+            pending = map.setdefault("pendingResourceRespawns", [])
+            pending[:] = [
+                p for p in pending
+                if not (int(p.get("x")) == int(x) and int(p.get("y")) == int(y))
+            ]
+            pending.append({
+                "id": int(id), "x": int(x), "y": int(y),
+                "at": timestamp_now() + Constant.TIMER_RESOURCE_REGEN_SECONDS,
+            })
         # Upgrades are represented by the client as ``sell(old, "UPGR")``
         # followed by ``buy(new)``. The client applies the normal 5% resale
         # credit locally before charging the next tier's full listed price, so
