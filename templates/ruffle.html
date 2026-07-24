@@ -7,7 +7,10 @@
         <title id="pageTitle">Social Empires</title>
         <link rel="shortcut icon" href="img/icon.gif"/>
         <link rel="icon" type="image/png" href="img/icon.gif"/>
-        <script src="https://unpkg.com/@ruffle-rs/ruffle/ruffle.js"></script>
+        <!-- Pin Ruffle: the bare @ruffle-rs/ruffle URL auto-updates to the newest
+             build, which silently changed AVM behavior and broke the game once
+             already. Bump this version only after testing the game against it. -->
+        <script src="https://unpkg.com/@ruffle-rs/ruffle@0.4.1/ruffle.js"></script>
         <!--<script src="https://cdn.jsdelivr.net/npm/@ruffle-rs/ruffle/ruffle.js"></script>-->
     </head>
     <body style="font-family: 'lucida grande',tahoma,verdana,arial,sans-serif">
