@@ -556,97 +556,6 @@ def test_natural_resources_initialize_once_and_do_not_regrow(tmp):
         "depleted stone installed a three-hour regrowth blocker"
 
 
-def test_depleted_stone_and_gold_regrow_after_three_hours(tmp):
-    """Wild stone/gold reappears at the same tile TIMER_RESOURCE_REGEN after a
-    full harvest. The client no longer drives regrowth (its 3h regen object was
-    patched out), so the server re-populates the deposit on the next map load.
-    Trees are excluded - they never regrew in stock and must stay gone."""
-    stone = Constant.ID_BUILDING_STONE_1
-    gold = Constant.ID_BUILDING_GOLD_1
-    tree = Constant.ID_BUILDING_TREE_1
-    town = sessions.session(UID)["maps"][0]
-
-    # Initial wild deposits arrive as the one-time free-buy batch (now 12:10).
-    command.command(UID, _batch([
-        {"cmd": Constant.CMD_BUY, "args": [stone, 72, 72, 0, 0, 1, 1, 0]},
-        {"cmd": Constant.CMD_BUY, "args": [gold, 60, 60, 0, 0, 1, 1, 0]},
-        {"cmd": Constant.CMD_BUY, "args": [tree, 50, 50, 0, 0, 1, 1, 0]},
-    ]))
-    assert any(it[0] == stone and it[1:3] == [72, 72] for it in town["items"])
-
-    # Full harvest of a wild resource => client sends CMD_SELL(HARVEST).
-    command.command(UID, _batch([
-        {"cmd": Constant.CMD_SELL,
-         "args": [72, 72, stone, 0, 0, Constant.SELL_REASON_HARVEST]},
-        {"cmd": Constant.CMD_SELL,
-         "args": [60, 60, gold, 0, 0, Constant.SELL_REASON_HARVEST]},
-        {"cmd": Constant.CMD_SELL,
-         "args": [50, 50, tree, 0, 0, Constant.SELL_REASON_HARVEST]},
-    ]))
-    assert not any(it[1:3] == [72, 72] for it in town["items"]), "stone not removed"
-    assert not any(it[1:3] == [60, 60] for it in town["items"]), "gold not removed"
-
-    # Before the timer elapses (12:10 -> 12:12, under 3h) nothing regrows.
-    _set_now(_local(12, 12))
-    get_player_info.get_player_info(UID)
-    assert not any(it[1:3] == [72, 72] for it in town["items"]), "stone regrew early"
-    assert not any(it[1:3] == [60, 60] for it in town["items"]), "gold regrew early"
-
-    # After 3h (12:10 -> 12:14) stone and gold reappear at the SAME tiles.
-    _set_now(_local(12, 14))
-    get_player_info.get_player_info(UID)
-    stone_back = _item(sessions.session(UID), stone, 72, 72)
-    gold_back = _item(sessions.session(UID), gold, 60, 60)
-    assert stone_back[4] == _local(12, 14), "reappeared stone not freshly harvestable"
-    assert gold_back is not None
-
-    # Trees stay gone - they had no regrowth in stock. (A fresh village ships
-    # with decorative trees elsewhere, so check the harvested tile specifically.)
-    assert not any(it[1:3] == [50, 50] for it in town["items"]), \
-        "tree regrew (should not)"
-
-    # Reloading again must not duplicate the respawned deposits.
-    get_player_info.get_player_info(UID)
-    assert sum(1 for it in town["items"] if it[1:3] == [72, 72]) == 1, \
-        "stone duplicated on second load"
-
-
-def test_quest_prize_pays_once_not_on_replay_or_loss(tmp):
-    save = sessions.session(UID)
-    save["privateState"]["unlockedQuestIndex"] = 0
-    town = save["maps"][0]
-    town["coins"] = 0
-    town["xp"] = 0
-
-    def end_quest(quest_id, win, gold=500, xp=50):
-        return {"cmd": Constant.CMD_END_QUEST, "args": [json.dumps({
-            "map": 0, "resources": {"g": gold, "x": xp}, "units": [],
-            "win": 1 if win else 0, "duration": 10, "voluntary_end": 0,
-            "quest_id": quest_id, "difficulty": 1,
-        })]}
-
-    # First win pays the prize and unlocks the next quest.
-    command.command(UID, _batch([end_quest(0, True)]))
-    assert town["coins"] == 500 and town["xp"] == 50
-    assert save["privateState"]["unlockedQuestIndex"] == 1
-
-    # Replaying an already-cleared quest pays nothing (the reported bug).
-    command.command(UID, _batch([end_quest(0, True)]))
-    assert town["coins"] == 500 and town["xp"] == 50, \
-        "completed quest re-paid its prize on replay"
-
-    # Losing a brand-new quest pays nothing and does not unlock it...
-    command.command(UID, _batch([end_quest(1, False)]))
-    assert town["coins"] == 500, "a lost quest paid a prize"
-    assert save["privateState"]["unlockedQuestIndex"] == 1, \
-        "a loss unlocked the next quest"
-
-    # ...so winning it afterwards still pays exactly once.
-    command.command(UID, _batch([end_quest(1, True)]))
-    assert town["coins"] == 1000 and town["xp"] == 100
-    assert save["privateState"]["unlockedQuestIndex"] == 2
-
-
 def test_destroyed_wall_is_removed_and_stays_removed(tmp):
     """Assault/Heavy Siege destruction opens the occupied wall tile.
 
@@ -712,11 +621,6 @@ def test_collectible_drop_and_collection_shape_survive_reload(tmp):
     save["privateState"].pop("collectionsCompleted", None)
     get_player_info.get_player_info(UID)
     assert len(save["privateState"]["collections"]) == 24
-    # Index 0 is a 1-based-alignment dummy and MUST be empty, or the client's
-    # collection-book loader throws at i=0 (arCollected[0] doesn't exist) and
-    # the try/catch drops every earned collectible on reload.
-    assert save["privateState"]["collections"][0] == [], \
-        "collections[0] must be empty so the client book loader survives reload"
 
     command.command(UID, _batch([
         {"cmd": Constant.CMD_ADD_COLLECTABLE, "args": [5, 3]},
@@ -726,13 +630,6 @@ def test_collectible_drop_and_collection_shape_survive_reload(tmp):
     assert reloaded["collections"][5][3] == 2, \
         "earned collectible count disappeared or was stored at the wrong slot"
     assert reloaded["collectionsCompleted"] == []
-
-    # The count must survive a subsequent player-info load (the reload path the
-    # player actually hits), and index 0 must stay empty.
-    get_player_info.get_player_info(UID)
-    after = sessions.session(UID)["privateState"]
-    assert after["collections"][5][3] == 2, "collectible lost on player-info reload"
-    assert after["collections"][0] == [], "collections[0] repopulated to non-empty"
 
 
 def test_merge_did_not_duplicate_social_staffing_handler(tmp):
@@ -830,8 +727,6 @@ TESTS = [
     test_round_table_rejects_fake_players_and_persists_real_rewards,
     test_live_enemy_camp_survives_reload_without_respawning,
     test_natural_resources_initialize_once_and_do_not_regrow,
-    test_depleted_stone_and_gold_regrow_after_three_hours,
-    test_quest_prize_pays_once_not_on_replay_or_loss,
     test_destroyed_wall_is_removed_and_stays_removed,
     test_deployed_unit_sale_refund_and_removal_survive_reload,
     test_collectible_drop_and_collection_shape_survive_reload,

@@ -21,7 +21,6 @@ from sessions import (
     new_village, fb_friends_str, pvp_profiles, friend_candidates,
     link_friend, unlink_friend,
     request_friend, accept_friend, decline_friend, incoming_friend_requests,
-    session as player_session, quest_requires_zeppelin, player_can_reach_zeppelin,
 )
 from auth import has_password, set_password, check_password, change_password
 load_saved_villages()
@@ -381,14 +380,6 @@ def get_player_info_response():
         return (get_neighbor_info(user, map), 200)
     # Quest
     elif user.startswith("100000"): # Dirty but quick
-        # Zeppelin expedition islands are reachable in the client only from the
-        # Zeppelin Tower, but the server served any quest map unchecked. Enforce
-        # tower ownership (or the level at which the client grants it) so a
-        # crafted request can't skip the tower. Other quest maps stay open.
-        if quest_requires_zeppelin(user) \
-                and not player_can_reach_zeppelin(player_session(USERID)):
-            print(f" [!] Zeppelin map {user} denied for {USERID}: no Zeppelin Tower.")
-            return ({"result": "error", "error": "zeppelin_required"}, 403)
         return get_quest_map(user)
     # Neighbor
     else:

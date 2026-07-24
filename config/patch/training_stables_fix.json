@@ -1,6 +1,0 @@
-[
-	{ "op": "test", "path": "/items/226/id", "value": "227" },
-	{ "op": "replace", "path": "/items/226/activation", "value": "3600" },
-	{ "op": "replace", "path": "/items/226/collect", "value": "30" },
-	{ "op": "replace", "path": "/items/226/collect_xp", "value": "2" }
-]

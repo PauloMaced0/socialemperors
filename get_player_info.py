@@ -88,124 +88,6 @@ def _sync_natural_resource_reload_marker(save, map_idx):
         animals.pop(marker, None)
 
 
-def _respawn_natural_resources(save, now):
-    """Re-populate wild stone/gold deposits whose regrowth timer has elapsed.
-
-    CMD_SELL(HARVEST) records a pending respawn per depleted deposit (see
-    command.py). Here, on map load, any entry past its ``at`` timestamp is
-    turned back into a fresh, immediately harvestable deposit at its original
-    tile. Skipping when the tile is now occupied keeps this idempotent (a
-    reload cannot duplicate a deposit) and cedes tiles the player has since
-    built on."""
-    for town in save.get("maps", []):
-        pending = town.get("pendingResourceRespawns")
-        if not pending:
-            continue
-        items = town.setdefault("items", [])
-        still_pending = []
-        for entry in pending:
-            try:
-                rid, rx, ry = int(entry["id"]), int(entry["x"]), int(entry["y"])
-                ready_at = int(entry["at"])
-            except (KeyError, TypeError, ValueError):
-                continue  # drop malformed entries
-            if now < ready_at:
-                still_pending.append(entry)
-                continue
-            occupied = any(
-                item and int(item[1]) == rx and int(item[2]) == ry
-                for item in items
-            )
-            if not occupied:
-                # Same [id, x, y, orientation, collected_at, level] shape a
-                # CMD_BUY of a wild deposit produces, so the client renders it
-                # as a fresh, harvestable resource.
-                items.append([rid, rx, ry, 0, int(now), 0])
-            # Whether respawned or the tile was claimed, the entry is consumed.
-        town["pendingResourceRespawns"] = still_pending
-
-
-def _seed_client_state(save, now):
-    """Seed the privateState / per-map structures the Flash client reads on
-    load. Missing lists (collections, templeStep, ...) make the client's map
-    loader silently fail in a try/catch; because its map-load error handler is
-    a no-op, the loading bar then loops 0->100 forever. Both the self-load
-    (get_player_info) and the visit-a-neighbor load (get_neighbor_info) must run
-    this - a bundled neighbor save such as Arthur omits these fields, which is
-    why visiting Arthur used to hang on the loading bar. Idempotent."""
-    pState = save["privateState"]
-    pState.setdefault("timeStampLastDart",
-                      int(pState.get("timeStampDartsNewFree", 0) or 0))
-    # Supreme Bahamut Temple: the client does Utils.inArray(step, templeStep)
-    # and breaks on an undefined list.
-    pState.setdefault("templeStep", [])
-    pState.setdefault("timeStampTemple", 0)
-    # PvP client code iterates these lists and does arithmetic on the counters
-    # on every load; missing/null legacy values break histories and cooldowns.
-    if not isinstance(pState.get("attacksSent"), list):
-        pState["attacksSent"] = []
-    if not isinstance(pState.get("attacksReceived"), list):
-        pState["attacksReceived"] = []
-    for pvp_key in (
-        "attacksWon", "attacksLost", "honor", "tsAttacksReset",
-        "attacksPack", "spyingsPack", "tsSpyingsReset",
-    ):
-        try:
-            pState[pvp_key] = int(pState.get(pvp_key, 0) or 0)
-        except (TypeError, ValueError):
-            pState[pvp_key] = 0
-    if not isinstance(pState.get("spyings"), list):
-        pState["spyings"] = []
-    # Item collectibles: the client loads privateState.collections (per
-    # collection: [completedFlag, count, ...]) and collectionsCompleted.
-    # Without them the load silently fails. NUM_COLLECTIONS = 23 -> 24 slots.
-    pState.setdefault("collectionsCompleted", [])
-    colls = pState.setdefault("collections", [])
-    while len(colls) < 24:
-        colls.append([0])
-    # Collection index 0 is a 1-based-alignment dummy (the client's arCollected
-    # and collectible ids are 1..NUM_COLLECTIONS). The client's load loop starts
-    # at i=0 and, for any non-empty collections[0], does arCollected[0][0]=... -
-    # but arCollected[0] never exists, so it throws; the surrounding try/catch
-    # then aborts the WHOLE loop and every earned collectible vanishes on
-    # reload. An empty entry at index 0 makes the loader skip it.
-    colls[0] = []
-    # Market state is a 20-hour period; Unit Warehouse state is per-town. Older
-    # and bundled saves omitted these, making the client show zero slots / a
-    # broken market and, for a visited save, hang the load.
-    for m in save["maps"]:
-        try:
-            trades_done = int(m.get("numTradesDone", 0) or 0)
-        except (TypeError, ValueError):
-            trades_done = 0
-        m["numTradesDone"] = min(max(trades_done, 0), 20)
-        try:
-            m["timestampLastTrade"] = max(
-                0, int(m.get("timestampLastTrade", 0) or 0)
-            )
-        except (TypeError, ValueError):
-            m["timestampLastTrade"] = 0
-        if not isinstance(m.get("resourcesTraded"), dict):
-            m["resourcesTraded"] = {}
-        m.setdefault("resourceAlliesMarket", "n")
-        m.setdefault("warehouseAditionalCapacitySingle", 0)
-        m.setdefault("warehousedUnits", {})
-        if (
-            int(m.get("warehouseAditionalCapacitySingle", 0) or 0) < 1
-            and any(
-                item
-                and int(item[0]) == Constant.ID_BUILDING_UNIT_WAREHOUSE
-                for item in m.get("items", [])
-            )
-        ):
-            m["warehouseAditionalCapacitySingle"] = 1
-        last_trade = int(m.get("timestampLastTrade", 0) or 0)
-        if last_trade and now - last_trade >= 20 * 3600:
-            m["numTradesDone"] = 0
-            m["resourcesTraded"] = {}
-            m["timestampLastTrade"] = 0
-
-
 def _clamp_map(save, map_number):
     """A valid map index for this village. Switching towns (or clicking
     "Town" with one town) requests map 1; an out-of-range index would 500
@@ -235,8 +117,30 @@ def get_player_info(USERID, map_number=None):
     last_dart = int(pState.get("timeStampLastDart", 0) or 0)
     if pState.get("dartsHasFree") and last_claim > 0 and last_dart >= last_claim:
         pState["dartsHasFree"] = False
-    # Seed all the privateState/per-map structures the client reads on load.
-    _seed_client_state(save, ts_now)
+    # Supreme Bahamut Temple: ensure the fields the client reads on load exist,
+    # so older saves get valid Temple state automatically (the client does
+    # Utils.inArray(step, privateState["templeStep"]) and would break on an
+    # undefined list). templeStep = completed step indices; timeStampTemple =
+    # last-step time that gates the 48h wait.
+    pState.setdefault("templeStep", [])
+    pState.setdefault("timeStampTemple", 0)
+    # PvP client code iterates these lists and performs arithmetic on the
+    # counters during every load; missing/null legacy values break histories,
+    # cooldowns and goal progress.
+    if not isinstance(pState.get("attacksSent"), list):
+        pState["attacksSent"] = []
+    if not isinstance(pState.get("attacksReceived"), list):
+        pState["attacksReceived"] = []
+    for pvp_key in (
+        "attacksWon", "attacksLost", "honor", "tsAttacksReset",
+        "attacksPack", "spyingsPack", "tsSpyingsReset",
+    ):
+        try:
+            pState[pvp_key] = int(pState.get(pvp_key, 0) or 0)
+        except (TypeError, ValueError):
+            pState[pvp_key] = 0
+    if not isinstance(pState.get("spyings"), list):
+        pState["spyings"] = []
     # The local server has no separate Facebook display name, so the editable
     # default-town name is the player's identity. Keep it synchronized after
     # every rename; otherwise cards stay stuck on "Emperor" or an older name.
@@ -245,9 +149,54 @@ def get_player_info(USERID, map_number=None):
     dm = int(pi.get("default_map", 0) or 0)
     if 0 <= dm < len(names) and names[dm]:
         pi["name"] = names[dm]
+    # Market state is a 20-hour period in the Flash client.
+    for m in save["maps"]:
+        try:
+            trades_done = int(m.get("numTradesDone", 0) or 0)
+        except (TypeError, ValueError):
+            trades_done = 0
+        m["numTradesDone"] = min(max(trades_done, 0), 20)
+        try:
+            m["timestampLastTrade"] = max(
+                0, int(m.get("timestampLastTrade", 0) or 0)
+            )
+        except (TypeError, ValueError):
+            m["timestampLastTrade"] = 0
+        if not isinstance(m.get("resourcesTraded"), dict):
+            m["resourcesTraded"] = {}
+        m.setdefault("resourceAlliesMarket", "n")
+        # Unit Warehouse state is per-town. Older/new saves omitted these
+        # fields, which made the client show zero slots and forget stored units
+        # after refresh.
+        m.setdefault("warehouseAditionalCapacitySingle", 0)
+        m.setdefault("warehousedUnits", {})
+        if (
+            int(m.get("warehouseAditionalCapacitySingle", 0) or 0) < 1
+            and any(
+                item
+                and int(item[0]) == Constant.ID_BUILDING_UNIT_WAREHOUSE
+                for item in m.get("items", [])
+            )
+        ):
+            # The building includes its first slot. The 2-cash action buys
+            # one *additional* slot, rather than activating a 20-cash shell.
+            m["warehouseAditionalCapacitySingle"] = 1
+        last_trade = int(m.get("timestampLastTrade", 0) or 0)
+        if last_trade and ts_now - last_trade >= 20 * 3600:
+            m["numTradesDone"] = 0
+            m["resourcesTraded"] = {}
+            m["timestampLastTrade"] = 0
+    # Item collectibles: the client loads privateState.collections (per
+    # collection: [completedFlag, count, count, ...]) and collectionsCompleted.
+    # Without them the client's load silently fails (try/catch) and collected
+    # items vanish on reload. Seed the structures (NUM_COLLECTIONS = 23, so 24
+    # slots) so add_collectable has somewhere to persist.
+    pState.setdefault("collectionsCompleted", [])
+    colls = pState.setdefault("collections", [])
+    while len(colls) < 24:
+        colls.append([0])
     _ensure_town_list(save)
     _sync_global_level(save)
-    _respawn_natural_resources(save, ts_now)
     # player
     map_idx = _clamp_map(save, map_number)
     _sync_natural_resource_reload_marker(save, map_idx)
@@ -281,23 +230,14 @@ def get_neighbor_info(userid, map_number):
         pi["name"] = names[default]
     _ensure_town_list(save)
     _sync_global_level(save)
-    # A visited save (e.g. the bundled Arthur village) must be normalized the
-    # same way a self-load is, or the client's loader silently fails and the
-    # loading bar loops 0->100 forever.
-    now = timestamp_now()
-    _seed_client_state(save, now)
     map_idx = _clamp_map(save, map_number)
-    response_pstate = copy.deepcopy(save["privateState"])
-    # The old Flash JSON reader treats a bare false as a truthy object; emit
-    # this protocol flag as numeric 0/1 (matches the self-load path).
-    response_pstate["dartsHasFree"] = 1 if save["privateState"].get("dartsHasFree") else 0
     neighbor_info = {
         "result": "ok",
         "processed_errors": 0,
-        "timestamp": now,
+        "timestamp": timestamp_now(),
         "playerInfo": save["playerInfo"],
         "map": save["maps"][map_idx],
-        "privateState": response_pstate,
+        "privateState": save["privateState"],
         "neighbors": neighbors(userid)
     }
     return neighbor_info
