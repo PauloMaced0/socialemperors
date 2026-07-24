@@ -386,6 +386,45 @@ def test_public_player_profile_returns_stats():
     assert isinstance(body.get("map_names"), list) and body["map_names"], "map_names missing"
 
 
+def test_ally_popup_api_lists_candidates_and_links_instantly():
+    # The in-game ADD ALLY popup (ruffle.html) uses these JSON routes; the
+    # Flash client calls the page's gotoNeighbors hook, so no SWF is involved.
+    s = sessions
+    s.unlink_friend(UID, OTHER)
+
+    r = server.app.test_client().get("/api/ally_candidates")
+    assert r.status_code == 403, "candidates served without a session"
+    r = server.app.test_client().post("/api/add_ally", json={"pid": OTHER})
+    assert r.status_code == 403, "add_ally accepted without a session"
+
+    c = _client(logged_in_as=UID)
+    body = c.get("/api/ally_candidates").get_json()
+    row = next(e for e in body["candidates"] if e["userid"] == OTHER)
+    assert row["name"] and isinstance(row["level"], int)
+    assert not any(e["userid"] == UID for e in body["candidates"]), \
+        "own village offered as an ally candidate"
+
+    r = c.post("/api/add_ally", json={"pid": OTHER})
+    assert r.status_code == 200 and r.get_json()["result"] == "ok"
+    assert s.is_friend(UID, OTHER) and s.is_friend(OTHER, UID), \
+        "instant add did not create a reciprocal link"
+    # Persisted on both sides.
+    mine = json.load(open(os.path.join(_TMP, f"{UID}.save.json")))
+    other = json.load(open(os.path.join(_TMP, f"{OTHER}.save.json")))
+    assert OTHER in [str(v) for v in mine["privateState"]["neighbors"]]
+    assert UID in [str(v) for v in other["privateState"]["neighbors"]]
+
+    # Linked players drop out of the candidate list.
+    body = c.get("/api/ally_candidates").get_json()
+    assert not any(e["userid"] == OTHER for e in body["candidates"]), \
+        "already-linked ally still offered in the popup"
+
+    # Garbage pids are rejected without effect.
+    assert c.post("/api/add_ally", json={"pid": "no-such"}).status_code == 404
+    assert c.post("/api/add_ally", json={"pid": UID}).status_code == 400
+    s.unlink_friend(UID, OTHER)
+
+
 def test_friend_request_and_accept_flow():
     s = sessions
     s.unlink_friend(UID, OTHER)
@@ -455,6 +494,7 @@ TESTS = [
     test_mini_fireball_combat_asset_served,
     test_public_player_profile_requires_login,
     test_public_player_profile_returns_stats,
+    test_ally_popup_api_lists_candidates_and_links_instantly,
     test_friend_request_and_accept_flow,
     test_friend_request_decline,
     test_mutual_request_auto_accepts,

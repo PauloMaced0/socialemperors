@@ -204,6 +204,38 @@ def ruffle():
     )
 
 
+# JSON API for the in-game ADD ALLY popup (ruffle.html gotoNeighbors hook).
+# The Flash client's empty ally slot calls ExternalInterface "gotoNeighbors";
+# the page catches it and drives these routes, so adding an ally never leaves
+# the game. Instant reciprocal link - this is a private server, no accept step.
+
+@app.route("/api/ally_candidates")
+def ally_candidates_api():
+    USERID = session.get("USERID")
+    if not USERID or USERID not in all_saves_userid():
+        return ({"result": "error", "error": "not_logged_in"}, 403)
+    candidates = [
+        entry for entry in friend_candidates(USERID) if not entry["linked"]
+    ]
+    return {"result": "ok", "candidates": candidates}
+
+
+@app.route("/api/add_ally", methods=["POST"])
+def add_ally_api():
+    USERID = session.get("USERID")
+    if not USERID or USERID not in all_saves_userid():
+        return ({"result": "error", "error": "not_logged_in"}, 403)
+    data = request.get_json(silent=True) or {}
+    pid = str(data.get("pid", ""))
+    if pid == USERID:
+        return ({"result": "error", "error": "self"}, 400)
+    if pid not in all_saves_userid():
+        return ({"result": "error", "error": "unknown_player"}, 404)
+    link_friend(USERID, pid)
+    print(f"[ALLY] {USERID} linked with {pid} via in-game popup.")
+    return {"result": "ok"}
+
+
 @app.route("/friends", methods=["GET", "POST"])
 def friends_page():
     USERID = session.get("USERID")
