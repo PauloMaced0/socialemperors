@@ -105,7 +105,12 @@
                     // these values from Stage.loaderInfo.parameters.
                     url: "{{SERVERURL}}/default01.static.socialpointgames.com/static/socialempires/flash/SELoader.swf?build=20260723",
                     backgroundColor: "#669C2C",
-                    allowScriptAccess: false,
+                    // The ADD ALLY slot calls ExternalInterface
+                    // "gotoNeighbors"; the page catches it and opens the
+                    // in-game ally popup below, so this must be enabled.
+                    // Other stray FB-era calls hit undefined functions,
+                    // which Ruffle treats as a no-op.
+                    allowScriptAccess: true,
                     // Let the SWF's fullscreen button work: it sets
                     // Stage.displayState = FULL_SCREEN, which Ruffle only
                     // honors when allowFullscreen is enabled (default false).
@@ -154,5 +159,91 @@
             </script>
         </object>
     </center>
+
+        <!-- ADD ALLY POPUP: opened by the SWF via ExternalInterface
+             ("gotoNeighbors" / "gotoInitialInvite") when an empty ally slot
+             is clicked. Lists real saved players and links them instantly
+             through /api/add_ally; the new ally appears in the bar after a
+             reload. -->
+        <div id="allyOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:50;">
+            <div style="position:relative; margin:120px auto 0; width:420px; max-height:430px; background:#f6e3b3; border:6px solid #7a4a21; border-radius:14px; box-shadow:0 8px 30px rgba(0,0,0,.5); font-family:'lucida grande',tahoma,verdana,arial,sans-serif;">
+                <div style="background:#7a4a21; color:#ffe9b8; font-weight:bold; font-size:16px; padding:8px 14px; border-radius:6px 6px 0 0;">
+                    Add Allies
+                    <span id="allyClose" style="float:right; cursor:pointer; color:#fff; background:#c0392b; border-radius:10px; padding:0 8px;">&#10005;</span>
+                </div>
+                <div id="allyList" style="overflow-y:auto; max-height:300px; padding:10px 14px;"></div>
+                <div style="padding:8px 14px 12px; text-align:center;">
+                    <span id="allyHint" style="font-size:11px; color:#7a4a21;">Allies you add appear in the bar after a reload.</span><br>
+                    <button id="allyReload" style="display:none; margin-top:6px; background:#61a827; color:#fff; border:2px solid #3d6e14; border-radius:8px; padding:5px 16px; font-weight:bold; cursor:pointer;">Reload now</button>
+                </div>
+            </div>
+        </div>
+        <script>
+            (function () {
+                var overlay = document.getElementById("allyOverlay"),
+                    list = document.getElementById("allyList"),
+                    reloadBtn = document.getElementById("allyReload"),
+                    added = false;
+
+                function row(c) {
+                    var div = document.createElement("div");
+                    div.style.cssText = "display:flex; align-items:center; justify-content:space-between; background:#fff7df; border:2px solid #d9b878; border-radius:8px; padding:6px 10px; margin-bottom:6px;";
+                    var label = document.createElement("span");
+                    label.textContent = c.name + " (lvl " + c.level + ")";
+                    label.style.fontWeight = "bold";
+                    var btn = document.createElement("button");
+                    btn.textContent = "Add";
+                    btn.style.cssText = "background:#61a827; color:#fff; border:2px solid #3d6e14; border-radius:8px; padding:3px 14px; font-weight:bold; cursor:pointer;";
+                    btn.onclick = function () {
+                        btn.disabled = true;
+                        fetch("/api/add_ally", {
+                            method: "POST",
+                            headers: {"Content-Type": "application/json"},
+                            body: JSON.stringify({pid: c.userid})
+                        }).then(function (r) { return r.json(); }).then(function (b) {
+                            if (b.result === "ok") {
+                                btn.textContent = "\u2713 Added";
+                                btn.style.background = "#9aa89a";
+                                btn.style.borderColor = "#6f7a6f";
+                                added = true;
+                                reloadBtn.style.display = "inline-block";
+                            } else {
+                                btn.disabled = false;
+                            }
+                        }).catch(function () { btn.disabled = false; });
+                    };
+                    div.appendChild(label);
+                    div.appendChild(btn);
+                    return div;
+                }
+
+                function openPopup() {
+                    list.textContent = "Loading...";
+                    overlay.style.display = "block";
+                    fetch("/api/ally_candidates").then(function (r) { return r.json(); }).then(function (b) {
+                        list.textContent = "";
+                        var cands = (b && b.candidates) || [];
+                        if (!cands.length) {
+                            list.textContent = "No players to add - every village on this server is already your ally.";
+                            return;
+                        }
+                        cands.forEach(function (c) { list.appendChild(row(c)); });
+                    }).catch(function () { list.textContent = "Could not load players."; });
+                }
+
+                function closePopup() {
+                    overlay.style.display = "none";
+                    if (added) { location.reload(); }
+                }
+
+                document.getElementById("allyClose").onclick = closePopup;
+                reloadBtn.onclick = function () { location.reload(); };
+                overlay.onclick = function (e) { if (e.target === overlay) { closePopup(); } };
+
+                // Names the SWF calls through ExternalInterface.
+                window.gotoNeighbors = openPopup;
+                window.gotoInitialInvite = openPopup;
+            })();
+        </script>
     </body>
 </html>
