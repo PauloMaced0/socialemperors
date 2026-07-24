@@ -611,6 +611,42 @@ def test_depleted_stone_and_gold_regrow_after_three_hours(tmp):
         "stone duplicated on second load"
 
 
+def test_quest_prize_pays_once_not_on_replay_or_loss(tmp):
+    save = sessions.session(UID)
+    save["privateState"]["unlockedQuestIndex"] = 0
+    town = save["maps"][0]
+    town["coins"] = 0
+    town["xp"] = 0
+
+    def end_quest(quest_id, win, gold=500, xp=50):
+        return {"cmd": Constant.CMD_END_QUEST, "args": [json.dumps({
+            "map": 0, "resources": {"g": gold, "x": xp}, "units": [],
+            "win": 1 if win else 0, "duration": 10, "voluntary_end": 0,
+            "quest_id": quest_id, "difficulty": 1,
+        })]}
+
+    # First win pays the prize and unlocks the next quest.
+    command.command(UID, _batch([end_quest(0, True)]))
+    assert town["coins"] == 500 and town["xp"] == 50
+    assert save["privateState"]["unlockedQuestIndex"] == 1
+
+    # Replaying an already-cleared quest pays nothing (the reported bug).
+    command.command(UID, _batch([end_quest(0, True)]))
+    assert town["coins"] == 500 and town["xp"] == 50, \
+        "completed quest re-paid its prize on replay"
+
+    # Losing a brand-new quest pays nothing and does not unlock it...
+    command.command(UID, _batch([end_quest(1, False)]))
+    assert town["coins"] == 500, "a lost quest paid a prize"
+    assert save["privateState"]["unlockedQuestIndex"] == 1, \
+        "a loss unlocked the next quest"
+
+    # ...so winning it afterwards still pays exactly once.
+    command.command(UID, _batch([end_quest(1, True)]))
+    assert town["coins"] == 1000 and town["xp"] == 100
+    assert save["privateState"]["unlockedQuestIndex"] == 2
+
+
 def test_destroyed_wall_is_removed_and_stays_removed(tmp):
     """Assault/Heavy Siege destruction opens the occupied wall tile.
 
@@ -676,6 +712,11 @@ def test_collectible_drop_and_collection_shape_survive_reload(tmp):
     save["privateState"].pop("collectionsCompleted", None)
     get_player_info.get_player_info(UID)
     assert len(save["privateState"]["collections"]) == 24
+    # Index 0 is a 1-based-alignment dummy and MUST be empty, or the client's
+    # collection-book loader throws at i=0 (arCollected[0] doesn't exist) and
+    # the try/catch drops every earned collectible on reload.
+    assert save["privateState"]["collections"][0] == [], \
+        "collections[0] must be empty so the client book loader survives reload"
 
     command.command(UID, _batch([
         {"cmd": Constant.CMD_ADD_COLLECTABLE, "args": [5, 3]},
@@ -685,6 +726,13 @@ def test_collectible_drop_and_collection_shape_survive_reload(tmp):
     assert reloaded["collections"][5][3] == 2, \
         "earned collectible count disappeared or was stored at the wrong slot"
     assert reloaded["collectionsCompleted"] == []
+
+    # The count must survive a subsequent player-info load (the reload path the
+    # player actually hits), and index 0 must stay empty.
+    get_player_info.get_player_info(UID)
+    after = sessions.session(UID)["privateState"]
+    assert after["collections"][5][3] == 2, "collectible lost on player-info reload"
+    assert after["collections"][0] == [], "collections[0] repopulated to non-empty"
 
 
 def test_merge_did_not_duplicate_social_staffing_handler(tmp):
@@ -783,6 +831,7 @@ TESTS = [
     test_live_enemy_camp_survives_reload_without_respawning,
     test_natural_resources_initialize_once_and_do_not_regrow,
     test_depleted_stone_and_gold_regrow_after_three_hours,
+    test_quest_prize_pays_once_not_on_replay_or_loss,
     test_destroyed_wall_is_removed_and_stays_removed,
     test_deployed_unit_sale_refund_and_removal_survive_reload,
     test_collectible_drop_and_collection_shape_survive_reload,

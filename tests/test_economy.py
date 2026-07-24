@@ -132,6 +132,20 @@ def test_resource_upgrade_chains_are_monotonic(tmp):
         "Troll Mill II is still a free upgrade"
 
 
+def test_training_stables_has_a_real_production_cycle(tmp):
+    # Item 227 shipped with activation=0 and collect=0 in every config dump.
+    # The client computes the progress bar as (serverTime - item[4]) / activation,
+    # so activation=0 is a divide-by-zero: the bar sticks at 0% and the training
+    # cycle loops forever; collect=0 means it also earns nothing. A config patch
+    # restores a real cycle. Values are tunable; they must simply be nonzero.
+    items = {int(item["id"]): item for item in get_game_config()["items"]}
+    stables = items[Constant.ID_BUILDING_STABLE_TRAINING]
+    assert int(stables["activation"]) > 0, \
+        "Training Stables activation=0 -> 0% progress, infinite training loop"
+    assert int(stables["collect"]) > 0, \
+        "Training Stables collect=0 -> Earns 0 forever"
+
+
 # --- GD-05: daily bonus ---------------------------------------------------
 # The client (PopupNewDaily/Utils.isDailyBonusReady) gates the popup by UTC
 # CALENDAR DAY and displays reward index (bonusNextId - 1) % 5. The server
@@ -310,6 +324,7 @@ TESTS = [
     test_upgrade_charges_next_tier_less_resale_credit,
     test_normal_sale_still_refunds_five_percent,
     test_resource_upgrade_chains_are_monotonic,
+    test_training_stables_has_a_real_production_cycle,
     test_daily_bonus_uses_config_not_client,
     test_daily_bonus_cooldown_blocks_second_claim,
     test_daily_bonus_next_day_gives_next_reward,

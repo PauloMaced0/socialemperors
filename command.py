@@ -1423,13 +1423,31 @@ def do_command(USERID, cmd, args):
         activators_left = data["activators_left"] if "activators_left" in data else None
         difficulty = data["difficulty"]
 
-        # Resources
-        save["maps"][town_id]["coins"] += int(gold_gained)
-        save["maps"][town_id]["xp"] += int(xp_gained)
+        # A story quest pays its (large) gold/XP completion prize only the FIRST
+        # time it is beaten. unlockedQuestIndex is "highest quest cleared + 1",
+        # so a quest_id below it was already won; replaying it - or losing it -
+        # must not (re-)award the prize. Casualties/rescues still reconcile
+        # because the units really did fight.
+        prev_unlocked = int(save["privateState"].get("unlockedQuestIndex", 0) or 0)
+        first_clear = win and quest_id >= prev_unlocked
+        if first_clear:
+            save["maps"][town_id]["coins"] += int(gold_gained)
+            save["maps"][town_id]["xp"] += int(xp_gained)
+        elif int(gold_gained) or int(xp_gained):
+            print(
+                f"Quest {quest_id} prize not awarded "
+                f"({'replay' if quest_id < prev_unlocked else 'not a win'}); "
+                f"unlocked={prev_unlocked}."
+            )
         unit_result = _reconcile_battle_units(save["maps"][town_id], units)
 
-        # Update quests data
-        save["privateState"]["unlockedQuestIndex"] = max(quest_id + 1, save["privateState"]["unlockedQuestIndex"], 0)
+        # Update quests data. Only a win advances progression - a loss must not
+        # unlock the next quest, or a lost-then-retried quest would count as an
+        # already-cleared "replay" and never pay out.
+        if win:
+            save["privateState"]["unlockedQuestIndex"] = max(
+                quest_id + 1, prev_unlocked, 0
+            )
         # Star rank: questsRank is keyed by the quest id string (matches the
         # client's ISLE_ORDER lookup) and holds the best difficulty cleared. The
         # island shows that many stars, so it must persist on a win.
