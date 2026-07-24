@@ -88,6 +88,43 @@ def _sync_natural_resource_reload_marker(save, map_idx):
         animals.pop(marker, None)
 
 
+def _respawn_natural_resources(save, now):
+    """Re-populate wild stone/gold deposits whose regrowth timer has elapsed.
+
+    CMD_SELL(HARVEST) records a pending respawn per depleted deposit (see
+    command.py). Here, on map load, any entry past its ``at`` timestamp is
+    turned back into a fresh, immediately harvestable deposit at its original
+    tile. Skipping when the tile is now occupied keeps this idempotent (a
+    reload cannot duplicate a deposit) and cedes tiles the player has since
+    built on."""
+    for town in save.get("maps", []):
+        pending = town.get("pendingResourceRespawns")
+        if not pending:
+            continue
+        items = town.setdefault("items", [])
+        still_pending = []
+        for entry in pending:
+            try:
+                rid, rx, ry = int(entry["id"]), int(entry["x"]), int(entry["y"])
+                ready_at = int(entry["at"])
+            except (KeyError, TypeError, ValueError):
+                continue  # drop malformed entries
+            if now < ready_at:
+                still_pending.append(entry)
+                continue
+            occupied = any(
+                item and int(item[1]) == rx and int(item[2]) == ry
+                for item in items
+            )
+            if not occupied:
+                # Same [id, x, y, orientation, collected_at, level] shape a
+                # CMD_BUY of a wild deposit produces, so the client renders it
+                # as a fresh, harvestable resource.
+                items.append([rid, rx, ry, 0, int(now), 0])
+            # Whether respawned or the tile was claimed, the entry is consumed.
+        town["pendingResourceRespawns"] = still_pending
+
+
 def _clamp_map(save, map_number):
     """A valid map index for this village. Switching towns (or clicking
     "Town" with one town) requests map 1; an out-of-range index would 500
@@ -197,6 +234,7 @@ def get_player_info(USERID, map_number=None):
         colls.append([0])
     _ensure_town_list(save)
     _sync_global_level(save)
+    _respawn_natural_resources(save, ts_now)
     # player
     map_idx = _clamp_map(save, map_number)
     _sync_natural_resource_reload_marker(save, map_idx)

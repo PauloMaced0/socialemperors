@@ -72,6 +72,15 @@ _DEPLETED_RESOURCE_PLACEHOLDER_IDS = frozenset({
     Constant.ID_BUILDING_REGEN_STONE,
 })
 
+# Wild deposits the server regrows after depletion. Trees are intentionally
+# excluded: they never regrew in the stock client and stay gone once harvested.
+_REGROWABLE_RESOURCE_IDS = frozenset({
+    Constant.ID_BUILDING_STONE_1, Constant.ID_BUILDING_STONE_2,
+    Constant.ID_BUILDING_STONE_3, Constant.ID_BUILDING_STONE_4,
+    Constant.ID_BUILDING_GOLD_1, Constant.ID_BUILDING_GOLD_2,
+    Constant.ID_BUILDING_GOLD_3, Constant.ID_BUILDING_GOLD_4,
+})
+
 
 def is_enemy_camp_marker(item_id: int) -> bool:
     return int(item_id) in _ENEMY_CAMP_MARKER_IDS
@@ -83,6 +92,10 @@ def is_natural_resource(item_id: int) -> bool:
 
 def is_depleted_resource_placeholder(item_id: int) -> bool:
     return int(item_id) in _DEPLETED_RESOURCE_PLACEHOLDER_IDS
+
+
+def is_regrowable_resource(item_id: int) -> bool:
+    return int(item_id) in _REGROWABLE_RESOURCE_IDS
 
 
 def mark_enemy_camp_active(town: dict, now: int = None) -> None:

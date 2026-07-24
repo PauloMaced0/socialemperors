@@ -556,6 +556,61 @@ def test_natural_resources_initialize_once_and_do_not_regrow(tmp):
         "depleted stone installed a three-hour regrowth blocker"
 
 
+def test_depleted_stone_and_gold_regrow_after_three_hours(tmp):
+    """Wild stone/gold reappears at the same tile TIMER_RESOURCE_REGEN after a
+    full harvest. The client no longer drives regrowth (its 3h regen object was
+    patched out), so the server re-populates the deposit on the next map load.
+    Trees are excluded - they never regrew in stock and must stay gone."""
+    stone = Constant.ID_BUILDING_STONE_1
+    gold = Constant.ID_BUILDING_GOLD_1
+    tree = Constant.ID_BUILDING_TREE_1
+    town = sessions.session(UID)["maps"][0]
+
+    # Initial wild deposits arrive as the one-time free-buy batch (now 12:10).
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_BUY, "args": [stone, 72, 72, 0, 0, 1, 1, 0]},
+        {"cmd": Constant.CMD_BUY, "args": [gold, 60, 60, 0, 0, 1, 1, 0]},
+        {"cmd": Constant.CMD_BUY, "args": [tree, 50, 50, 0, 0, 1, 1, 0]},
+    ]))
+    assert any(it[0] == stone and it[1:3] == [72, 72] for it in town["items"])
+
+    # Full harvest of a wild resource => client sends CMD_SELL(HARVEST).
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_SELL,
+         "args": [72, 72, stone, 0, 0, Constant.SELL_REASON_HARVEST]},
+        {"cmd": Constant.CMD_SELL,
+         "args": [60, 60, gold, 0, 0, Constant.SELL_REASON_HARVEST]},
+        {"cmd": Constant.CMD_SELL,
+         "args": [50, 50, tree, 0, 0, Constant.SELL_REASON_HARVEST]},
+    ]))
+    assert not any(it[1:3] == [72, 72] for it in town["items"]), "stone not removed"
+    assert not any(it[1:3] == [60, 60] for it in town["items"]), "gold not removed"
+
+    # Before the timer elapses (12:10 -> 12:12, under 3h) nothing regrows.
+    _set_now(_local(12, 12))
+    get_player_info.get_player_info(UID)
+    assert not any(it[1:3] == [72, 72] for it in town["items"]), "stone regrew early"
+    assert not any(it[1:3] == [60, 60] for it in town["items"]), "gold regrew early"
+
+    # After 3h (12:10 -> 12:14) stone and gold reappear at the SAME tiles.
+    _set_now(_local(12, 14))
+    get_player_info.get_player_info(UID)
+    stone_back = _item(sessions.session(UID), stone, 72, 72)
+    gold_back = _item(sessions.session(UID), gold, 60, 60)
+    assert stone_back[4] == _local(12, 14), "reappeared stone not freshly harvestable"
+    assert gold_back is not None
+
+    # Trees stay gone - they had no regrowth in stock. (A fresh village ships
+    # with decorative trees elsewhere, so check the harvested tile specifically.)
+    assert not any(it[1:3] == [50, 50] for it in town["items"]), \
+        "tree regrew (should not)"
+
+    # Reloading again must not duplicate the respawned deposits.
+    get_player_info.get_player_info(UID)
+    assert sum(1 for it in town["items"] if it[1:3] == [72, 72]) == 1, \
+        "stone duplicated on second load"
+
+
 def test_destroyed_wall_is_removed_and_stays_removed(tmp):
     """Assault/Heavy Siege destruction opens the occupied wall tile.
 
@@ -727,6 +782,7 @@ TESTS = [
     test_round_table_rejects_fake_players_and_persists_real_rewards,
     test_live_enemy_camp_survives_reload_without_respawning,
     test_natural_resources_initialize_once_and_do_not_regrow,
+    test_depleted_stone_and_gold_regrow_after_three_hours,
     test_destroyed_wall_is_removed_and_stays_removed,
     test_deployed_unit_sale_refund_and_removal_survive_reload,
     test_collectible_drop_and_collection_shape_survive_reload,
