@@ -1409,6 +1409,32 @@ def do_command(USERID, cmd, args):
         town_id = args[1]
         print(f"Start quest {quest_id}")
 
+    elif cmd == Constant.CMD_SET_QUEST_VAR:
+        # The quest/enemy-camp state machine persists its progress one key at a
+        # time: args = [town_id, key, json_value] where key is
+        # spawned/activators/boss/treasure. The client reads it back on load as
+        # map.currentQuestVars -> Base.Main.currentQuestProperties. This was
+        # unhandled, so quest progress was silently dropped: after a reload the
+        # camp/quest reset and desynced from the enemies already killed, leaving
+        # a cleared camp with no collectable prize and freed prisoners gone.
+        # The client sends both progress and the reset batch (spawned=false,
+        # empty lists) through this same command, so simply persisting whatever
+        # arrives keeps client and server in step.
+        try:
+            town_id = int(args[0])
+            key = str(args[1])
+            raw = args[2]
+        except (IndexError, ValueError, TypeError):
+            print("set_quest_var: bad args", args)
+            return
+        try:
+            value = json.loads(raw) if isinstance(raw, str) else raw
+        except (ValueError, TypeError):
+            value = raw
+        quest_vars = save["maps"][town_id].setdefault("currentQuestVars", {})
+        quest_vars[key] = value
+        print(f"Quest var persisted (town {town_id}): {key} = {value}")
+
     elif cmd == Constant.CMD_END_QUEST:
         data = json.loads(args[0])
         town_id = data["map"]
