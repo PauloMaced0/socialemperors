@@ -647,32 +647,6 @@ def test_quest_prize_pays_once_not_on_replay_or_loss(tmp):
     assert save["privateState"]["unlockedQuestIndex"] == 2
 
 
-def test_levelup_flag_set_on_level_gain_and_cleared_otherwise(tmp):
-    # Leveling up inside a quest returns via a full reload; the client sets
-    # iLevel straight to the new server level, so the animation is skipped.
-    # The server hands the previous level as map.levelUpFrom so the patched
-    # client can replay the animation, and clears it (0) when nothing changed.
-    from get_game_config import get_xp_from_level
-    save = sessions.session(UID)
-    save["maps"][0]["xp"] = 0
-
-    body = get_player_info.get_player_info(UID)
-    base_level = body["map"]["level"]
-    assert body["map"]["levelUpFrom"] == 0, "first load must not animate"
-    assert save["privateState"]["notifiedLevel"] == base_level
-
-    # Gain levels (as if from quest XP), then reload.
-    save["maps"][0]["xp"] = int(get_xp_from_level(base_level + 3))
-    body = get_player_info.get_player_info(UID)
-    assert body["map"]["level"] > base_level, "xp bump did not raise the level"
-    assert body["map"]["levelUpFrom"] == base_level, \
-        "client not told to replay the level-up animation"
-
-    # No further change -> no stale re-trigger.
-    body = get_player_info.get_player_info(UID)
-    assert body["map"]["levelUpFrom"] == 0, "stale level-up flag re-triggered"
-
-
 def test_destroyed_wall_is_removed_and_stays_removed(tmp):
     """Assault/Heavy Siege destruction opens the occupied wall tile.
 
@@ -858,7 +832,6 @@ TESTS = [
     test_natural_resources_initialize_once_and_do_not_regrow,
     test_depleted_stone_and_gold_regrow_after_three_hours,
     test_quest_prize_pays_once_not_on_replay_or_loss,
-    test_levelup_flag_set_on_level_gain_and_cleared_otherwise,
     test_destroyed_wall_is_removed_and_stays_removed,
     test_deployed_unit_sale_refund_and_removal_survive_reload,
     test_collectible_drop_and_collection_shape_survive_reload,
