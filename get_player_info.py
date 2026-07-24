@@ -47,6 +47,33 @@ def _sync_global_level(save):
             town["xp"], town["level"] = xp, level
 
 
+def _flag_level_up_for_client(save, map_idx):
+    """Tell the patched client to replay the level-up animation on this load.
+
+    The animation normally fires only through the live adjustStats ->
+    checkForLevelUp path during play. When the player levels up inside a quest
+    the game returns via a full reload, and the client's load() sets iLevel
+    straight to the already-incremented server level, so the animation is
+    skipped. Track the last level we told the client about (privateState
+    .notifiedLevel); when the current level is higher, hand the client the
+    previous level as map.levelUpFrom so it can rewind and animate each step.
+    Cleared to 0 otherwise so a stale value never re-triggers."""
+    pstate = save["privateState"]
+    town = save["maps"][map_idx]
+    current = max(1, int(town.get("level", 1) or 1))
+    notified = pstate.get("notifiedLevel")
+    up_from = 0
+    if notified is not None:
+        try:
+            notified = int(notified or 0)
+        except (TypeError, ValueError):
+            notified = current
+        if current > notified > 0:
+            up_from = notified
+    pstate["notifiedLevel"] = current
+    town["levelUpFrom"] = up_from
+
+
 def _same_local_day(ts_a, ts_b):
     if int(ts_a or 0) <= 0 or int(ts_b or 0) <= 0:
         return False
@@ -251,6 +278,7 @@ def get_player_info(USERID, map_number=None):
     # player
     map_idx = _clamp_map(save, map_number)
     _sync_natural_resource_reload_marker(save, map_idx)
+    _flag_level_up_for_client(save, map_idx)
     refresh_enemy_camp_timer(save["maps"][map_idx], ts_now)
     response_pstate = copy.deepcopy(pState)
     # The old Flash JSON reader treats a bare false as a truthy object. Keep
