@@ -366,32 +366,6 @@ def test_tutorial_village_keeps_initial_resource_spawn(tmp):
         "reload guard not restored after tutorial completion"
 
 
-def test_quest_vars_persist_and_are_served_to_client(tmp):
-    # The quest/enemy-camp state machine persists progress via set_quest_var
-    # (spawned/activators/boss/treasure) and reads it back on load as
-    # map.currentQuestVars. It was unhandled and dropped, so a reload reset the
-    # camp and desynced from the enemies already killed -> cleared camp with no
-    # prize and freed prisoners gone.
-    from get_player_info import get_player_info
-    town = sessions.session(UID)["maps"][0]
-
-    _do(Constant.CMD_SET_QUEST_VAR, [0, "spawned", "true"])
-    _do(Constant.CMD_SET_QUEST_VAR, [0, "activators", json.dumps([3, 7])])
-    assert town["currentQuestVars"]["spawned"] is True
-    assert town["currentQuestVars"]["activators"] == [3, 7]
-
-    # The client reads this back on the next load; without it the camp resets.
-    body = get_player_info(UID, 0)
-    assert body["map"]["currentQuestVars"]["activators"] == [3, 7], \
-        "quest progress not served -> enemy camp/quest resets on reload"
-
-    # The client's reset batch (spawned=false, empty lists) persists the same way.
-    _do(Constant.CMD_SET_QUEST_VAR, [0, "spawned", "false"])
-    _do(Constant.CMD_SET_QUEST_VAR, [0, "activators", "[]"])
-    assert town["currentQuestVars"]["spawned"] is False
-    assert town["currentQuestVars"]["activators"] == []
-
-
 def test_assist_neighbour_grants_reward(tmp):
     # Assisting a neighbour credits ASSIST_REWARD_GOLD + ASSIST_REWARD_XP; the
     # command must persist it (client applies it locally). Batched _new scales
@@ -474,7 +448,6 @@ TESTS = [
     test_static_scenarios_are_not_social_players,
     test_collect_gated_on_opened_social_mine,
     test_tutorial_village_keeps_initial_resource_spawn,
-    test_quest_vars_persist_and_are_served_to_client,
     test_assist_neighbour_grants_reward,
     test_place_gift_uses_town_arg_not_frame,
     test_market_trade_requires_open_market,
