@@ -267,6 +267,47 @@ def test_player_cards_and_visits_use_the_saved_empire_name():
     assert card["name"] == "Rival Kingdom"
 
 
+def test_zeppelin_maps_require_the_zeppelin_tower():
+    from constants import Constant
+    yeti = Constant.QUEST_BOSS_YETI          # a gated zeppelin island (file exists)
+    ship = Constant.QUEST_SHIP               # a non-zeppelin quest id
+    assert sessions.quest_requires_zeppelin(yeti)
+    assert not sessions.quest_requires_zeppelin(ship), \
+        "ship/story quests must not be gated on the Zeppelin Tower"
+
+    save = sessions.session(UID)
+    tower_ids = {Constant.ID_BUILDING_ZEPPELIN_TOWER,
+                 Constant.ID_BUILDING_TROLL_ZEPPELIN}
+    # Earlier tests may have given UID extra towns / high levels; neutralize
+    # every town so the deny case is genuine, and restore afterwards.
+    snapshot = [(list(t["items"]), t.get("level")) for t in save["maps"]]
+    try:
+        for t in save["maps"]:
+            t["items"] = [it for it in t["items"]
+                          if it and int(it[0]) not in tower_ids]
+            t["level"] = 1
+        c = _client(logged_in_as=UID)
+        payload = {"USERID": UID, "user": yeti, "map": "0",
+                   "user_key": "k", "language": "en", "client_id": "1"}
+        r = c.post(API + "/get_player_info.php", data=payload)
+        assert r.status_code == 403, \
+            f"zeppelin map served without the tower: {r.status_code}"
+
+        # Owning the Zeppelin Tower opens it.
+        save["maps"][0]["items"].append(
+            [Constant.ID_BUILDING_ZEPPELIN_TOWER, 40, 40, 0, 0, 0])
+        r = c.post(API + "/get_player_info.php", data=payload)
+        assert r.status_code == 200, \
+            f"zeppelin map denied despite owning the tower: {r.status_code}"
+    finally:
+        for t, (items, level) in zip(save["maps"], snapshot):
+            t["items"] = items
+            if level is None:
+                t.pop("level", None)
+            else:
+                t["level"] = level
+
+
 def test_level_14_arthur_village_finishes_loading():
     c = _client(logged_in_as=UID)
     r = c.post(
@@ -446,6 +487,7 @@ TESTS = [
     test_friends_page_links_and_unlinks_real_players_reciprocally,
     test_pvp_continent_requires_login,
     test_player_cards_and_visits_use_the_saved_empire_name,
+    test_zeppelin_maps_require_the_zeppelin_tower,
     test_level_14_arthur_village_finishes_loading,
     test_ruffle_page_uses_current_origin_and_supported_autoplay,
     test_nginx_forwarded_origin_needs_no_body_substitution,

@@ -98,6 +98,59 @@ def is_regrowable_resource(item_id: int) -> bool:
     return int(item_id) in _REGROWABLE_RESOURCE_IDS
 
 
+# Zeppelin expedition islands. The client only lets you reach these from the
+# Zeppelin Tower (PopupQuestsManager.hasZeppelin / goToIsland), but the server
+# served any 100000* quest map with no check, so a crafted request bypassed the
+# gate. This is exactly the island set goToIsland maps to a QUEST_*; other quest
+# maps (the ship story quests, survival/event maps) are intentionally NOT gated.
+_ZEPPELIN_QUEST_MAP_IDS = frozenset({
+    Constant.QUEST_BOSS_YETI, Constant.QUEST_BOSS_GOLEM, Constant.QUEST_BOSS_WORM,
+    Constant.QUEST_BOSS_DRAGON_1, Constant.QUEST_BOSS_DRAGON_2,
+    Constant.QUEST_ISLA_TROLLS_1, Constant.QUEST_ISLA_TROLLS_2,
+    Constant.QUEST_ISLA_TROLLS_3, Constant.QUEST_ISLA_TROLLS_4,
+    Constant.QUEST_ISLA_VIKINGO, Constant.QUEST_ISLA_EGYPT,
+    Constant.QUEST_ISLA_CHINOS, Constant.QUEST_ISLA_AZTECAS,
+    Constant.QUEST_ISLA_HUMANOS, Constant.QUEST_ISLA_HUMANOS_2,
+    Constant.QUEST_ISLA_KAMIKAZES, Constant.QUEST_ISLA_HEROES,
+    Constant.QUEST_ISLA_ATLANTIS,
+    Constant.QUEST_HARDCORE_1, Constant.QUEST_HARDCORE_2, Constant.QUEST_HARDCORE_3,
+    Constant.QUEST_HARDCORE_4, Constant.QUEST_HARDCORE_5, Constant.QUEST_HARDCORE_6,
+    Constant.QUEST_HARDCORE_7,
+    Constant.QUEST_GODS_1, Constant.QUEST_GODS_2, Constant.QUEST_GODS_3,
+})
+
+_ZEPPELIN_TOWER_IDS = frozenset({
+    Constant.ID_BUILDING_ZEPPELIN_TOWER, Constant.ID_BUILDING_TROLL_ZEPPELIN,
+})
+# The tower's config min_level (id 299/344). The client shows the zeppelin icon
+# from this level and auto-grants the tower around level 30, so a level check is
+# a safe fallback that never blocks a legitimate player.
+_ZEPPELIN_MIN_LEVEL = 25
+
+
+def quest_requires_zeppelin(questid) -> bool:
+    return str(questid) in _ZEPPELIN_QUEST_MAP_IDS
+
+
+def player_can_reach_zeppelin(save: dict) -> bool:
+    """Mirror the client's gate: the player owns a Zeppelin Tower, or is at the
+    level where the client shows/auto-grants it. OR-ing the two means a player
+    the client would legitimately let through is never falsely blocked - only a
+    crafted request from an under-level non-owner is refused."""
+    if save is None:
+        return False
+    for town in save.get("maps", []):
+        for item in town.get("items", []):
+            if item and int(item[0]) in _ZEPPELIN_TOWER_IDS:
+                return True
+        try:
+            if int(town.get("level", 0) or 0) >= _ZEPPELIN_MIN_LEVEL:
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
+
+
 def mark_enemy_camp_active(town: dict, now: int = None) -> None:
     """Keep the client respawn gate closed while a saved camp is alive."""
     town["enemyCampActive"] = 1
