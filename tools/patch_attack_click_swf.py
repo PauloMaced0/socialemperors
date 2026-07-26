@@ -46,13 +46,6 @@ consume a click without moving selected units. The final two patches set that
 flag for real mouse interactions before the contextual handler runs. Calls made
 programmatically with a null MouseEvent remain untouched.
 
-The stock harvest code also replaces every depleted stone or gold deposit with
-an invisible ``ID_BUILDING_REGEN_*`` object. That object blocks the tile and
-grows the deposit back after three hours. Both the manual-collection and
-auto-collection paths are patched to compare against the unreachable
-``SUBCATFUNC_RESOURCE_REGEN`` value instead. Trees already disappear correctly;
-explicitly renewable production buildings retain their normal cooldowns.
-
 The Remove Tool has a separate gameplay inconsistency: the client rejects every
 ``IsoUnit`` before it reaches the existing sale code, even though that code and
 the server both support selling a deployed unit. The patch makes only that type
@@ -61,12 +54,11 @@ checks intact. A second rewrite keeps units in the normal confirmation/refund
 branch instead of silently deleting them. Non-cash units receive the configured
 5% resale value; cash units keep the original zero-cash resale rule.
 
-There is a related reload bug in ``MapInitializer``: its initial natural-
-resource population methods run on every map load. The server exposes a
-per-town initialized marker through ``privateState.arrayAnimals[128]`` (128 is
-RESOURCE_REGEN, not an animal). Small guards skip the tree/stone/gold population
-for an established town. A fresh town still receives its resources once, and
-the remainder of ``spawnRemainingResources`` still replenishes animals.
+Natural-resource behavior is handled by the later gameplay-behavior patch.
+That patch keeps the stock same-tile gold/stone placeholders disabled and
+retains the capped initial population behind a server-controlled reload guard.
+The server persists each mineral cooldown and creates its replacement at a new
+random wild-map position; harvested trees retain their own persisted cooldown.
 
 The signature includes the surrounding PlayerID/PLAYER_SELF comparison and is
 required to occur exactly once. This makes the patch fail safely if a different
@@ -378,7 +370,9 @@ GAMEPLAY_UI_MARKERS = (
     b"socialemperors-friend-card-v1",
     b"socialemperors-live-camp-timer-v1",
     b"socialemperors-live-daily-v1",
+    b"socialemperors-daily-claim-timestamp-v1",
     b"socialemperors-live-darts-v1",
+    b"socialemperors-mini-fireball-asset-v1",
     b"socialemperors-market-trades-v1",
     b"socialemperors-mission-progress-v1",
     b"socialemperors-social-feed-page-v1",

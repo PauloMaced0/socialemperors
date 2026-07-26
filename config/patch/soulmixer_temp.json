@@ -4,7 +4,7 @@
 		"path": "/items/-",
 		"value": {
 			"id": "1529",
-			"in_store": "1",
+			"in_store": "0",
 			"name": "Soul Mixer",
 			"type": "b",
 			"cost": "2000",
@@ -45,7 +45,7 @@
 			"protect": "0",
 			"potion": "1",
 			"achievement": "0",
-			"achievement_desc": "",
+			"achievement_desc": "Unavailable in this 2012 client: Soul Mixer recipes require the later game client.",
 			"units_limit": "1",
 			"store_groups": "",
 			"store_level": "0",

@@ -21,6 +21,7 @@ from sessions import (
     new_village, fb_friends_str, pvp_profiles, friend_candidates,
     link_friend, unlink_friend,
     request_friend, accept_friend, decline_friend, incoming_friend_requests,
+    session as village_session,
 )
 from auth import has_password, set_password, check_password, change_password
 load_saved_villages()
@@ -31,7 +32,13 @@ print (" [+] Loading server...")
 from flask import Flask, render_template, send_from_directory, request, redirect, session
 from flask.debughelpers import attach_enctype_error_multidict
 from werkzeug.middleware.proxy_fix import ProxyFix
-from command import command
+from command import (
+    command,
+    has_open_harbour,
+    request_social_staff_role,
+    incoming_social_staff_requests,
+    resolve_social_staff_request,
+)
 from engine import timestamp_now
 from version import version_name
 from constants import Constant
@@ -193,12 +200,23 @@ def ruffle():
     # Real friends list (JSON) for the client's friendsInfo flashvar - names,
     # levels and pics for neighbour cards and the "ask friends to help" box.
     friends_json = json.dumps(fb_friends_str(USERID), separators=(",", ":"))
+    # The patched game keeps the historical filename, so a normal browser
+    # cache otherwise continues running yesterday's SWF after a server update.
+    # A content timestamp changes the URL whenever that file is rebuilt while
+    # still allowing all of its large, immutable dependency assets to cache.
+    swf_path = os.path.join(ASSETS_DIR, "flash", os.path.basename(GAMEVERSION))
+    game_asset_version = (
+        str(os.stat(swf_path).st_mtime_ns)
+        if os.path.isfile(swf_path)
+        else version_name
+    )
     return render_template(
         "ruffle.html",
         save_info=save_info(USERID),
         serverTime=timestamp_now(),
         version=version_name,
         GAMEVERSION=GAMEVERSION,
+        game_asset_version=game_asset_version,
         SERVERURL=request.url_root.rstrip("/"),
         friendsInfo=friends_json,
     )
@@ -206,8 +224,8 @@ def ruffle():
 
 # JSON API for the in-game ADD ALLY popup (ruffle.html gotoNeighbors hook).
 # The Flash client's empty ally slot calls ExternalInterface "gotoNeighbors";
-# the page catches it and drives these routes, so adding an ally never leaves
-# the game. Instant reciprocal link - this is a private server, no accept step.
+# the page catches it and drives these routes. A request remains pending until
+# the other saved player accepts it on /friends.
 
 @app.route("/api/ally_candidates")
 def ally_candidates_api():
@@ -231,9 +249,41 @@ def add_ally_api():
         return ({"result": "error", "error": "self"}, 400)
     if pid not in all_saves_userid():
         return ({"result": "error", "error": "unknown_player"}, 404)
-    link_friend(USERID, pid)
-    print(f"[ALLY] {USERID} linked with {pid} via in-game popup.")
-    return {"result": "ok"}
+    status = request_friend(USERID, pid)
+    if status == "invalid":
+        return ({"result": "error", "error": status}, 400)
+    print(f"[ALLY] {USERID} -> {pid}: {status}.")
+    return {"result": "ok", "status": status}
+
+
+@app.route("/api/staff_candidates")
+def staff_candidates_api():
+    USERID = session.get("USERID")
+    if not USERID or USERID not in all_saves_userid():
+        return ({"result": "error", "error": "not_logged_in"}, 403)
+    linked = [
+        entry for entry in friend_candidates(USERID) if entry["linked"]
+    ]
+    return {"result": "ok", "candidates": linked}
+
+
+@app.route("/api/request_staff", methods=["POST"])
+def request_staff_api():
+    USERID = session.get("USERID")
+    if not USERID or USERID not in all_saves_userid():
+        return ({"result": "error", "error": "not_logged_in"}, 403)
+    data = request.get_json(silent=True) or {}
+    status = request_social_staff_role(
+        USERID,
+        data.get("pid"),
+        data.get("x"),
+        data.get("y"),
+        data.get("town"),
+        data.get("item_id"),
+    )
+    if status == "invalid":
+        return ({"result": "error", "error": status}, 400)
+    return {"result": "ok", "status": status}
 
 
 @app.route("/friends", methods=["GET", "POST"])
@@ -271,11 +321,25 @@ def friends_page():
                 if unlink_friend(USERID, other_id)
                 else "Unable to remove that player."
             )
+        elif action in ("staff_accept", "staff_decline"):
+            accepted = resolve_social_staff_request(
+                USERID,
+                request.form.get("request_key", ""),
+                action == "staff_accept",
+            )
+            message = (
+                "Building role accepted."
+                if accepted and action == "staff_accept"
+                else "Building role declined."
+                if accepted
+                else "That building role is no longer available."
+            )
     return render_template(
         "friends.html",
         save_info=save_info(USERID),
         candidates=friend_candidates(USERID),
         requests=incoming_friend_requests(USERID),
+        staff_requests=incoming_social_staff_requests(USERID),
         message=message,
     )
 
@@ -412,6 +476,26 @@ def get_player_info_response():
         return (get_neighbor_info(user, map), 200)
     # Quest
     elif user.startswith("100000"): # Dirty but quick
+        ship_quests = {
+            str(value)
+            for value in get_game_config()["globals"].get("ISLE_ORDER", [])
+        }
+        if user in ship_quests:
+            own_save = village_session(USERID)
+            town_index = map
+            if (
+                town_index is None
+                or town_index < 0
+                or town_index >= len(own_save["maps"])
+            ):
+                town_index = int(
+                    own_save["playerInfo"].get("default_map", 0) or 0
+                )
+            if not has_open_harbour(own_save["maps"][town_index]):
+                return ({
+                    "result": "error",
+                    "error": "harbour_staffing_required",
+                }, 403)
         return get_quest_map(user)
     # Neighbor
     else:
@@ -516,19 +600,23 @@ def get_continent_ranking_response():
     continent_level = requested_level or (own["level"] if own else 1)
     continent_level = min(max(continent_level, 1), 50)
 
-    # Keep positions deterministic across reloads. The current player is not
-    # forced to slot zero; adding a save therefore does not reshuffle all
-    # existing positions from one request to the next.
+    # A saved player belongs to the continent for their real level. The old
+    # stub returned the same first eight saves for every island and merely
+    # relabelled them with the requested level. Besides looking duplicated,
+    # that let a low-level village appear as a level-50 opponent. The player
+    # viewing the continent is not an opponent and must not occupy a slot.
+    profiles = [
+        profile for profile in profiles
+        if profile["user_id"] != str(USERID)
+        and int(profile.get("level", 1) or 1) == continent_level
+    ]
     profiles.sort(key=lambda profile: profile["user_id"])
-    if own is not None and own not in profiles[:8]:
-        profiles = profiles[:7] + [own]
-    else:
-        profiles = profiles[:8]
+    profiles = profiles[:8]
     continent = []
     for position, profile in enumerate(profiles):
         entry = dict(profile)
         entry["posicion"] = position
-        entry["nivel"] = continent_level
+        entry["nivel"] = int(profile.get("level", continent_level))
         continent.append(entry)
 
     response = {"world_id": 0, "continent": continent}

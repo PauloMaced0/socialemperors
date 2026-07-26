@@ -7,6 +7,7 @@ Run from the repository root:
 
 import os
 import sys
+import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -36,10 +37,10 @@ def test_action_clicks_are_consumed_before_the_map_click_handler():
     )
 
 
-def test_natural_stone_and_gold_do_not_install_regrowth_timers():
+def test_natural_stone_and_gold_defer_to_server_random_respawns():
     data = DEFAULT_SWF.read_bytes()
     assert is_patched(data), (
-        "stone/gold harvest still creates an ID 80/81 regeneration object; "
+        "stone/gold harvest still creates a same-tile ID 80/81 placeholder; "
         "run tools/patch_attack_click_swf.py"
     )
 
@@ -77,6 +78,26 @@ def test_gameplay_ui_fixes_are_present():
     )
 
 
+def test_unit_health_and_training_stable_client_fixes_are_present():
+    data = DEFAULT_SWF.read_bytes()
+    if data[:3] == b"CWS":
+        data = b"FWS" + data[3:8] + zlib.decompress(data[8:])
+    assert data.count(b"socialemperors-gameplay-behaviors-v26") == 1, \
+        "the current gameplay persistence patch was not rebuilt into the SWF"
+    assert data.count(b"socialemperors-training-stable-ui-v1") == 1, \
+        "Training Stables still exposes the generic 0% / 0 gold producer UI"
+    assert data.count(b"socialemperors-staffed-building-actions-v1") == 1, \
+        "unstaffed training/actions are not locked in the game client"
+    assert data.count(b"socialemperors-harbour-staffing-gate-v1") == 1, \
+        "Ship Land is still available while the Harbor is unstaffed"
+    assert data.count(
+        b"socialemperors-cathedral-unstaffed-description-v2"
+    ) == 1, "the unstaffed Cathedral still exposes Monk price/training UI"
+    assert data.count(
+        b"socialemperors-harbour-reload-staff-v1"
+    ) == 1, "the Harbor still auto-completes staffing during map reload"
+
+
 def test_attack_click_patch_is_idempotent():
     data = DEFAULT_SWF.read_bytes()
     result, changed = patch_swf_bytes(data)
@@ -87,11 +108,12 @@ def test_attack_click_patch_is_idempotent():
 TESTS = [
     test_enemy_click_dispatches_an_attack_instead_of_a_ground_move,
     test_action_clicks_are_consumed_before_the_map_click_handler,
-    test_natural_stone_and_gold_do_not_install_regrowth_timers,
+    test_natural_stone_and_gold_defer_to_server_random_respawns,
     test_established_town_does_not_repopulate_resources_on_reload,
     test_remove_tool_accepts_deployed_units_with_confirmation,
     test_remote_ui_fixes_survive_the_binary_merge,
     test_gameplay_ui_fixes_are_present,
+    test_unit_health_and_training_stable_client_fixes_are_present,
     test_attack_click_patch_is_idempotent,
 ]
 

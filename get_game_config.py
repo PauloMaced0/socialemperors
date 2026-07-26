@@ -130,6 +130,74 @@ def fix_resource_upgrades() -> None:
 
 fix_resource_upgrades()
 
+
+def _social_worker_roles(social: dict) -> list[str]:
+    return [
+        role.strip()
+        for role in str(social.get("workers", "") or "").split(",")
+        if role.strip()
+    ]
+
+
+def fix_social_upgrade_roles() -> None:
+    """Keep inherited staff roles at the front of every upgraded tier.
+
+    The Flash staffing popup stores a packed array: slot zero always belongs
+    to the first configured worker name.  Some higher tiers list their old
+    jobs in a different order (notably human Stone Mine III), which made a
+    simple carry-over turn a Geologist into a Cartographer.  Reordering the
+    *same* target role set lets a staffed lower tier retain matching employees
+    while leaving only genuinely new jobs vacant.
+    """
+    items = {
+        int(item["id"]): item
+        for item in __game_config.get("items", [])
+        if "id" in item
+    }
+    social = {
+        int(item["id"]): item
+        for item in __game_config.get("social_items", [])
+        if "id" in item
+    }
+    predecessors = {}
+    for item_id, item in items.items():
+        try:
+            target = int(item.get("upgrades_to", 0) or 0)
+        except (TypeError, ValueError):
+            target = 0
+        if target:
+            predecessors[target] = item_id
+
+    for target_id, target_social in social.items():
+        previous_id = predecessors.get(target_id)
+        seen = set()
+        while (
+            previous_id is not None
+            and previous_id not in social
+            and previous_id not in seen
+        ):
+            seen.add(previous_id)
+            previous_id = predecessors.get(previous_id)
+        if previous_id not in social:
+            continue
+
+        previous_roles = _social_worker_roles(social[previous_id])
+        remaining = _social_worker_roles(target_social)
+        inherited = []
+        for role in previous_roles:
+            normalized = role.casefold()
+            match = next((
+                index for index, candidate in enumerate(remaining)
+                if candidate.casefold() == normalized
+            ), None)
+            if match is not None:
+                inherited.append(remaining.pop(match))
+        target_social["workers"] = ",".join(inherited + remaining)
+
+
+fix_social_upgrade_roles()
+
+
 def get_game_config() -> dict:
     return __game_config
 

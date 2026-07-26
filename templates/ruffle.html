@@ -138,7 +138,7 @@
                     parameters: {
                         spdebug: "notnull",
                         brk: "0",
-                        swftoload: "{{SERVERURL}}/default01.static.socialpointgames.com/static/socialempires/flash/{{GAMEVERSION}}",
+                        swftoload: "{{SERVERURL}}/default01.static.socialpointgames.com/static/socialempires/flash/{{GAMEVERSION}}?build={{game_asset_version}}",
                         staticUrl: "{{SERVERURL}}/default01.static.socialpointgames.com/static/socialempires/",
                         dynamicUrl: "{{SERVERURL}}/dynamic.flash1.dev.socialpoint.es/appsfb/socialempiresdev/srvempires/",
                         skiphash12341: "notnull",
@@ -160,21 +160,18 @@
         </object>
     </center>
 
-        <!-- ADD ALLY POPUP: opened by the SWF via ExternalInterface
+        <!-- SOCIAL POPUPS: opened by the SWF via ExternalInterface
              ("gotoNeighbors" / "gotoInitialInvite") when an empty ally slot
-             is clicked. Lists real saved players and links them instantly
-             through /api/add_ally; the new ally appears in the bar after a
-             reload. -->
+             is clicked, and showPopupSEHelpSocialItem for staffed buildings. -->
         <div id="allyOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:50;">
             <div style="position:relative; margin:120px auto 0; width:420px; max-height:430px; background:#f6e3b3; border:6px solid #7a4a21; border-radius:14px; box-shadow:0 8px 30px rgba(0,0,0,.5); font-family:'lucida grande',tahoma,verdana,arial,sans-serif;">
                 <div style="background:#7a4a21; color:#ffe9b8; font-weight:bold; font-size:16px; padding:8px 14px; border-radius:6px 6px 0 0;">
-                    Add Allies
+                    <span id="allyTitle">Add Allies</span>
                     <span id="allyClose" style="float:right; cursor:pointer; color:#fff; background:#c0392b; border-radius:10px; padding:0 8px;">&#10005;</span>
                 </div>
                 <div id="allyList" style="overflow-y:auto; max-height:300px; padding:10px 14px;"></div>
                 <div style="padding:8px 14px 12px; text-align:center;">
-                    <span id="allyHint" style="font-size:11px; color:#7a4a21;">Allies you add appear in the bar after a reload.</span><br>
-                    <button id="allyReload" style="display:none; margin-top:6px; background:#61a827; color:#fff; border:2px solid #3d6e14; border-radius:8px; padding:5px 16px; font-weight:bold; cursor:pointer;">Reload now</button>
+                    <span id="allyHint" style="font-size:11px; color:#7a4a21;">The other empire must accept your request.</span>
                 </div>
             </div>
         </div>
@@ -182,8 +179,10 @@
             (function () {
                 var overlay = document.getElementById("allyOverlay"),
                     list = document.getElementById("allyList"),
-                    reloadBtn = document.getElementById("allyReload"),
-                    added = false;
+                    title = document.getElementById("allyTitle"),
+                    hint = document.getElementById("allyHint"),
+                    mode = "ally",
+                    staffContext = null;
 
                 function row(c) {
                     var div = document.createElement("div");
@@ -192,21 +191,28 @@
                     label.textContent = c.name + " (lvl " + c.level + ")";
                     label.style.fontWeight = "bold";
                     var btn = document.createElement("button");
-                    btn.textContent = "Add";
+                    btn.textContent = mode === "staff" ? "Ask" : (c.requested ? "Pending" : "Add");
                     btn.style.cssText = "background:#61a827; color:#fff; border:2px solid #3d6e14; border-radius:8px; padding:3px 14px; font-weight:bold; cursor:pointer;";
                     btn.onclick = function () {
+                        if (c.requested && mode === "ally") { return; }
                         btn.disabled = true;
-                        fetch("/api/add_ally", {
+                        var endpoint = mode === "staff" ? "/api/request_staff" : "/api/add_ally";
+                        var payload = mode === "staff" ? {
+                            pid: c.userid,
+                            x: staffContext.x,
+                            y: staffContext.y,
+                            town: staffContext.town,
+                            item_id: staffContext.item_id
+                        } : {pid: c.userid};
+                        fetch(endpoint, {
                             method: "POST",
                             headers: {"Content-Type": "application/json"},
-                            body: JSON.stringify({pid: c.userid})
+                            body: JSON.stringify(payload)
                         }).then(function (r) { return r.json(); }).then(function (b) {
                             if (b.result === "ok") {
-                                btn.textContent = "\u2713 Added";
+                                btn.textContent = "\u2713 Request sent";
                                 btn.style.background = "#9aa89a";
                                 btn.style.borderColor = "#6f7a6f";
-                                added = true;
-                                reloadBtn.style.display = "inline-block";
                             } else {
                                 btn.disabled = false;
                             }
@@ -218,6 +224,10 @@
                 }
 
                 function openPopup() {
+                    mode = "ally";
+                    staffContext = null;
+                    title.textContent = "Add Allies";
+                    hint.textContent = "The other empire must accept your request.";
                     list.textContent = "Loading...";
                     overlay.style.display = "block";
                     fetch("/api/ally_candidates").then(function (r) { return r.json(); }).then(function (b) {
@@ -233,16 +243,39 @@
 
                 function closePopup() {
                     overlay.style.display = "none";
-                    if (added) { location.reload(); }
                 }
 
                 document.getElementById("allyClose").onclick = closePopup;
-                reloadBtn.onclick = function () { location.reload(); };
                 overlay.onclick = function (e) { if (e.target === overlay) { closePopup(); } };
 
                 // Names the SWF calls through ExternalInterface.
                 window.gotoNeighbors = openPopup;
                 window.gotoInitialInvite = openPopup;
+                window.showPopupSEHelpSocialItem = function (x, y, town, itemId, existing, buildingName) {
+                    mode = "staff";
+                    staffContext = {
+                        x: Number(x),
+                        y: Number(y),
+                        town: Number(town),
+                        item_id: Number(itemId)
+                    };
+                    list.textContent = "Loading...";
+                    overlay.style.display = "block";
+                    title.textContent = "Ask a friend to help " + String(buildingName || "");
+                    hint.textContent = "The role is filled only after that ally accepts on the Friends page.";
+                    fetch("/api/staff_candidates").then(function (r) { return r.json(); }).then(function (b) {
+                        list.textContent = "";
+                        var used = String(existing || "").split(",");
+                        var cands = ((b && b.candidates) || []).filter(function (c) {
+                            return used.indexOf(String(c.userid)) < 0;
+                        });
+                        if (!cands.length) {
+                            list.textContent = "No accepted allies are available. Add a friend first, or pay cash for this role.";
+                            return;
+                        }
+                        cands.forEach(function (c) { list.appendChild(row(c)); });
+                    }).catch(function () { list.textContent = "Could not load allies."; });
+                };
             })();
         </script>
     </body>

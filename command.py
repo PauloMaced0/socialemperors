@@ -120,9 +120,293 @@ def _social_item(item_id):
     ), None)
 
 
+def _social_worker_roles(social):
+    return [
+        worker.strip()
+        for worker in str(social.get("workers", "") or "").split(",")
+        if worker.strip()
+    ]
+
+
 def _social_worker_count(social):
-    workers = str(social.get("workers", "") or "")
-    return len([worker for worker in workers.split(",") if worker])
+    return len(_social_worker_roles(social))
+
+
+def _staffing_pending(item):
+    """Whether an exact social-building tier still has vacant roles."""
+    if item is None or _social_item(item[0]) is None:
+        return False
+    return _item_attrs(item).get("si", []) is not None
+
+
+def has_open_harbour(town):
+    """A placed Harbor whose complete staff roster has opened it."""
+    harbour_ids = {
+        Constant.ID_BUILDING_DOCK,
+        Constant.ID_BUILDING_TROLL_HARBOUR,
+    }
+    return any(
+        item
+        and int(item[0]) in harbour_ids
+        and not _staffing_pending(item)
+        for item in town.get("items", [])
+    )
+
+
+def _staff_context(item):
+    """Return occupied staff roles/identities carried by an upgrade tier."""
+    if item is None:
+        return None
+    attrs = _item_attrs(item)
+    roles = attrs.get("staffRoles")
+    roster = attrs.get("staffRoster")
+    if isinstance(roles, list) and isinstance(roster, list):
+        size = min(len(roles), len(roster))
+        return {
+            "roles": [str(role).strip() for role in roles[:size]],
+            "roster": list(roster[:size]),
+        }
+
+    social = _social_item(item[0])
+    if social is None:
+        return None
+    configured = _social_worker_roles(social)
+    staff = attrs.get("si", [])
+    if staff is None:
+        staff = [0] * len(configured)
+    if not isinstance(staff, list):
+        staff = []
+    size = min(len(staff), len(configured))
+    return {
+        "roles": configured[:size],
+        "roster": list(staff[:size]),
+    }
+
+
+def _apply_upgrade_staff(item, context):
+    """Carry matching staff jobs to a newly placed upgrade tier.
+
+    Target worker lists are normalized by get_game_config so inherited jobs
+    form a prefix.  The client can therefore represent the remaining jobs with
+    its packed attrs.si array without assigning a worker to the wrong title.
+    """
+    if item is None or not context:
+        return
+    source_roles = list(context.get("roles", []))
+    source_roster = list(context.get("roster", []))
+    size = min(len(source_roles), len(source_roster))
+    source = [
+        [str(source_roles[index]).strip().casefold(), source_roster[index]]
+        for index in range(size)
+    ]
+    attrs = _item_attrs(item)
+    social = _social_item(item[0])
+    if social is None:
+        attrs["staffRoles"] = [
+            str(role).strip() for role in source_roles[:size]
+        ]
+        attrs["staffRoster"] = list(source_roster[:size])
+        return
+
+    target_roles = _social_worker_roles(social)
+    inherited_roles = []
+    inherited_roster = []
+    remaining = list(source)
+    for target_role in target_roles:
+        wanted = target_role.casefold()
+        match = next((
+            index for index, entry in enumerate(remaining)
+            if entry[0] == wanted
+        ), None)
+        if match is None:
+            break
+        _, worker = remaining.pop(match)
+        inherited_roles.append(target_role)
+        inherited_roster.append(worker)
+
+    attrs["staffRoles"] = inherited_roles
+    attrs["staffRoster"] = inherited_roster
+    attrs["si"] = (
+        None
+        if len(inherited_roster) >= len(target_roles)
+        else list(inherited_roster)
+    )
+
+
+def _training_source(town, unit_id, unit_x, unit_y, explicit=None):
+    """Resolve the trainer used by a unit purchase command.
+
+    New clients include the source building coordinates/id.  For cached older
+    clients, use the closest owned building configured to train that unit.
+    Returning ``(False, None)`` means an explicit source was forged or stale.
+    """
+    unit_id = int(unit_id)
+
+    def trains_unit(item):
+        try:
+            return int(
+                get_attribute_from_item_id(item[0], "trains") or 0
+            ) == unit_id
+        except (TypeError, ValueError, IndexError):
+            return False
+
+    if explicit is not None:
+        source_x, source_y, source_id = explicit
+        source = _find_map_item(town, source_id, source_x, source_y)
+        if source is None or not trains_unit(source):
+            return False, None
+        return True, source
+
+    candidates = [
+        item for item in town.get("items", [])
+        if item and trains_unit(item)
+    ]
+    if not candidates:
+        return True, None
+    source = min(
+        candidates,
+        key=lambda item: (
+            abs(int(item[1]) - int(unit_x))
+            + abs(int(item[2]) - int(unit_y))
+        ),
+    )
+    return True, source
+
+
+def _item_config(item_id):
+    try:
+        wanted = int(item_id)
+    except (TypeError, ValueError):
+        return None
+    return next((
+        item for item in get_game_config().get("items", [])
+        if int(item.get("id", -1)) == wanted
+    ), None)
+
+
+def _upgrade_family(item_id):
+    """All tiers in the upgrade chain containing ``item_id``."""
+    item_id = int(item_id)
+    items = {
+        int(item["id"]): item
+        for item in get_game_config().get("items", [])
+        if "id" in item
+    }
+    family = {item_id}
+    changed = True
+    while changed:
+        changed = False
+        for candidate_id, candidate in items.items():
+            try:
+                upgrades_to = int(candidate.get("upgrades_to", 0) or 0)
+            except (TypeError, ValueError):
+                upgrades_to = 0
+            if (
+                candidate_id in family and upgrades_to and upgrades_to not in family
+            ):
+                family.add(upgrades_to)
+                changed = True
+            if upgrades_to in family and candidate_id not in family:
+                family.add(candidate_id)
+                changed = True
+    return family
+
+
+def _building_limit_reached(town, item_id):
+    """Enforce units_limit across every tier of one upgrade chain.
+
+    The stock client checked only the exact item id. That allowed a player to
+    place Mine I beside Mine II and then upgrade the first mine into a second
+    Mine II. A limit belongs to the building family, not an individual tier.
+    """
+    config = _item_config(item_id)
+    if config is None:
+        return False
+    try:
+        limit = int(config.get("units_limit", 0) or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    if limit <= 0:
+        return False
+    family = _upgrade_family(item_id)
+    count = sum(
+        1 for item in town.get("items", [])
+        if item and int(item[0]) in family
+    )
+    return count >= limit
+
+
+def _social_upgrade_locked(town, item_id, x, y):
+    """An unfinished staffed building cannot escape through an upgrade.
+
+    The Flash client implements an upgrade as ``sell(old, UPGR)`` followed by
+    ``buy(new)``. Some upgrade tiers are not themselves social items, so
+    validating only the replacement would silently open an unstaffed Market
+    or Stone Mine.
+    """
+    if _social_item(item_id) is None:
+        return False
+    item = _find_map_item(town, item_id, x, y)
+    if item is None:
+        return False
+    return _item_attrs(item).get("si", []) is not None
+
+
+_TREE_IDS = frozenset({
+    Constant.ID_BUILDING_TREE_1,
+    Constant.ID_BUILDING_TREE_2,
+    Constant.ID_BUILDING_TREE_3,
+})
+_MATURE_GOLD_DEPOSIT_IDS = frozenset({
+    Constant.ID_BUILDING_GOLD_1,
+    Constant.ID_BUILDING_GOLD_2,
+    Constant.ID_BUILDING_GOLD_3,
+    Constant.ID_BUILDING_GOLD_4,
+})
+_MATURE_STONE_DEPOSIT_IDS = frozenset({
+    Constant.ID_BUILDING_STONE_1,
+    Constant.ID_BUILDING_STONE_2,
+    Constant.ID_BUILDING_STONE_3,
+    Constant.ID_BUILDING_STONE_4,
+})
+_GOLD_DEPOSIT_IDS = frozenset({
+    *_MATURE_GOLD_DEPOSIT_IDS,
+    Constant.ID_BUILDING_REGEN_GOLD,
+})
+_STONE_DEPOSIT_IDS = frozenset({
+    *_MATURE_STONE_DEPOSIT_IDS,
+    Constant.ID_BUILDING_REGEN_STONE,
+})
+
+
+def _natural_resource_cap(item_id):
+    item_id = int(item_id)
+    if item_id in _TREE_IDS:
+        # Stock MapInitializer uses ten 16-20 tree clusters plus up to 100
+        # dispersed trees. 300 is its hard upper bound.
+        return _TREE_IDS, 300
+    if item_id in _GOLD_DEPOSIT_IDS:
+        # Three clusters of 5-7.
+        return _GOLD_DEPOSIT_IDS, 21
+    if item_id in _STONE_DEPOSIT_IDS:
+        return _STONE_DEPOSIT_IDS, 21
+    return None
+
+
+def _natural_resource_buy_allowed(town, item_id, x, y):
+    capped = _natural_resource_cap(item_id)
+    if capped is None:
+        return True
+    family, limit = capped
+    count = sum(
+        1 for item in town.get("items", [])
+        if item and int(item[0]) in family
+    )
+    occupied = any(
+        item and int(item[1]) == int(x) and int(item[2]) == int(y)
+        for item in town.get("items", [])
+    )
+    return count < limit and not occupied
 
 
 def _town_has_open_market(town):
@@ -187,6 +471,111 @@ def _hire_social_friend(save, USERID, x, y, town_id, item_id, friend_id):
         f"{get_name_from_item_id(item_id)}."
     )
     return True
+
+
+def request_social_staff_role(USERID, friend_id, x, y, town_id, item_id):
+    """Queue a social-building role for a linked friend to accept."""
+    USERID, friend_id = str(USERID), str(friend_id)
+    requester = session(USERID)
+    target = session(friend_id)
+    if requester is None or target is None or not is_friend(USERID, friend_id):
+        return "invalid"
+    try:
+        town_id, item_id = int(town_id), int(item_id)
+        x, y = int(x), int(y)
+        town = requester["maps"][town_id]
+    except (IndexError, TypeError, ValueError):
+        return "invalid"
+    item = _find_map_item(town, item_id, x, y)
+    social = _social_item(item_id)
+    if item is None or social is None:
+        return "invalid"
+    staff = _item_attrs(item).setdefault("si", [])
+    if staff is None or not isinstance(staff, list):
+        return "complete"
+    if friend_id in [str(value) for value in staff]:
+        return "already_staffed"
+    if len(staff) >= _social_worker_count(social):
+        return "complete"
+    queue = target["privateState"].setdefault("socialStaffRequests", [])
+    if not isinstance(queue, list):
+        queue = []
+        target["privateState"]["socialStaffRequests"] = queue
+    key = f"{USERID}:{town_id}:{x}:{y}:{item_id}"
+    if any(str(request.get("key")) == key for request in queue if isinstance(request, dict)):
+        return "pending"
+    queue.append({
+        "key": key,
+        "requester_id": USERID,
+        "town": town_id,
+        "x": x,
+        "y": y,
+        "item_id": item_id,
+        "building": get_name_from_item_id(item_id),
+        "requested_at": timestamp_now(),
+    })
+    save_session(friend_id)
+    return "requested"
+
+
+def incoming_social_staff_requests(USERID):
+    """Serializable valid staffing requests awaiting this player's answer."""
+    USERID = str(USERID)
+    target = session(USERID)
+    if target is None:
+        return []
+    queue = target["privateState"].setdefault("socialStaffRequests", [])
+    result = []
+    for request in queue if isinstance(queue, list) else []:
+        if not isinstance(request, dict):
+            continue
+        requester_id = str(request.get("requester_id", ""))
+        requester = session(requester_id)
+        if requester is None or not is_friend(USERID, requester_id):
+            continue
+        entry = dict(request)
+        pi = requester.get("playerInfo", {})
+        entry["requester_name"] = pi.get("name") or "Emperor"
+        result.append(entry)
+    return result
+
+
+def resolve_social_staff_request(USERID, request_key, accept):
+    """Accept/decline one queued role. A role is filled only on acceptance."""
+    USERID, request_key = str(USERID), str(request_key)
+    target = session(USERID)
+    if target is None:
+        return False
+    queue = target["privateState"].setdefault("socialStaffRequests", [])
+    if not isinstance(queue, list):
+        return False
+    request = next((
+        value for value in queue
+        if isinstance(value, dict) and str(value.get("key")) == request_key
+    ), None)
+    if request is None:
+        return False
+    accepted = False
+    requester_id = str(request.get("requester_id", ""))
+    requester = session(requester_id)
+    if accept and requester is not None and is_friend(USERID, requester_id):
+        accepted = _hire_social_friend(
+            requester,
+            requester_id,
+            request.get("x"),
+            request.get("y"),
+            int(request.get("town", 0)),
+            int(request.get("item_id", 0)),
+            USERID,
+        )
+        if accepted:
+            save_session(requester_id)
+    target["privateState"]["socialStaffRequests"] = [
+        value for value in queue
+        if not (isinstance(value, dict) and str(value.get("key")) == request_key)
+    ]
+    save_session(USERID)
+    return accepted if accept else True
 
 
 _PRODUCTION_SECONDS = {
@@ -345,7 +734,7 @@ def _initialize_unit_warehouse(town):
 
 
 def _add_gifts(save, item_id, count=1):
-    """Add item counts to the client's sparse, id-indexed storage array."""
+    """Add item counts to the client's sparse, id-indexed *gift* array."""
     item_id = int(item_id)
     count = int(count)
     if item_id < 0 or count <= 0:
@@ -354,6 +743,55 @@ def _add_gifts(save, item_id, count=1):
     while len(gifts) <= item_id:
         gifts.append(0)
     gifts[item_id] += count
+
+
+def _stored_items(town):
+    """Return the town's owned-item storage as ``{item_id: count}``.
+
+    The Flash client deliberately keeps owned items in ``map.store`` and
+    received prizes in ``privateState.gifts``.  A stored item is reconstructed
+    with ``giftId == 0`` and therefore does not award construction XP when it
+    is put back; a real gift has ``giftId == 1`` and follows the gift flow.
+    """
+    raw = town.get("store")
+    stored = {}
+    if isinstance(raw, dict):
+        values = raw.items()
+    elif isinstance(raw, list):
+        # Some local starter saves use null/[] even though the original
+        # protocol normally sends an object keyed by item id.
+        values = enumerate(raw)
+    else:
+        values = ()
+    for raw_id, raw_count in values:
+        try:
+            item_id, count = int(raw_id), int(raw_count)
+        except (TypeError, ValueError):
+            continue
+        if item_id >= 0 and count > 0:
+            stored[str(item_id)] = count
+    town["store"] = stored
+    return stored
+
+
+def _add_stored_item(town, item_id, count=1):
+    item_id, count = int(item_id), int(count)
+    if item_id < 0 or count <= 0:
+        return
+    stored = _stored_items(town)
+    key = str(item_id)
+    stored[key] = int(stored.get(key, 0) or 0) + count
+
+
+def _consume_stored_item(town, item_id):
+    stored = _stored_items(town)
+    key = str(int(item_id))
+    if int(stored.get(key, 0) or 0) <= 0:
+        return False
+    stored[key] -= 1
+    if stored[key] <= 0:
+        stored.pop(key, None)
+    return True
 
 
 def _battle_counts(row):
@@ -478,24 +916,42 @@ def command(USERID, data):
     publishActions = data["publishActions"]
     commands = data["commands"]
     initializing_resource_towns = set()
-    
+    pending_upgrade_staff = None
     try:
         i = 0
         while i < len(commands):
             comm = commands[i]
             cmd = comm["cmd"]
             args = comm["args"]
+            if pending_upgrade_staff is not None:
+                matches_replacement = (
+                    cmd == Constant.CMD_BUY
+                    and len(args) >= 5
+                    and int(args[1]) == pending_upgrade_staff["x"]
+                    and int(args[2]) == pending_upgrade_staff["y"]
+                    and int(args[4]) == pending_upgrade_staff["town_id"]
+                )
+                if not matches_replacement:
+                    pending_upgrade_staff = None
 
-            # The client reports the initial wild trees/stone/gold as one
-            # batch of free buys. Accept that batch once per town; later loads
-            # must not repopulate harvested deposits at random coordinates.
+            # MapInitializer reports the initial wild environment as one batch
+            # of free buys.  Accept that batch once, but reject a later client
+            # reload trying to refill harvested resources immediately.  Mature
+            # mineral/tree respawns follow their separate persisted cooldown
+            # paths and do not use this initialization batch.
             if (cmd == Constant.CMD_BUY and len(args) >= 6 and bool(args[5])
                     and is_natural_resource(args[0])):
                 town_id = int(args[4])
                 town = session(USERID)["maps"][town_id]
-                if (int(town.get("naturalResourcesInitialized", 0) or 0)
-                        and town_id not in initializing_resource_towns):
-                    print(f" [+] COMMAND: buy({args}) -> Natural resource respawn ignored; map environment already initialized.")
+                if (
+                    int(town.get("naturalResourcesInitialized", 0) or 0)
+                    and town_id not in initializing_resource_towns
+                ):
+                    print(
+                        f" [+] COMMAND: buy({args}) -> Natural resource "
+                        "reload spawn rejected; cooldown/population state is "
+                        "server-authoritative."
+                    )
                     i += 1
                     continue
                 initializing_resource_towns.add(town_id)
@@ -517,7 +973,65 @@ def command(USERID, data):
                 i += 2
                 continue
             try:
-                do_command(USERID, cmd, args)
+                upgrade_context = None
+                if (
+                    cmd == Constant.CMD_SELL
+                    and len(args) > 5
+                    and args[5] == Constant.SELL_REASON_UPGRADE
+                ):
+                    town_id = int(args[3])
+                    old_item = _find_map_item(
+                        session(USERID)["maps"][town_id],
+                        int(args[2]), args[0], args[1],
+                    )
+                    upgrade_context = _staff_context(old_item)
+                accepted = do_command(USERID, cmd, args)
+                if (
+                    accepted is not False
+                    and cmd == Constant.CMD_SELL
+                    and len(args) > 5
+                    and args[5] == Constant.SELL_REASON_UPGRADE
+                    and upgrade_context is not None
+                ):
+                    pending_upgrade_staff = {
+                        "x": int(args[0]),
+                        "y": int(args[1]),
+                        "town_id": int(args[3]),
+                        "context": upgrade_context,
+                    }
+                elif (
+                    accepted is not False
+                    and cmd == Constant.CMD_BUY
+                    and pending_upgrade_staff is not None
+                ):
+                    town = session(USERID)["maps"][
+                        pending_upgrade_staff["town_id"]
+                    ]
+                    replacement = _find_map_item(
+                        town, int(args[0]), args[1], args[2]
+                    )
+                    _apply_upgrade_staff(
+                        replacement, pending_upgrade_staff["context"]
+                    )
+                    pending_upgrade_staff = None
+                if (
+                    accepted is False
+                    and cmd == Constant.CMD_SELL
+                    and len(args) > 5
+                    and args[5] == Constant.SELL_REASON_UPGRADE
+                    and i + 1 < len(commands)
+                    and commands[i + 1].get("cmd") == Constant.CMD_BUY
+                ):
+                    next_args = commands[i + 1].get("args", [])
+                    if (
+                        len(next_args) >= 3
+                        and int(next_args[1]) == int(args[0])
+                        and int(next_args[2]) == int(args[1])
+                    ):
+                        # The replacement half of a rejected upgrade must not
+                        # be processed independently.
+                        print(" [!] Rejected upgrade replacement skipped.")
+                        i += 1
             except Exception as e:
                 # One bad command must not discard the rest of the batch.
                 print(f" [!] Command '{cmd}' failed: {type(e).__name__}: {e}. Skipping.")
@@ -536,7 +1050,7 @@ def do_command(USERID, cmd, args):
         print(" ".join(args))
 
     elif cmd == Constant.CMD_BUY:
-        id = args[0]
+        id = int(args[0])
         x = args[1]
         y = args[2]
         frame = args[3] # TODO ??
@@ -544,19 +1058,64 @@ def do_command(USERID, cmd, args):
         bool_dont_modify_resources = bool(args[5]) # 1 if the game "buys" for you, so does not substract whatever the item cost is.
         price_multiplier = args[6]
         type = args[7]
+        map = save["maps"][town_id]
+        if (
+            not bool_dont_modify_resources
+            and str(type) == "u"
+        ):
+            explicit_source = (
+                (args[8], args[9], int(args[10]))
+                if len(args) >= 11 else None
+            )
+            valid_source, trainer = _training_source(
+                map, id, x, y, explicit_source
+            )
+            if not valid_source:
+                print("Unit training rejected - source building is invalid.")
+                return False
+            if _staffing_pending(trainer):
+                print(
+                    "Unit training rejected - every source-building staff "
+                    "role must be filled first."
+                )
+                return False
         if is_depleted_resource_placeholder(id):
-            print("Obsolete stone/gold regeneration placeholder rejected.")
+            # Older cached clients may still try to place IDs 80/81 on the
+            # depleted tile. The server already owns the timer and will create
+            # one random replacement; accepting this would revive same-tile
+            # regeneration and count the same harvest twice.
+            print(
+                "Legacy natural-resource placeholder rejected - random "
+                "respawn is server-authoritative."
+            )
+            return False
+        if is_natural_resource(id):
+            if not _natural_resource_buy_allowed(map, id, x, y):
+                print("Natural resource buy rejected - cap reached or tile occupied.")
+                return False
+            if bool_dont_modify_resources:
+                map["naturalResourcesInitialized"] = 1
+        elif not bool_dont_modify_resources and _building_limit_reached(map, id):
+            print(
+                f"Buy rejected - upgrade family limit reached for "
+                f"{get_name_from_item_id(id)}."
+            )
             return False
         print("Add", str(get_name_from_item_id(id)), "at", f"({x},{y})")
         collected_at_timestamp = timestamp_now()
         level = 0 # TODO 
         orientation = 0
-        map = save["maps"][town_id]
         if not bool_dont_modify_resources:
             apply_cost(save["playerInfo"], map, id, price_multiplier)
             xp = int(get_attribute_from_item_id(id, "xp"))
             map["xp"] = map["xp"] + xp
-        map["items"] += [[id, x, y, orientation, collected_at_timestamp, level]]
+        placed = [id, x, y, orientation, collected_at_timestamp, level]
+        # Social buildings are locked from their very first persisted frame.
+        # Without attrs.si=[], a browser reload rebuilt them as ordinary open
+        # buildings and visually bypassed every worker role.
+        if _social_item(id) is not None:
+            placed += [[], {"si": []}]
+        map["items"].append(placed)
         if int(id) == Constant.ID_BUILDING_UNIT_WAREHOUSE:
             _initialize_unit_warehouse(map)
         if bool_dont_modify_resources and is_enemy_camp_marker(id):
@@ -653,10 +1212,90 @@ def do_command(USERID, cmd, args):
         reason = args[5]
         print("Remove", str(get_name_from_item_id(id)), "from", f"({x},{y}). Reason: {reason}")
         map = save["maps"][town_id]
-        for item in map["items"]:
+        if (
+            reason == Constant.SELL_REASON_UPGRADE
+            and _social_upgrade_locked(map, id, x, y)
+        ):
+            print(
+                "Upgrade rejected - every staff role must be filled and the "
+                "building opened first."
+            )
+            return False
+        removed = False
+        for item in list(map["items"]):
             if item[0] == id and item[1] == x and item[2] == y:
                 map["items"].remove(item)
+                removed = True
                 break
+        # Unlike gold/stone, the stock client has no visible regeneration
+        # placeholder for a felled tree.  Record the depleted tile and restore
+        # it only after the natural-resource cooldown.  This prevents a page
+        # reload from becoming an instant wood respawn while preserving the
+        # original capped wild-tree population.
+        if (
+            removed
+            and reason == Constant.SELL_REASON_HARVEST
+            and int(id) in _TREE_IDS
+        ):
+            pending = map.setdefault("pendingTreeRespawns", [])
+            pending[:] = [
+                entry for entry in pending
+                if not (
+                    int(entry.get("x", -1)) == int(x)
+                    and int(entry.get("y", -1)) == int(y)
+                )
+            ]
+            pending.append({
+                "id": int(id),
+                "x": int(x),
+                "y": int(y),
+                "at": (
+                    timestamp_now()
+                    + Constant.TIMER_RESOURCE_REGEN_SECONDS
+                ),
+            })
+        if (
+            removed
+            and reason == Constant.SELL_REASON_HARVEST
+            and int(id) in (
+                _MATURE_GOLD_DEPOSIT_IDS | _MATURE_STONE_DEPOSIT_IDS
+            )
+        ):
+            family = (
+                "gold"
+                if int(id) in _MATURE_GOLD_DEPOSIT_IDS
+                else "stone"
+            )
+            pending = map.setdefault("pendingMineralRespawns", [])
+            if not isinstance(pending, list):
+                pending = []
+                map["pendingMineralRespawns"] = pending
+            deduplicated = []
+            for entry in pending:
+                duplicate = False
+                if (
+                    isinstance(entry, dict)
+                    and str(entry.get("family")) == family
+                ):
+                    try:
+                        duplicate = (
+                            int(entry.get("source_x", -1)) == int(x)
+                            and int(entry.get("source_y", -1)) == int(y)
+                        )
+                    except (TypeError, ValueError):
+                        duplicate = False
+                if not duplicate:
+                    deduplicated.append(entry)
+            pending[:] = deduplicated
+            pending.append({
+                "family": family,
+                "source_x": int(x),
+                "source_y": int(y),
+                "at": (
+                    timestamp_now()
+                    + Constant.TIMER_RESOURCE_REGEN_SECONDS
+                ),
+            })
         # Upgrades are represented by the client as ``sell(old, "UPGR")``
         # followed by ``buy(new)``. The client applies the normal 5% resale
         # credit locally before charging the next tier's full listed price, so
@@ -667,6 +1306,7 @@ def do_command(USERID, cmd, args):
                 apply_cost(save["playerInfo"], save["maps"][town_id], id, price_multiplier)
         if reason == 'KILL':
             pass # TODO : add to graveyard
+        return removed
     
     elif cmd == Constant.CMD_KILL:
         x = args[0]
@@ -683,21 +1323,35 @@ def do_command(USERID, cmd, args):
                 break
     
     elif cmd == Constant.CMD_COMPLETE_MISSION:
-        mission_id = args[0]
+        mission_id = int(args[0])
         skipped_with_cash = bool(args[1])
         print("Complete mission", mission_id, ":", str(get_attribute_from_mission_id(mission_id, "title")))
+        completed = save["privateState"].setdefault("completedMissions", [])
+        if mission_id in [int(value) for value in completed]:
+            print("Mission was already completed - duplicate ignored.")
+            return False
         if skipped_with_cash:
             cash_to_substract = 0 # TODO 
             save["playerInfo"]["cash"] = max(save["playerInfo"]["cash"] - cash_to_substract, 0)
-        save["privateState"]["completedMissions"] += [mission_id]
+        completed.append(mission_id)
+        return True
     
     elif cmd == Constant.CMD_REWARD_MISSION:
-        town_id = args[0]
-        mission_id = args[1]
+        town_id = int(args[0])
+        mission_id = int(args[1])
         print("Reward mission", mission_id, ":", str(get_attribute_from_mission_id(mission_id, "title")))
+        completed = save["privateState"].setdefault("completedMissions", [])
+        rewarded = save["privateState"].setdefault("rewardedMissions", [])
+        if mission_id not in [int(value) for value in completed]:
+            print("Mission reward rejected - mission is not completed.")
+            return False
+        if mission_id in [int(value) for value in rewarded]:
+            print("Mission reward already collected - duplicate ignored.")
+            return False
         reward = int(get_attribute_from_mission_id(mission_id, "reward")) # gold
-        save["maps"][town_id]["coins"] += reward   
-        save["privateState"]["rewardedMissions"] += [mission_id]
+        save["maps"][town_id]["coins"] += reward
+        rewarded.append(mission_id)
+        return True
     
     elif cmd == Constant.CMD_PUSH_UNIT:
         unit_x = args[0]
@@ -708,15 +1362,25 @@ def do_command(USERID, cmd, args):
         town_id = args[5]
         print("Push", str(get_name_from_item_id(unit_id)), "to", f"({b_x},{b_y}).")
         map = save["maps"][town_id]
+        target = next((
+            item for item in map["items"]
+            if item[1] == b_x and item[2] == b_y
+        ), None)
+        if target is None:
+            print("Push rejected - target building not found.")
+            return False
+        if _staffing_pending(target):
+            print(
+                "Push rejected - every target-building staff role must be "
+                "filled first."
+            )
+            return False
         # Unit into building
-        for item in map["items"]:
-            if item[1] == b_x and item[2] == b_y:
-                _update_production_labor(item)
-                if len(item) < 7:
-                    item += [[]]
-                item[6] += [unit_id]
-                _set_production_workers(item)
-                break
+        _update_production_labor(target)
+        if len(target) < 7:
+            target += [[]]
+        target[6] += [unit_id]
+        _set_production_workers(target)
         # Remove unit
         for item in map["items"]:
             if item[0] == unit_id and item[1] == unit_x and item[2] == unit_y:
@@ -939,7 +1603,7 @@ def do_command(USERID, cmd, args):
         town = save["maps"][town_id]
         _, units = _unit_warehouse_state(town)
         for raw_id, count in list(units.items()):
-            _add_gifts(save, int(raw_id), int(count))
+            _add_stored_item(town, int(raw_id), int(count))
         moved = sum(units.values())
         town["warehousedUnits"] = {}
         print(f"Reset Unit Warehouse; moved {moved} unit(s) to storage.")
@@ -956,11 +1620,17 @@ def do_command(USERID, cmd, args):
         item_id = args[3]
         print("Store", str(get_name_from_item_id(item_id)), "from", f"({x},{y})")
         map = save["maps"][town_id]
+        found = False
         for item in map["items"]:
             if item[0] == item_id and item[1] == x and item[2] == y:
                 map["items"].remove(item)
+                found = True
                 break
-        _add_gifts(save, item_id)
+        if not found:
+            print("Store rejected - deployed item not found.")
+            return False
+        _add_stored_item(map, item_id)
+        return True
 
     elif cmd == Constant.CMD_STORE_ADD_ITEMS:
         # A batch of item ids to drop into storage (gifts). Used by darts prizes,
@@ -1046,21 +1716,28 @@ def do_command(USERID, cmd, args):
         x = args[1]
         y = args[2]
         town_id = int(args[4]) if len(args) > 4 else int(args[3])
-        gifts = save["privateState"]["gifts"]
-        if item_id < 0 or item_id >= len(gifts) or gifts[item_id] <= 0:
-            print("None of", str(get_name_from_item_id(item_id)), "in storage - placement rejected.")
-            return
+        town = save["maps"][town_id]
+        if cmd == Constant.CMD_PLACE_GIFT:
+            gifts = save["privateState"]["gifts"]
+            if item_id < 0 or item_id >= len(gifts) or gifts[item_id] <= 0:
+                print("None of", str(get_name_from_item_id(item_id)), "in gifts - placement rejected.")
+                return False
+        elif not _consume_stored_item(town, item_id):
+            print("None of", str(get_name_from_item_id(item_id)), "in owned storage - placement rejected.")
+            return False
         print("Add", str(get_name_from_item_id(item_id)), "at", f"({x},{y})")
-        items = save["maps"][town_id]["items"]
+        items = town["items"]
         orientation = 0#TODO
         collected_at_timestamp = timestamp_now()
         level = 0
         items += [[item_id, x, y, orientation, collected_at_timestamp, level]]#maybe make function for adding items
         if item_id == Constant.ID_BUILDING_UNIT_WAREHOUSE:
-            _initialize_unit_warehouse(save["maps"][town_id])
-        gifts[item_id] -= 1
-        while len(gifts) != 0 and gifts[-1] == 0: #removes excess zeros at end if necessary
-            gifts.pop()
+            _initialize_unit_warehouse(town)
+        if cmd == Constant.CMD_PLACE_GIFT:
+            gifts[item_id] -= 1
+            while len(gifts) != 0 and gifts[-1] == 0: #removes excess zeros at end if necessary
+                gifts.pop()
+        return True
 
     elif cmd == Constant.CMD_SELL_GIFT or cmd == Constant.CMD_SELL_STORED:
         # Both are [id, town]: remove one unit from storage, refund 5% of its
@@ -1069,16 +1746,21 @@ def do_command(USERID, cmd, args):
         item_id = int(args[0])
         town_id = int(args[1])
         print("Gift", str(get_name_from_item_id(item_id)), "sold on town:",town_id)
-        gifts = save["privateState"]["gifts"]
-        if item_id < 0 or item_id >= len(gifts) or gifts[item_id] <= 0:
-            print("None of", str(get_name_from_item_id(item_id)), "in storage - sale rejected.")
-            return
-        gifts[item_id] -= 1
-        while len(gifts) != 0 and gifts[-1] == 0: #removes excess zeros at end if necessary
-            gifts.pop()
+        if cmd == Constant.CMD_SELL_GIFT:
+            gifts = save["privateState"]["gifts"]
+            if item_id < 0 or item_id >= len(gifts) or gifts[item_id] <= 0:
+                print("None of", str(get_name_from_item_id(item_id)), "in gifts - sale rejected.")
+                return False
+            gifts[item_id] -= 1
+            while len(gifts) != 0 and gifts[-1] == 0: #removes excess zeros at end if necessary
+                gifts.pop()
+        elif not _consume_stored_item(save["maps"][town_id], item_id):
+            print("None of", str(get_name_from_item_id(item_id)), "in owned storage - sale rejected.")
+            return False
         price_multiplier = -0.05
         if get_attribute_from_item_id(item_id, "cost_type") != "c":
             apply_cost(save["playerInfo"], save["maps"][town_id], item_id, price_multiplier)
+        return True
     
     elif cmd == Constant.CMD_ACTIVATE_DRAGON:
         currency = args[0]
@@ -1389,9 +2071,47 @@ def do_command(USERID, cmd, args):
         return True
 
     elif cmd == Constant.CMD_START_QUEST:
-        quest_id = args[0]
-        town_id = args[1]
+        quest_id = str(args[0])
+        town_id = int(args[1])
+        ship_quests = {
+            str(value)
+            for value in get_game_config()["globals"].get("ISLE_ORDER", [])
+        }
+        if (
+            quest_id in ship_quests
+            and (
+                town_id < 0
+                or town_id >= len(save["maps"])
+                or not has_open_harbour(save["maps"][town_id])
+            )
+        ):
+            print(
+                f"Start quest {quest_id} rejected - Harbor staffing is "
+                "incomplete."
+            )
+            return False
         print(f"Start quest {quest_id}")
+
+    elif cmd == Constant.CMD_SET_QUEST_VAR:
+        try:
+            town_id = int(args[0])
+            key = str(args[1])
+            raw = args[2]
+            town = save["maps"][town_id]
+        except (IndexError, ValueError, TypeError):
+            print("set_quest_var rejected - malformed args.")
+            return False
+        try:
+            value = json.loads(raw) if isinstance(raw, str) else raw
+        except (ValueError, TypeError):
+            value = raw
+        quest_vars = town.setdefault("currentQuestVars", {})
+        if not isinstance(quest_vars, dict):
+            quest_vars = {}
+            town["currentQuestVars"] = quest_vars
+        quest_vars[key] = value
+        print(f"Quest var persisted (town {town_id}): {key} = {value}")
+        return True
 
     elif cmd == Constant.CMD_END_QUEST:
         data = json.loads(args[0])
@@ -1407,23 +2127,59 @@ def do_command(USERID, cmd, args):
         activators_left = data["activators_left"] if "activators_left" in data else None
         difficulty = data["difficulty"]
 
-        # Resources
-        save["maps"][town_id]["coins"] += int(gold_gained)
-        save["maps"][town_id]["xp"] += int(xp_gained)
+        state = save["privateState"]
+        prev_unlocked = int(state.get("unlockedQuestIndex", 0) or 0)
+        quest_key = str(quest_id)
+        ranks = state.get("questsRank")
+        if not isinstance(ranks, dict):
+            ranks = {}
+            state["questsRank"] = ranks
+        # unlockedQuestIndex is an index into ISLE_ORDER. Quest ids are large
+        # constants (100000006, ...), so comparing/storing the id here unlocked
+        # the complete campaign after one win. A rank is the persisted proof
+        # that this island has already paid its first-clear reward.
+        order = [
+            str(value) for value in
+            get_game_config().get("globals", {}).get("ISLE_ORDER", [])
+        ]
+        try:
+            quest_index = order.index(quest_key)
+        except ValueError:
+            quest_index = None
+        first_clear = win and quest_key not in ranks
+        if first_clear:
+            save["maps"][town_id]["coins"] += int(gold_gained)
+            save["maps"][town_id]["xp"] += int(xp_gained)
+            if isinstance(item_rewards, dict):
+                gifts = state.setdefault("gifts", [])
+                for raw_id, raw_count in item_rewards.items():
+                    try:
+                        item_id = int(raw_id)
+                        count = max(0, int(raw_count))
+                    except (TypeError, ValueError):
+                        continue
+                    if item_id < 0 or count <= 0:
+                        continue
+                    while len(gifts) <= item_id:
+                        gifts.append(0)
+                    gifts[item_id] += count
+        elif int(gold_gained) or int(xp_gained):
+            print(
+                f"Quest {quest_id} prize not awarded "
+                f"({'replay' if win else 'not a win'})."
+            )
         unit_result = _reconcile_battle_units(save["maps"][town_id], units)
 
-        # Update quests data
-        save["privateState"]["unlockedQuestIndex"] = max(quest_id + 1, save["privateState"]["unlockedQuestIndex"], 0)
+        if win and quest_index is not None:
+            state["unlockedQuestIndex"] = min(
+                max(quest_index + 1, prev_unlocked, 0),
+                len(order),
+            )
         # Star rank: questsRank is keyed by the quest id string (matches the
         # client's ISLE_ORDER lookup) and holds the best difficulty cleared. The
         # island shows that many stars, so it must persist on a win.
         if win:
-            quest_key = str(data["quest_id"])
-            ranks = save["privateState"].get("questsRank")
-            if not isinstance(ranks, dict):
-                ranks = {}
             ranks[quest_key] = max(int(ranks.get(quest_key, 0)), int(difficulty))
-            save["privateState"]["questsRank"] = ranks
         # save["maps"]["questTimes"] [quest_id] = TODO min (... , duration_sec)
         # save["maps"]["lastQuestTimes"] [quest_id] = TODO min (... , duration_sec)
 
@@ -1432,6 +2188,169 @@ def do_command(USERID, cmd, args):
             f"difficulty {difficulty}; casualties {unit_result['removed']}, "
             f"rescued {unit_result['added']}",
         )
+
+    elif cmd == Constant.CMD_BUY_MANA:
+        try:
+            town_id, use_cash = int(args[0]), bool(int(args[1]))
+            town = save["maps"][town_id]
+        except (IndexError, TypeError, ValueError):
+            print("Mana purchase rejected - malformed args.")
+            return False
+        globals_cfg = get_game_config().get("globals", {})
+        amount = int(globals_cfg.get("MANA_PER_PURCHASE", 5) or 5)
+        if use_cash:
+            price = int(globals_cfg.get("COST_MANA_CASH", 1) or 1)
+            if int(save["playerInfo"].get("cash", 0) or 0) < price:
+                print("Mana purchase rejected - not enough cash.")
+                return False
+            save["playerInfo"]["cash"] -= price
+        else:
+            price = int(globals_cfg.get("COST_MANA_GOLD", 20000) or 20000)
+            if int(town.get("coins", 0) or 0) < price:
+                print("Mana purchase rejected - not enough gold.")
+                return False
+            town["coins"] -= price
+        state = save["privateState"]
+        state["mana"] = max(0, int(state.get("mana", 0) or 0)) + amount
+        print(f"Bought {amount} mana for {price} {'cash' if use_cash else 'gold'}.")
+        return True
+
+    elif cmd == Constant.CMD_BUY_MAGIC:
+        try:
+            magic_id, town_id, use_cash = (
+                int(args[0]), int(args[1]), bool(int(args[2]))
+            )
+            town = save["maps"][town_id]
+        except (IndexError, TypeError, ValueError):
+            print("Spell purchase rejected - malformed args.")
+            return False
+        magic = next((
+            value for value in get_game_config().get("magics", [])
+            if int(value.get("id", -1)) == magic_id
+        ), None)
+        if magic is None:
+            print("Spell purchase rejected - unknown spell.")
+            return False
+        state = save["privateState"]
+        magics = state.setdefault("magics", {})
+        if not isinstance(magics, dict):
+            magics = {}
+            state["magics"] = magics
+        if str(magic_id) in magics:
+            print("Spell purchase ignored - already learned.")
+            return False
+        if use_cash:
+            price = int(magic.get("cash", 0) or 0)
+            if int(save["playerInfo"].get("cash", 0) or 0) < price:
+                print("Spell purchase rejected - not enough cash.")
+                return False
+            save["playerInfo"]["cash"] -= price
+        else:
+            if int(town.get("level", 1) or 1) < int(magic.get("level", 1) or 1):
+                print("Spell purchase rejected - level locked for gold.")
+                return False
+            price = int(magic.get("gold", 0) or 0)
+            if int(town.get("coins", 0) or 0) < price:
+                print("Spell purchase rejected - not enough gold.")
+                return False
+            town["coins"] -= price
+        magics[str(magic_id)] = 0
+        state["mana"] = max(0, int(state.get("mana", 0) or 0)) + int(
+            magic.get("mana", 0) or 0
+        )
+        print(f"Learned {magic.get('name', magic_id)}.")
+        return True
+
+    elif cmd == Constant.CMD_USE_MAGIC:
+        try:
+            magic_id = int(args[0])
+        except (IndexError, TypeError, ValueError):
+            return False
+        magic = next((
+            value for value in get_game_config().get("magics", [])
+            if int(value.get("id", -1)) == magic_id
+        ), None)
+        state = save["privateState"]
+        magics = state.get("magics", {})
+        if magic is None or not isinstance(magics, dict) or str(magic_id) not in magics:
+            print("Spell cast rejected - spell not learned.")
+            return False
+        cost = int(magic.get("mana", 0) or 0)
+        mana = max(0, int(state.get("mana", 0) or 0))
+        if mana < cost:
+            print("Spell cast rejected - not enough mana.")
+            return False
+        state["mana"] = mana - cost
+        magics[str(magic_id)] = max(0, int(magics[str(magic_id)] or 0)) + 1
+        print(f"Cast {magic.get('name', magic_id)} for {cost} mana.")
+        return True
+
+    elif cmd == Constant.CMD_UNLOCK_SKIN:
+        try:
+            skin_id = int(args[0])
+        except (IndexError, TypeError, ValueError):
+            return False
+        if skin_id not in (1, 2, 4, 5, 6):
+            print("Weather unlock rejected - unknown theme.")
+            return False
+        state = save["privateState"]
+        unlocked = state.setdefault("unlockedSkins", {})
+        if not isinstance(unlocked, dict):
+            unlocked = {}
+            state["unlockedSkins"] = unlocked
+        if str(skin_id) in unlocked:
+            print("Weather theme already unlocked.")
+            return True
+        price = int(
+            get_game_config().get("globals", {}).get("COST_UNLOCK_SKIN", 20)
+            or 20
+        )
+        if int(save["playerInfo"].get("cash", 0) or 0) < price:
+            print("Weather unlock rejected - not enough cash.")
+            return False
+        save["playerInfo"]["cash"] -= price
+        unlocked[str(skin_id)] = "true"
+        print(f"Unlocked weather theme {skin_id}.")
+        return True
+
+    elif cmd == Constant.CMD_SET_SKIN:
+        try:
+            town_id, skin_id = int(args[0]), int(args[1])
+            town = save["maps"][town_id]
+        except (IndexError, TypeError, ValueError):
+            return False
+        unlocked = save["privateState"].get("unlockedSkins", {})
+        if skin_id != 0 and (
+            not isinstance(unlocked, dict) or str(skin_id) not in unlocked
+        ):
+            print("Weather selection rejected - theme is locked.")
+            return False
+        town["skin"] = skin_id
+        print(f"Weather theme set to {skin_id} in town {town_id}.")
+        return True
+
+    elif cmd == "set_item_health":
+        try:
+            x, y, town_id, item_id, health = (
+                int(args[0]), int(args[1]), int(args[2]), int(args[3]), int(args[4])
+            )
+            town = save["maps"][town_id]
+        except (IndexError, TypeError, ValueError):
+            return False
+        item = _find_map_item(town, item_id, x, y)
+        config = _item_config(item_id)
+        if item is None or config is None or str(config.get("type")) not in ("b", "u"):
+            print("Item health update rejected - fighting item not found.")
+            return False
+        maximum = max(1, int(config.get("life", 1) or 1))
+        health = min(max(0, health), maximum)
+        attrs = _item_attrs(item)
+        if health >= maximum:
+            attrs.pop("hp", None)
+        else:
+            attrs["hp"] = health
+        print(f"Stored {get_name_from_item_id(item_id)} health {health}/{maximum}.")
+        return True
 
     elif cmd == Constant.CMD_UNIT_COLLECTION_COMPLETED:
         collection_id = args[0]
@@ -1548,7 +2467,11 @@ def do_command(USERID, cmd, args):
             f"{casualties['removed']} permanent casualties)",
         )
         # On a win, record the conquered island position so the PvP map shows it
-        # complete. The client reads map["universAttackWin"] to mark conquered slots.
+        # complete. The client reads map["universAttackWin"] to mark conquered
+        # slots. Cash, however, is tied to the defeated player: positions are
+        # reused between continents, while a player can return to a slot after
+        # a cooldown. Paying by slot either denied valid first wins or paid the
+        # same opponent again after reshuffling.
         if win:
             victim = data.get("victim") or {}
             posicion = victim.get("posicion")
@@ -1557,6 +2480,15 @@ def do_command(USERID, cmd, args):
                     map["universAttackWin"] = []
                 if int(posicion) not in map["universAttackWin"]:
                     map["universAttackWin"].append(int(posicion))
+            rewarded = state.setdefault("pvpCashRewardedVictims", [])
+            if not isinstance(rewarded, list):
+                rewarded = []
+                state["pvpCashRewardedVictims"] = rewarded
+            if victim_id and victim_id not in [str(value) for value in rewarded]:
+                rewarded.append(victim_id)
+                save["playerInfo"]["cash"] = int(
+                    save["playerInfo"].get("cash", 0) or 0
+                ) + 1
 
     elif cmd == Constant.CMD_ASSIST_NEIGHBOUR:
         # [friend_pid, lastIdAssist, town]. The player assisted a neighbour's
@@ -1589,21 +2521,22 @@ def do_command(USERID, cmd, args):
         return True
 
     elif cmd == Constant.CMD_HIRE_WORKER:
-        # Local replacement for the original Facebook callback:
-        # [x, y, town, building, friend_id]. Only explicitly linked players
-        # may fill a role and one friend can fill at most one slot per building.
+        # A requester may invite a linked friend, but may not accept on that
+        # friend's behalf. The target player must accept from /friends.
         if len(args) < 5:
             print("Social hire rejected - malformed args.")
             return False
-        return _hire_social_friend(
-            save, USERID, args[0], args[1], int(args[2]), int(args[3]), args[4]
+        status = request_social_staff_role(
+            USERID, args[4], args[0], args[1], int(args[2]), int(args[3])
         )
+        print(f"Social staffing request: {status}.")
+        return status in ("requested", "pending")
 
     elif cmd == Constant.CMD_ASSIST_SEND_FEED:
-        # Round Table request: [x, y, town, building, friend_id]. Only a real
-        # friend may be targeted. The original Facebook acceptance callback is
-        # unavailable in the local game, so a linked local friend accepts the
-        # role immediately and both request/staff state survive a refresh.
+        # Round Table request: [x, y, town, building, friend_id]. Sending a
+        # Facebook-style help request is not the same as the target accepting
+        # it. Keep the daily sent-request state, then queue the role for the
+        # target to accept from /friends just like Market/Mine staffing.
         if len(args) < 5:
             print("Social feed rejected - malformed args.")
             return False
@@ -1630,11 +2563,11 @@ def do_command(USERID, cmd, args):
             return False
         sent[friend_id] = True
         attrs["sif"] = sent
-        _hire_social_friend(
-            save, USERID, x, y, town_id, item_id, friend_id
+        status = request_social_staff_role(
+            USERID, friend_id, x, y, town_id, item_id
         )
-        print(f"Social help request accepted by {friend_id}.")
-        return True
+        print(f"Social help request for {friend_id}: {status}.")
+        return status in ("requested", "pending")
 
     elif cmd == Constant.CMD_BUY_SI_HELP:
         # [x, y, town, item]. The client deducts 2 cash and appends a zero
@@ -1646,6 +2579,22 @@ def do_command(USERID, cmd, args):
         social = _social_item(item_id)
         if item is None or social is None:
             print("Social worker purchase rejected - building/config not found.")
+            return False
+        scripted_unlock_ids = {
+            Constant.ID_BUILDING_ZEPPELIN_TOWER,
+            getattr(Constant, "ID_BUILDING_TROLL_ZEPPELIN", -1),
+        }
+        automatic_request = (
+            len(args) > 4 and int(args[4] or 0) == 1
+        )
+        if automatic_request and item_id not in scripted_unlock_ids:
+            # countAllBuildings() sent this hidden fifth argument on reload
+            # and locally inserted a worker without a click. Manual paid
+            # purchases have exactly four arguments.
+            print(
+                "Automatic social worker rejected - staff must be bought or "
+                "accepted by a real linked friend."
+            )
             return False
         attrs = _item_attrs(item)
         if "si" in attrs and attrs["si"] is None:
@@ -1660,7 +2609,13 @@ def do_command(USERID, cmd, args):
         if len(staff) >= required:
             print("Social worker purchase ignored - staffing already complete.")
             return False
-        price = int(social.get("worker_cost", 0) or 0)
+        # Zeppelin progression scripts intentionally queue their workers
+        # without client-side cash deductions. The Harbor is deliberately not
+        # included: its old reload script was the source of the free-staff bug.
+        price = (
+            0 if automatic_request
+            else int(social.get("worker_cost", 0) or 0)
+        )
         cash = int(save["playerInfo"].get("cash", 0) or 0)
         if cash < price:
             print(f"Social worker purchase rejected - needs {price} cash, has {cash}.")
@@ -1717,6 +2672,8 @@ def do_command(USERID, cmd, args):
             attrs["sif"] = []
             print(f"Reset completed social helper cycle for {get_name_from_item_id(item_id)}.")
             return True
+        attrs["staffRoster"] = list(staff[:required])
+        attrs["staffRoles"] = _social_worker_roles(social)
         attrs["si"] = None
         print(f"Opened staffed social building {get_name_from_item_id(item_id)}.")
         return True
@@ -1820,6 +2777,12 @@ def do_command(USERID, cmd, args):
         map = save["maps"][town_id]
         for item in map["items"]:
             if item[0] == item_id and item[1] == x and item[2] == y:
+                if _staffing_pending(item):
+                    print(
+                        "Activate rejected - every staff role must be filled "
+                        "first."
+                    )
+                    return False
                 # An item is [id, x, y, orient, collected_at, level, units, attrs].
                 # The client shows a producer as "working" only when attrs.cp is a
                 # nonzero time option (1..4), and derives the production duration and
@@ -1921,21 +2884,38 @@ def do_command(USERID, cmd, args):
         print(f"Treasure collected: +{gold}g +{xp}xp +{food}f +{stone}s, next quest {quest_id}. Stamped {map['timestampLastTreasure']}.")
 
     elif cmd == Constant.CMD_BUY_UNIT_WITH_CASH:
-        # [item_id, x, y, frame, town]: buy a unit paying its cash price
-        # (cost_unit_cash) instead of resources.
+        # [item_id, x, y, frame, town, sourceX?, sourceY?, sourceId?]: buy a
+        # trained unit paying its cash price instead of resources.
         item_id = int(args[0])
         x = args[1]
         y = args[2]
         town_id = int(args[4]) if len(args) > 4 else 0
+        map = save["maps"][town_id]
+        explicit_source = (
+            (args[5], args[6], int(args[7]))
+            if len(args) >= 8 else None
+        )
+        valid_source, trainer = _training_source(
+            map, item_id, x, y, explicit_source
+        )
+        if not valid_source:
+            print("Cash unit training rejected - source building is invalid.")
+            return False
+        if _staffing_pending(trainer):
+            print(
+                "Cash unit training rejected - every source-building staff "
+                "role must be filled first."
+            )
+            return False
         price = int(get_attribute_from_item_id(item_id, "cost_unit_cash") or 0)
         cash = int(save["playerInfo"]["cash"])
         if cash < price:
             print(f"Buy with cash rejected - needs {price} cash, has {cash}.")
-            return
+            return False
         save["playerInfo"]["cash"] = cash - price
-        map = save["maps"][town_id]
         map["items"] += [[item_id, x, y, 0, timestamp_now(), 0]]
         print("Bought", str(get_name_from_item_id(item_id)), f"for {price} cash at ({x},{y}).")
+        return True
 
     elif cmd == Constant.CMD_BUY_MAP:
         # Buy a second town. args: [count(=1), resource(0=gold, 1=cash),

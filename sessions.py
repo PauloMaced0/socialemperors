@@ -72,6 +72,30 @@ _DEPLETED_RESOURCE_PLACEHOLDER_IDS = frozenset({
     Constant.ID_BUILDING_REGEN_STONE,
 })
 
+_TREE_RESOURCE_IDS = frozenset({
+    Constant.ID_BUILDING_TREE_1,
+    Constant.ID_BUILDING_TREE_2,
+    Constant.ID_BUILDING_TREE_3,
+})
+
+_GOLD_RESOURCE_IDS = frozenset({
+    Constant.ID_BUILDING_GOLD_1,
+    Constant.ID_BUILDING_GOLD_2,
+    Constant.ID_BUILDING_GOLD_3,
+    Constant.ID_BUILDING_GOLD_4,
+    Constant.ID_BUILDING_REGEN_GOLD,
+})
+
+_STONE_RESOURCE_IDS = frozenset({
+    Constant.ID_BUILDING_STONE_1,
+    Constant.ID_BUILDING_STONE_2,
+    Constant.ID_BUILDING_STONE_3,
+    Constant.ID_BUILDING_STONE_4,
+    Constant.ID_BUILDING_REGEN_STONE,
+})
+
+_NATURAL_RESOURCE_RECOVERY_VERSION = 1
+
 
 def is_enemy_camp_marker(item_id: int) -> bool:
     return int(item_id) in _ENEMY_CAMP_MARKER_IDS
@@ -114,32 +138,240 @@ def _repair_active_enemy_camps(save: dict) -> bool:
 
 
 def _repair_natural_resource_state(save: dict) -> bool:
-    """Remove obsolete stone/gold regrowth objects and recognize old maps."""
+    """Recognize existing maps and reopen one legacy population pass.
+
+    IDs 80/81 are legacy same-tile gold/stone regeneration placeholders.
+    Convert them into server-owned delayed respawns, preserving the remaining
+    three-hour cooldown but allowing the replacement deposit to appear at a
+    new random wild-map position. Pending tree/mineral respawns still count as
+    present, so reloading cannot reopen the client's initial population pass.
+
+    Older server versions permanently removed harvested nodes. Once a mature
+    town reached zero of a resource family, its original coordinates were no
+    longer recoverable. For that legacy case only, clear the initialized flag
+    once so the stock MapInitializer can repopulate the missing family using
+    its original cluster sizes and caps. Every later mineral harvest follows
+    the persisted random-respawn path.
+    """
     changed = False
-    deposit_ids = {
-        Constant.ID_BUILDING_STONE_1, Constant.ID_BUILDING_STONE_2,
-        Constant.ID_BUILDING_STONE_3, Constant.ID_BUILDING_STONE_4,
-        Constant.ID_BUILDING_GOLD_1, Constant.ID_BUILDING_GOLD_2,
-        Constant.ID_BUILDING_GOLD_3, Constant.ID_BUILDING_GOLD_4,
-    }
     for town in save.get("maps", []):
-        items = town.get("items", [])
-        had_placeholder = any(
-            is_depleted_resource_placeholder(item[0]) for item in items if item
-        )
-        if had_placeholder:
-            town["items"] = [
-                item for item in items
-                if item and not is_depleted_resource_placeholder(item[0])
-            ]
+        items = town.setdefault("items", [])
+        pending_minerals = town.get("pendingMineralRespawns")
+        if not isinstance(pending_minerals, list):
+            pending_minerals = []
+            town["pendingMineralRespawns"] = pending_minerals
             changed = True
+
+        # Migrate saves created by the previous client patch. The placeholder
+        # timestamp is when depletion started, so its original remaining
+        # cooldown survives both browser and server restarts.
+        for item in list(items):
+            if not item or int(item[0]) not in _DEPLETED_RESOURCE_PLACEHOLDER_IDS:
+                continue
+            family = (
+                "gold"
+                if int(item[0]) == Constant.ID_BUILDING_REGEN_GOLD
+                else "stone"
+            )
+            try:
+                source_x, source_y = int(item[1]), int(item[2])
+                depleted_at = int(item[4] or 0)
+            except (IndexError, TypeError, ValueError):
+                items.remove(item)
+                changed = True
+                continue
+            ready_at = depleted_at + Constant.TIMER_RESOURCE_REGEN_SECONDS
+            duplicate = False
+            for entry in pending_minerals:
+                if (
+                    not isinstance(entry, dict)
+                    or str(entry.get("family")) != family
+                ):
+                    continue
+                try:
+                    same_source = (
+                        int(entry.get("source_x", -1)) == source_x
+                        and int(entry.get("source_y", -1)) == source_y
+                    )
+                except (TypeError, ValueError):
+                    same_source = False
+                if same_source:
+                    duplicate = True
+                    break
+            if not duplicate:
+                pending_minerals.append({
+                    "family": family,
+                    "source_x": source_x,
+                    "source_y": source_y,
+                    "at": ready_at,
+                })
+            items.remove(item)
+            changed = True
+
+        item_ids = {
+            int(item[0]) for item in items
+            if item
+        }
+        pending_families = {
+            str(entry.get("family"))
+            for entry in pending_minerals
+            if isinstance(entry, dict)
+        }
+        has_mineral = bool(
+            item_ids & (_GOLD_RESOURCE_IDS | _STONE_RESOURCE_IDS)
+            or pending_families & {"gold", "stone"}
+        )
         if ("naturalResourcesInitialized" not in town
-                and (had_placeholder or any(
-                    int(item[0]) in deposit_ids
-                    for item in town.get("items", []) if item
-                ))):
+                and has_mineral):
             town["naturalResourcesInitialized"] = 1
             changed = True
+
+        initialized = int(
+            town.get("naturalResourcesInitialized", 0) or 0
+        )
+        recovery_version = int(
+            town.get("naturalResourceRecoveryVersion", 0) or 0
+        )
+        if (
+            not initialized
+            or recovery_version >= _NATURAL_RESOURCE_RECOVERY_VERSION
+        ):
+            continue
+
+        pending_trees = town.get("pendingTreeRespawns", [])
+        has_pending_tree = False
+        if isinstance(pending_trees, list):
+            for entry in pending_trees:
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    pending_id = int(entry.get("id", -1) or -1)
+                except (TypeError, ValueError):
+                    continue
+                if pending_id in _TREE_RESOURCE_IDS:
+                    has_pending_tree = True
+                    break
+        missing_family = (
+            (
+                not bool(item_ids & _GOLD_RESOURCE_IDS)
+                and "gold" not in pending_families
+            )
+            or (
+                not bool(item_ids & _STONE_RESOURCE_IDS)
+                and "stone" not in pending_families
+            )
+            or (
+                not bool(item_ids & _TREE_RESOURCE_IDS)
+                and not has_pending_tree
+            )
+        )
+        if missing_family:
+            # MapInitializer will fill only what is missing, based on the
+            # counts returned with player-info. This is not a recurring
+            # respawn switch: the migration version prevents another reset.
+            town["naturalResourcesInitialized"] = 0
+        town["naturalResourceRecoveryVersion"] = (
+            _NATURAL_RESOURCE_RECOVERY_VERSION
+        )
+        changed = True
+    return changed
+
+
+def _repair_social_building_state(save: dict) -> bool:
+    """Normalize persisted staffing without granting vacant roles for free."""
+    from get_game_config import get_game_config
+
+    social_items = {
+        int(value["id"]): value
+        for value in get_game_config().get("social_items", [])
+        if "id" in value
+    }
+    changed = False
+    for town in save.get("maps", []):
+        # The stock client used to "open" the first Harbor on every map load:
+        # it queued free worker commands, showed Dock operative, and replaced
+        # attrs.si with null locally.  There was no durable distinction
+        # between those injected zero placeholders and cash-filled roles, so
+        # repair the old all-zero state once.  Accepted friend identities are
+        # preserved, and buildings staffed after this migration are untouched.
+        try:
+            harbour_repair_version = int(
+                town.get("harbourManualStaffingVersion", 0) or 0
+            )
+        except (TypeError, ValueError):
+            harbour_repair_version = 0
+        if harbour_repair_version < 1:
+            for item in town.get("items", []):
+                if (
+                    not item
+                    or int(item[0]) != Constant.ID_BUILDING_DOCK
+                    or len(item) < 8
+                    or not isinstance(item[7], dict)
+                ):
+                    continue
+                attrs = item[7]
+                roster = attrs.get("staffRoster")
+                auto_opened = (
+                    attrs.get("si") is None
+                    and (
+                        not isinstance(roster, list)
+                        or not roster
+                        or all(value == 0 for value in roster)
+                    )
+                )
+                if auto_opened:
+                    attrs["si"] = []
+                    attrs["staffRoles"] = []
+                    attrs["staffRoster"] = []
+                    changed = True
+            town["harbourManualStaffingVersion"] = 1
+            changed = True
+        for item in town.get("items", []):
+            if not item or int(item[0]) not in social_items:
+                continue
+            social = social_items[int(item[0])]
+            roles = [
+                role.strip()
+                for role in str(social.get("workers", "") or "").split(",")
+                if role.strip()
+            ]
+            while len(item) < 7:
+                item.append([])
+                changed = True
+            if len(item) < 8:
+                item.append({"si": []})
+                changed = True
+            elif not isinstance(item[7], dict):
+                item[7] = {"si": []}
+                changed = True
+            elif "si" not in item[7]:
+                item[7]["si"] = []
+                changed = True
+            attrs = item[7]
+            staff = attrs.get("si", [])
+            if staff is None:
+                # ``si=None`` is an old save's durable proof that every role
+                # was completed. Preserve that fact for role-aware upgrades.
+                roster = attrs.get("staffRoster")
+                roster_roles = attrs.get("staffRoles")
+                if not isinstance(roster, list) or len(roster) < len(roles):
+                    attrs["staffRoster"] = [0] * len(roles)
+                    changed = True
+                if not isinstance(roster_roles, list) or roster_roles != roles:
+                    attrs["staffRoles"] = list(roles)
+                    changed = True
+            elif isinstance(staff, list):
+                # Partial identities occupy the configured prefix. Recording
+                # it makes accepted friend staff survive future upgrades, but
+                # does not fill or unlock a single extra position.
+                prefix = roles[:min(len(staff), len(roles))]
+                roster = list(staff[:len(prefix)])
+                if attrs.get("staffRoles") != prefix:
+                    attrs["staffRoles"] = prefix
+                    changed = True
+                if attrs.get("staffRoster") != roster:
+                    attrs["staffRoster"] = roster
+                    changed = True
     return changed
 
 
@@ -194,6 +426,39 @@ def _repair_unit_warehouse_state(save: dict) -> bool:
             town["warehouseAditionalCapacitySingle"] = 1
             changed = True
     return changed
+
+
+def _repair_quest_progress(save: dict) -> bool:
+    """Repair the old quest-id/index mix-up without unlocking every island.
+
+    ``unlockedQuestIndex`` is an index into globals.ISLE_ORDER, not a quest
+    id. Older server code stored ``quest_id + 1`` (for example 100000007),
+    which made every island appear unlocked after one victory. Completed
+    ranks are authoritative, so rebuild only the contiguous unlocked prefix
+    when the stored index is outside the real list.
+    """
+    from get_game_config import get_game_config
+
+    order = [
+        str(value)
+        for value in get_game_config().get("globals", {}).get("ISLE_ORDER", [])
+    ]
+    if not order:
+        return False
+    state = save.setdefault("privateState", {})
+    try:
+        current = int(state.get("unlockedQuestIndex", 0) or 0)
+    except (TypeError, ValueError):
+        current = -1
+    if 0 <= current <= len(order):
+        return False
+    ranks = state.get("questsRank", {})
+    ranks = ranks if isinstance(ranks, dict) else {}
+    repaired = 0
+    while repaired < len(order) and order[repaired] in ranks:
+        repaired += 1
+    state["unlockedQuestIndex"] = repaired
+    return True
 
 # Load saved villages
 
@@ -266,7 +531,11 @@ def load_saved_villages():
             modified = True
         if _repair_natural_resource_state(save):
             modified = True
+        if _repair_social_building_state(save):
+            modified = True
         if _repair_unit_warehouse_state(save):
+            modified = True
+        if _repair_quest_progress(save):
             modified = True
         if modified:
             save_session(USERID)

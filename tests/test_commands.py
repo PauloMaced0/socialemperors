@@ -33,6 +33,7 @@ def _template_save():
     m = save["maps"][0]
     m["coins"] = 0
     m["wood"] = m["stone"] = m["food"] = 0
+    m["store"] = {}
     save["privateState"]["gifts"] = []
     save["privateState"]["potion"] = 0
     return save
@@ -77,13 +78,15 @@ def test_place_gift_without_stock_rejected(tmp):
 
 def test_place_gift_and_stored_item_consume_storage(tmp):
     save = sessions.session(UID)
-    save["privateState"]["gifts"] = [0] * RANGER + [2]
+    save["privateState"]["gifts"] = [0] * RANGER + [1]
+    save["maps"][0]["store"] = {str(RANGER): 1}
     n_items = len(_items(save))
     _do(Constant.CMD_PLACE_GIFT, [RANGER, 10, 10, 0, 0])
     _do(Constant.CMD_PLACE_STORED_ITEM, [RANGER, 11, 10, 0, 0])
     assert len(_items(save)) == n_items + 2, "placements not persisted"
     assert _items(save)[-1][0] == RANGER, "wrong item id placed"
-    assert save["privateState"]["gifts"] == [], "gift count not consumed / zeros not trimmed"
+    assert save["privateState"]["gifts"] == [], "gift count not consumed"
+    assert save["maps"][0]["store"] == {}, "owned storage count not consumed"
 
 
 def test_sell_gift_and_stored_item(tmp):
@@ -91,10 +94,13 @@ def test_sell_gift_and_stored_item(tmp):
     _do(Constant.CMD_SELL_GIFT, [RANGER, 0])
     assert save["maps"][0]["coins"] == 0, "sold a gift that was never owned"
     save["privateState"]["gifts"] = [0] * RANGER + [1]
+    save["maps"][0]["store"] = {str(RANGER): 1}
+    _do(Constant.CMD_SELL_GIFT, [RANGER, 0])
     _do(Constant.CMD_SELL_STORED, [RANGER, 0])
-    assert save["privateState"]["gifts"] == [], "sale did not consume storage"
-    # 5% refund of 250 gold cost = int(-12.5) -> 12
-    assert save["maps"][0]["coins"] == 12, f"5%% refund wrong: {save['maps'][0]['coins']}"
+    assert save["privateState"]["gifts"] == [], "gift sale did not consume gift"
+    assert save["maps"][0]["store"] == {}, "stored sale did not consume owned item"
+    # Each 5% refund of the 250 gold cost is int(-12.5) -> 12.
+    assert save["maps"][0]["coins"] == 24, f"5%% refunds wrong: {save['maps'][0]['coins']}"
 
 
 # --- resurrect payment -----------------------------------------------------
@@ -345,25 +351,29 @@ def test_market_trade_requires_open_market(tmp):
     assert ok is True and m["wood"] == 100, f"opened market trade failed (wood={m['wood']})"
 
 
-def test_tutorial_village_keeps_initial_resource_spawn(tmp):
-    # The client skips its one-time resource/animal spawn when
-    # arrayAnimals[SUBCATFUNC_RESOURCE_REGEN] is set. A fresh tutorial village
-    # (decorative trees present -> naturalResourcesInitialized) must NOT set
-    # that marker, or the tutorial arrow points at a tree/goblin never spawned.
+def test_player_info_gates_natural_resource_reload_population(tmp):
+    # The initial environment must populate, but established towns must carry
+    # the client-side guard. Otherwise each browser reload instantly replaces
+    # harvested trees before their persisted cooldown.
     from get_player_info import get_player_info
     marker = str(Constant.SUBCATFUNC_RESOURCE_REGEN)
     save = sessions.session(UID)
     save["playerInfo"]["completed_tutorial"] = 0
     save["maps"][0]["naturalResourcesInitialized"] = 1
+    # This case models a healthy established map. Empty legacy maps without
+    # this migration marker are intentionally reopened once by the recovery
+    # test in test_gameplay_state.py.
+    save["maps"][0]["naturalResourceRecoveryVersion"] = 1
     save["privateState"].setdefault("arrayAnimals", {})
     get_player_info(UID, 0)
     assert marker not in save["privateState"]["arrayAnimals"], \
         "initial spawn suppressed during tutorial (arrow points at nothing)"
-    # Once the tutorial is done, the reload guard applies for the town.
+    # Once established, reload population is blocked; individual mineral/tree
+    # cooldowns are restored separately by the server.
     save["playerInfo"]["completed_tutorial"] = 1
     get_player_info(UID, 0)
     assert save["privateState"]["arrayAnimals"].get(marker) == 1, \
-        "reload guard not restored after tutorial completion"
+        "established town can repopulate resources merely by reloading"
 
 
 def test_assist_neighbour_grants_reward(tmp):
@@ -423,6 +433,29 @@ def test_loading_scrubs_leaked_playerinfo_fields(tmp):
     assert "wood" not in save["playerInfo"], "leaked wood not scrubbed on load"
 
 
+def test_mission_reward_is_paid_only_once_after_completion(tmp):
+    save = sessions.session(UID)
+    mission_id = 6
+    reward = int(get_game_config()["missions"][mission_id - 2]["reward"])
+    before = int(save["maps"][0]["coins"])
+
+    assert command.do_command(
+        UID, Constant.CMD_REWARD_MISSION, [0, mission_id]
+    ) is False, "an unfinished mission paid a reward"
+    assert command.do_command(
+        UID, Constant.CMD_COMPLETE_MISSION, [mission_id, 0]
+    ) is True
+    assert command.do_command(
+        UID, Constant.CMD_REWARD_MISSION, [0, mission_id]
+    ) is True
+    assert command.do_command(
+        UID, Constant.CMD_REWARD_MISSION, [0, mission_id]
+    ) is False, "mission reward was redeemable twice"
+    assert int(save["maps"][0]["coins"]) - before == reward
+    assert save["privateState"]["completedMissions"].count(mission_id) == 1
+    assert save["privateState"]["rewardedMissions"].count(mission_id) == 1
+
+
 TESTS = [
     test_place_gift_without_stock_rejected,
     test_place_gift_and_stored_item_consume_storage,
@@ -447,12 +480,13 @@ TESTS = [
     test_save_info_level_derived_from_xp,
     test_static_scenarios_are_not_social_players,
     test_collect_gated_on_opened_social_mine,
-    test_tutorial_village_keeps_initial_resource_spawn,
+    test_player_info_gates_natural_resource_reload_population,
     test_assist_neighbour_grants_reward,
     test_place_gift_uses_town_arg_not_frame,
     test_market_trade_requires_open_market,
     test_market_II_needs_no_staff,
     test_loading_scrubs_leaked_playerinfo_fields,
+    test_mission_reward_is_paid_only_once_after_completion,
 ]
 
 

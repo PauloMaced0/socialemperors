@@ -140,6 +140,38 @@
         </div>
         {% else %}
         <div class="empty">No pending friend requests.</div>
+    {% endif %}
+    </section>
+
+    <section>
+        <div class="sec-head">
+            <h2>Building help requests</h2>
+            {% if staff_requests %}<span class="count">{{ staff_requests|length }}</span>{% endif %}
+        </div>
+        {% if staff_requests %}
+        <div class="list">
+            {% for role in staff_requests %}
+            <div class="row">
+                <div class="avatar">{{ role.requester_name[0]|upper }}</div>
+                <div class="who">
+                    <div class="name">{{ role.requester_name }}</div>
+                    <div class="lvl">asks you to work at {{ role.building }}</div>
+                </div>
+                <div class="actions">
+                    <form class="inline" method="post">
+                        <input type="hidden" name="request_key" value="{{ role.key }}">
+                        <button class="btn-accept" type="submit" name="action" value="staff_accept">Accept</button>
+                    </form>
+                    <form class="inline" method="post">
+                        <input type="hidden" name="request_key" value="{{ role.key }}">
+                        <button class="btn-decline" type="submit" name="action" value="staff_decline">Decline</button>
+                    </form>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty">No pending building help requests.</div>
         {% endif %}
     </section>
 

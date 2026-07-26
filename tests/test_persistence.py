@@ -155,6 +155,7 @@ def test_end_attack_win_marks_conquered_and_rewards(tmp):
     m["universAttackWin"] = []
     m["coins"] = 1000
     m["xp"] = 500
+    cash_before = sessions.session(UID)["playerInfo"]["cash"]
     payload = json.dumps({
         "attacker": {"map": 0}, "victim": {"posicion": 3, "user_id": "1111"},
         "resources": {"g": 250, "x": 40}, "win": 1,
@@ -165,10 +166,14 @@ def test_end_attack_win_marks_conquered_and_rewards(tmp):
     assert 3 in dm["universAttackWin"], f"conquered position not recorded: {dm['universAttackWin']}"
     assert dm["coins"] == 1250, f"gold reward not applied: {dm['coins']}"
     assert dm["xp"] == 540, f"xp reward not applied: {dm['xp']}"
+    assert disk["playerInfo"]["cash"] == cash_before + 1, \
+        "first win against the player did not grant one cash"
     # winning the same island again must not duplicate it
     command.command(UID, _batch([{"cmd": Constant.CMD_END_ATTACK, "args": [payload]}]))
     dm2 = sessions.session(UID)["maps"][0]
     assert dm2["universAttackWin"].count(3) == 1, "conquered position duplicated"
+    assert sessions.session(UID)["playerInfo"]["cash"] == cash_before + 1, \
+        "replaying the same opponent granted the one-cash reward again"
 
 
 def test_end_attack_loss_does_not_mark_conquered(tmp):
@@ -207,13 +212,15 @@ def test_end_quest_win_saves_star_rank(tmp):
 
 
 def test_store_item_frombug_moves_item_to_storage(tmp):
-    """store_item_frombug must relocate the colliding item to storage (gifts),
-    same as store_item; otherwise the client re-sends it every load."""
+    """store_item_frombug relocates an owned item to map.store.
+
+    Keeping owned storage separate from gifts is what prevents re-placement
+    from awarding the construction XP again after a browser reload.
+    """
     ITEM_ID, IX, IY = 224, 53, 59  # Harbor
     m = sessions.session(UID)["maps"][0]
     m["items"].append([ITEM_ID, IX, IY, 0, 0, 0])
-    ps = sessions.session(UID)["privateState"]
-    ps["gifts"] = []
+    m["store"] = {}
     command.command(UID, _batch([
         {"cmd": Constant.CMD_STORE_ITEM_FROMBUG, "args": [IX, IY, 0, ITEM_ID]},
     ]))
@@ -221,7 +228,8 @@ def test_store_item_frombug_moves_item_to_storage(tmp):
     still = [it for it in disk["maps"][0]["items"]
              if it[0] == ITEM_ID and it[1] == IX and it[2] == IY]
     assert not still, "colliding item was not removed from the map"
-    assert disk["privateState"]["gifts"][ITEM_ID] == 1, "item not added to storage"
+    assert disk["maps"][0]["store"][str(ITEM_ID)] == 1, \
+        "item not added to owned storage"
 
 
 def test_darts_flow_persists(tmp):

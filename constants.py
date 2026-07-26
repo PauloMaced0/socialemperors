@@ -126,6 +126,11 @@ class Constant:
     ID_BUILDING_MINE_WOOD_3 = 79
     ID_BUILDING_REGEN_GOLD = 80
     ID_BUILDING_REGEN_STONE = 81
+    # The stock regeneration objects use a three-hour activation.  The Flash
+    # client has no equivalent tree object, so the preservation server applies
+    # the same natural-resource window to harvested trees instead of allowing
+    # MapInitializer to replace them on every browser refresh.
+    TIMER_RESOURCE_REGEN_SECONDS = 3 * 60 * 60
     ID_BUILDING_TREE_1 = 19
     ID_BUILDING_TREE_2 = 20
     ID_BUILDING_TREE_3 = 21

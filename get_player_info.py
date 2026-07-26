@@ -1,13 +1,15 @@
 import copy
 import datetime
+import random
 
 from sessions import (
-    session, neighbor_session, neighbors, refresh_enemy_camp_timer,
-    _display_name,
+    session, save_session, neighbor_session, neighbors,
+    refresh_enemy_camp_timer, _display_name, _repair_social_building_state,
+    _repair_natural_resource_state,
 )
 from engine import timestamp_now
 from constants import Constant
-from get_game_config import get_level_from_xp
+from get_game_config import get_attribute_from_item_id, get_level_from_xp
 
 
 def _ensure_town_list(save):
@@ -67,21 +69,223 @@ def _refresh_daily_animal_budget(save, now):
     pstate["timestampAnimalsReset"] = int(now)
 
 
-def _sync_natural_resource_reload_marker(save, map_idx):
-    """Tell the patched SWF whether wild resources were already generated.
+def _respawn_mature_trees(save, now):
+    """Restore harvested trees after the natural-resource cooldown.
 
-    The client skips its one-time initial resource/animal spawn
-    (MapInitializer.spawnInitResources / spawnRemainingResources) when
-    arrayAnimals[SUBCATFUNC_RESOURCE_REGEN] is set. A brand-new village ships
-    with decorative trees, so the reload guard used to treat it as already
-    initialized and suppressed that first spawn - which left the tutorial arrow
-    pointing at a tree/goblin that was never created. Withhold the marker until
-    the tutorial is complete so the first spawn runs during the tutorial (as
-    before), then apply the reload guard normally for established towns."""
+    Trees have no visible regeneration object, so their cooldown is persisted
+    here. If a player built on a depleted tile, the pending tree is consumed
+    rather than reappearing through the building.
+    """
+    changed = False
+    tree_ids = {
+        Constant.ID_BUILDING_TREE_1,
+        Constant.ID_BUILDING_TREE_2,
+        Constant.ID_BUILDING_TREE_3,
+    }
+    for town in save.get("maps", []):
+        pending = town.get("pendingTreeRespawns")
+        if not isinstance(pending, list) or not pending:
+            continue
+        items = town.setdefault("items", [])
+        tree_count = sum(
+            1 for item in items
+            if item and int(item[0]) in tree_ids
+        )
+        remaining = []
+        for entry in pending:
+            try:
+                tree_id = int(entry["id"])
+                x, y = int(entry["x"]), int(entry["y"])
+                ready_at = int(entry["at"])
+            except (KeyError, TypeError, ValueError):
+                changed = True
+                continue
+            if tree_id not in tree_ids:
+                changed = True
+                continue
+            if int(now) < ready_at:
+                remaining.append(entry)
+                continue
+            occupied = any(
+                item and int(item[1]) == x and int(item[2]) == y
+                for item in items
+            )
+            if not occupied and tree_count < 300:
+                items.append([tree_id, x, y, 0, int(now), 0])
+                tree_count += 1
+            changed = True
+        if remaining != pending:
+            town["pendingTreeRespawns"] = remaining
+    return changed
+
+
+_MINERAL_RESPAWN_IDS = {
+    "gold": (
+        Constant.ID_BUILDING_GOLD_1,
+        Constant.ID_BUILDING_GOLD_2,
+        Constant.ID_BUILDING_GOLD_3,
+        Constant.ID_BUILDING_GOLD_4,
+    ),
+    "stone": (
+        Constant.ID_BUILDING_STONE_1,
+        Constant.ID_BUILDING_STONE_2,
+        Constant.ID_BUILDING_STONE_3,
+        Constant.ID_BUILDING_STONE_4,
+    ),
+}
+
+
+def _occupied_map_tiles(town):
+    """Tiles occupied by persisted item footprints."""
+    occupied = set()
+    for item in town.get("items", []):
+        if not item or len(item) < 3:
+            continue
+        try:
+            item_id, x, y = int(item[0]), int(item[1]), int(item[2])
+            width = max(
+                1, int(get_attribute_from_item_id(item_id, "width") or 1)
+            )
+            height = max(
+                1, int(get_attribute_from_item_id(item_id, "height") or 1)
+            )
+            orientation = int(item[3] or 0) if len(item) > 3 else 0
+        except (TypeError, ValueError):
+            continue
+        if orientation % 2:
+            width, height = height, width
+        for tx in range(x, x + width):
+            for ty in range(y, y + height):
+                if 0 <= tx < 100 and 0 <= ty < 100:
+                    occupied.add((tx, ty))
+    return occupied
+
+
+def _random_wild_resource_position(town, occupied, excluded):
+    """Choose an empty tile from the same wild regions as MapInitializer.
+
+    The stock map is a 5x5 grid of 20x20 big tiles. Natural deposits are
+    placed on the permanent outer border plus inner tiles the player has not
+    bought. Excluding ``town.expansions`` reproduces that rule and prevents a
+    respawn from occupying owned/buildable land.
+    """
+    try:
+        owned = {int(value) for value in town.get("expansions", [])}
+    except (TypeError, ValueError):
+        owned = {13}
+    big_tiles = [value for value in range(1, 26) if value not in owned]
+    if not big_tiles:
+        return None
+
+    def candidate(big_tile, local_x, local_y):
+        column = (big_tile - 1) % 5
+        row = (big_tile - 1) // 5
+        return column * 20 + local_x, row * 20 + local_y
+
+    # Random first, matching the original spawn style. The deterministic
+    # fallback guarantees that an unusually crowded map does not make a
+    # matured timer disappear merely because random probing missed a gap.
+    for _ in range(512):
+        position = candidate(
+            random.choice(big_tiles),
+            random.randrange(20),
+            random.randrange(20),
+        )
+        if position not in occupied and position != excluded:
+            return position
+    for big_tile in big_tiles:
+        for local_y in range(20):
+            for local_x in range(20):
+                position = candidate(big_tile, local_x, local_y)
+                if position not in occupied and position != excluded:
+                    return position
+    return None
+
+
+def _respawn_mature_minerals(save, now):
+    """Replace depleted gold/stone at a new random wild-map position.
+
+    Each harvested node owns one persisted three-hour timer. The timer is
+    removed only when a replacement is created (or its family is already at
+    the stock hard cap), so reloads cannot accelerate or duplicate respawns.
+    """
+    changed = False
+    for town in save.get("maps", []):
+        pending = town.get("pendingMineralRespawns")
+        if not isinstance(pending, list) or not pending:
+            continue
+        items = town.setdefault("items", [])
+        occupied = _occupied_map_tiles(town)
+        family_counts = {
+            family: sum(
+                1 for item in items
+                if item and int(item[0]) in family_ids
+            )
+            for family, family_ids in _MINERAL_RESPAWN_IDS.items()
+        }
+        remaining = []
+        for entry in pending:
+            try:
+                family = str(entry["family"])
+                source = (
+                    int(entry["source_x"]),
+                    int(entry["source_y"]),
+                )
+                ready_at = int(entry["at"])
+            except (KeyError, TypeError, ValueError):
+                changed = True
+                continue
+            if family not in _MINERAL_RESPAWN_IDS:
+                changed = True
+                continue
+            if int(now) < ready_at:
+                remaining.append(entry)
+                continue
+            if family_counts[family] >= 21:
+                # Another legitimate population/respawn already filled this
+                # family. Discard the surplus timer rather than exceeding the
+                # stock three-cluster (3 x 5-7) maximum.
+                changed = True
+                continue
+            position = _random_wild_resource_position(
+                town, occupied, source
+            )
+            if position is None:
+                remaining.append(entry)
+                continue
+            resource_id = random.choice(_MINERAL_RESPAWN_IDS[family])
+            items.append([
+                resource_id,
+                position[0],
+                position[1],
+                0,
+                int(now),
+                0,
+            ])
+            occupied.add(position)
+            family_counts[family] += 1
+            changed = True
+        if remaining != pending:
+            town["pendingMineralRespawns"] = remaining
+    return changed
+
+
+def _sync_natural_resource_reload_marker(save, map_idx):
+    """Prevent MapInitializer from repopulating resources on every reload.
+
+    The patched client checks arrayAnimals[SUBCATFUNC_RESOURCE_REGEN] around
+    only its tree/mineral population blocks. Animals keep their independent
+    daily allowances. A new town is left unmarked until its first environment
+    batch is persisted; established towns use server-authoritative pending
+    tree/mineral cooldowns.
+    """
     animals = save["privateState"].setdefault("arrayAnimals", {})
     marker = str(Constant.SUBCATFUNC_RESOURCE_REGEN)
-    tutorial_done = int(save["playerInfo"].get("completed_tutorial", 0) or 0)
-    initialized = int(save["maps"][map_idx].get("naturalResourcesInitialized", 0) or 0)
+    town = save["maps"][map_idx]
+    tutorial_done = int(
+        save["playerInfo"].get("completed_tutorial", 0) or 0
+    )
+    initialized = int(town.get("naturalResourcesInitialized", 0) or 0)
     if tutorial_done and initialized:
         animals[marker] = 1
     else:
@@ -103,7 +307,17 @@ def get_player_info(USERID, map_number=None):
     # Update last logged in
     ts_now = timestamp_now()
     save = session(USERID)
+    # Server startup repairs legacy saves, but a building can also be placed
+    # while this process is already running.  The Flash client treats a
+    # missing ``attrs.si`` differently from an explicit empty list: missing
+    # means open, while [] means "still needs every worker".  Normalize on
+    # every player load so a browser refresh can never bypass an entirely
+    # unfilled Market, Stone Mine, or other staffed building.
+    social_state_changed = _repair_social_building_state(save)
+    natural_state_changed = _repair_natural_resource_state(save)
     _refresh_daily_animal_budget(save, ts_now)
+    trees_changed = _respawn_mature_trees(save, ts_now)
+    minerals_changed = _respawn_mature_minerals(save, ts_now)
     save["playerInfo"]["last_logged_in"] = ts_now
     # dartsHasFree means "free game claimed (darts_new_free) but not yet
     # thrown". The client reads it at login and, on a new local day, claims a
@@ -165,6 +379,26 @@ def get_player_info(USERID, map_number=None):
         if not isinstance(m.get("resourcesTraded"), dict):
             m["resourcesTraded"] = {}
         m.setdefault("resourceAlliesMarket", "n")
+        # The original protocol separates owned-item storage (map.store) from
+        # received gifts (privateState.gifts).  Keep this as an object even for
+        # starter saves that contain null, otherwise a stored building reloads
+        # as a gift and incorrectly awards its construction XP when re-placed.
+        raw_store = m.get("store")
+        normalized_store = {}
+        if isinstance(raw_store, dict):
+            store_values = raw_store.items()
+        elif isinstance(raw_store, list):
+            store_values = enumerate(raw_store)
+        else:
+            store_values = ()
+        for raw_id, raw_count in store_values:
+            try:
+                item_id, count = int(raw_id), int(raw_count)
+            except (TypeError, ValueError):
+                continue
+            if item_id >= 0 and count > 0:
+                normalized_store[str(item_id)] = count
+        m["store"] = normalized_store
         # Unit Warehouse state is per-town. Older/new saves omitted these
         # fields, which made the client show zero slots and forget stored units
         # after refresh.
@@ -214,6 +448,13 @@ def get_player_info(USERID, map_number=None):
         "privateState": response_pstate,
         "neighbors": neighbors(USERID)
     }
+    if (
+        trees_changed
+        or minerals_changed
+        or social_state_changed
+        or natural_state_changed
+    ):
+        save_session(USERID)
     return player_info
 
 def get_neighbor_info(userid, map_number):

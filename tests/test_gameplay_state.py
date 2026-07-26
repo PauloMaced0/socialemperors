@@ -20,7 +20,7 @@ import engine
 import get_player_info
 import sessions
 from constants import Constant
-from get_game_config import get_attribute_from_item_id
+from get_game_config import get_attribute_from_item_id, get_game_config
 
 
 UID = "test-gameplay-state-0001"
@@ -276,6 +276,9 @@ def test_stone_mine_staffing_and_open_state_survive_reload(tmp):
     opened = _item(_reload(), mine_id, x, y)
     assert opened[7]["si"] is None, \
         "opened Stone Mine reverted to the staffing window after refresh"
+    assert opened[7]["staffRoles"] == ["Geologist", "Miner"]
+    assert opened[7]["staffRoster"] == [0, 0], \
+        "completed staff identities were discarded instead of being reusable"
 
 
 def test_saved_players_are_not_automatic_neighbors(tmp):
@@ -359,6 +362,11 @@ def test_pvp_history_limits_and_casualties_persist(tmp):
     )
     sessions.load_saved_villages()
     _set_now(_local(12, 15))
+    attacker_town = sessions.session(UID)["maps"][0]
+    attacker_before = sum(1 for item in attacker_town["items"] if item[0] == 512)
+    if attacker_before == 0:
+        attacker_town["items"].append([512, 59, 59, 0, 0, 0, [], {}])
+        attacker_before = 1
 
     command.command(UID, _batch([
         {"cmd": Constant.CMD_ATTACK_PLAYER, "args": [defender_id]},
@@ -370,9 +378,10 @@ def test_pvp_history_limits_and_casualties_persist(tmp):
             },
             "resources": {"g": 10, "x": 2},
             "resources_victim": {"g": 0},
-            "attacker_units": [],
+            "attacker_units": [[512, attacker_before, 1, 0]],
             "victim_units": [[516, 1, 1, 0]],
             "win": 1,
+            "voluntary_end": 1,
             "honor": 3,
         })]},
     ]))
@@ -383,6 +392,11 @@ def test_pvp_history_limits_and_casualties_persist(tmp):
     assert attacker_state["attacksSent"][-1].get("description")
     assert defender_state["attacksLost"] == 1
     assert defender_state["attacksReceived"][-1]["viewPending"] == 1
+    assert sum(
+        1 for item in sessions.session(UID)["maps"][0]["items"]
+        if item[0] == 512
+    ) == attacker_before - 1, \
+        "withdrawing from PvP restored an attacker casualty"
     assert not any(
         item[0] == 516 and item[1:3] == [60, 60]
         for item in sessions.session(defender_id)["maps"][0]["items"]
@@ -432,7 +446,318 @@ def test_market_staffing_trade_and_allies_choice_persist(tmp):
         "Allies Market resource choice was lost on refresh"
 
 
-def test_hire_friends_staffs_social_buildings_and_persists(tmp):
+def test_zero_staff_social_building_stays_locked_on_browser_reload(tmp):
+    """A live browser reload must perform the same repair as server startup.
+
+    Missing attrs used to be interpreted by the client as an already-open
+    building.  Buying one worker happened to create attrs.si, which explains
+    why only the completely empty staffing page could be bypassed.
+    """
+    save = sessions.session(UID)
+    market_id, x, y = Constant.ID_BUILDING_MARKET_1, 64, 64
+    save["maps"][0]["items"].append([market_id, x, y, 0, 0, 0])
+
+    get_player_info.get_player_info(UID, 0)
+
+    market = _item(save, market_id, x, y)
+    assert len(market) >= 8
+    assert market[7]["si"] == [], \
+        "zero-staff Market became operational after browser reload"
+    persisted = json.load(open(os.path.join(
+        tmp, f"{UID}.save.json"
+    )))
+    persisted_market = _item(persisted, market_id, x, y)
+    assert persisted_market[7]["si"] == [], \
+        "browser-load staffing repair was not persisted"
+
+
+def test_reload_bootstrap_cannot_create_a_phantom_social_worker(tmp):
+    save = sessions.session(UID)
+    market_id, x, y = Constant.ID_BUILDING_MARKET_1, 64, 64
+    save["maps"][0]["items"].append([
+        market_id, x, y, 0, 0, 0, [], {"si": []},
+    ])
+    cash_before = save["playerInfo"]["cash"]
+
+    # countAllBuildings() used this fifth argument during map load. It was
+    # never a click on "fill with 2 cash" and must not mutate either slot or
+    # currency.
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_BUY_SI_HELP,
+         "args": [x, y, 0, market_id, 1]},
+    ]))
+    market = _item(_reload(), market_id, x, y)
+    assert market[7]["si"] == [], \
+        "browser reload silently filled the first Market role"
+    assert sessions.session(UID)["playerInfo"]["cash"] == cash_before, \
+        "hidden reload staffing command charged cash"
+
+
+def test_scripted_zeppelin_unlock_does_not_charge_worker_cash(tmp):
+    save = sessions.session(UID)
+    tower_id, x, y = Constant.ID_BUILDING_ZEPPELIN_TOWER, 59, 59
+    save["maps"][0]["items"].append([
+        tower_id, x, y, 0, 0, 0, [], {"si": []},
+    ])
+    cash_before = save["playerInfo"]["cash"]
+
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_BUY_SI_HELP,
+         "args": [x, y, 0, tower_id, 1]},
+    ]))
+    tower = _item(_reload(), tower_id, x, y)
+    assert tower[7]["si"] == [0], \
+        "scripted Zeppelin progression worker was rejected"
+    assert sessions.session(UID)["playerInfo"]["cash"] == cash_before, \
+        "automatic Zeppelin progression silently charged worker cash"
+
+
+def test_legacy_auto_opened_harbour_returns_to_manual_staffing(tmp):
+    save = sessions.session(UID)
+    town = save["maps"][0]
+    harbour_id, x, y = Constant.ID_BUILDING_DOCK, 65, 42
+    town.pop("harbourManualStaffingVersion", None)
+    town["items"].append([
+        harbour_id, x, y, 0, 0, 0, [],
+        {
+            "si": None,
+            "staffRoles": ["Captain", "Cabin boy", "Helmsman"],
+            "staffRoster": [0, 0, 0],
+        },
+    ])
+    cash_before = save["playerInfo"]["cash"]
+
+    get_player_info.get_player_info(UID, 0)
+    harbour = _item(save, harbour_id, x, y)
+    assert harbour[7]["si"] == [], \
+        "the old Dock-operative reload state remained fully staffed"
+    assert harbour[7]["staffRoles"] == []
+    assert harbour[7]["staffRoster"] == []
+
+    # A cached pre-fix client may still submit the old hidden fifth argument.
+    # The server must reject it instead of silently reopening the Harbor.
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_BUY_SI_HELP,
+         "args": [x, y, 0, harbour_id, 1]},
+    ]))
+    harbour = _item(_reload(), harbour_id, x, y)
+    assert harbour[7]["si"] == []
+    assert sessions.session(UID)["playerInfo"]["cash"] == cash_before
+
+    # A real click has four arguments and fills exactly one paid role.
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_BUY_SI_HELP,
+         "args": [x, y, 0, harbour_id]},
+    ]))
+    harbour = _item(_reload(), harbour_id, x, y)
+    assert harbour[7]["si"] == [0]
+    assert sessions.session(UID)["playerInfo"]["cash"] == cash_before - 3
+
+
+def test_unstaffed_social_building_cannot_upgrade_past_roles(tmp):
+    save = sessions.session(UID)
+    market_id, upgraded_id = Constant.ID_BUILDING_MARKET_1, 188
+    x, y = 64, 64
+    town = save["maps"][0]
+    town["wood"] = 100000
+    town["coins"] = 100000
+    town["items"].append([
+        market_id, x, y, 0, 0, 0, [], {"si": []},
+    ])
+
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_SELL,
+         "args": [x, y, market_id, 0, 0,
+                  Constant.SELL_REASON_UPGRADE]},
+        {"cmd": Constant.CMD_BUY,
+         "args": [upgraded_id, x, y, 0, 0, 0, 1, 0]},
+    ]))
+    reloaded = _reload()
+    assert any(item[0] == market_id and item[1:3] == [x, y]
+               for item in reloaded["maps"][0]["items"])
+    assert not any(item[0] == upgraded_id and item[1:3] == [x, y]
+                   for item in reloaded["maps"][0]["items"]), \
+        "upgrade replacement bypassed the Market's three staff roles"
+
+    # A genuinely opened Market is still allowed to upgrade.
+    market = _item(reloaded, market_id, x, y)
+    market[7]["si"] = None
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_SELL,
+         "args": [x, y, market_id, 0, 0,
+                  Constant.SELL_REASON_UPGRADE]},
+        {"cmd": Constant.CMD_BUY,
+         "args": [upgraded_id, x, y, 0, 0, 0, 1, 0]},
+    ]))
+    assert any(item[0] == upgraded_id and item[1:3] == [x, y]
+               for item in _reload()["maps"][0]["items"]), \
+        "fully staffed Market could not perform a legitimate upgrade"
+
+
+def test_staff_carries_by_role_and_only_new_upgrade_jobs_are_vacant(tmp):
+    save = sessions.session(UID)
+    town = save["maps"][0]
+    town["stone"] = town["wood"] = town["coins"] = 100000
+    x, y = 61, 61
+    town["items"].append([
+        16, x, y, 0, 0, 0, [],
+        {
+            "si": None,
+            "staffRoles": ["Geologist", "Miner"],
+            "staffRoster": ["friend-geologist", "friend-miner"],
+        },
+    ])
+
+    # Stone I -> II has no staffing popup. Its roster remains attached so
+    # the later social tier can inherit the matching jobs.
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_SELL,
+         "args": [x, y, 16, 0, 0, Constant.SELL_REASON_UPGRADE]},
+        {"cmd": Constant.CMD_BUY,
+         "args": [17, x, y, 0, 0, 0, 1, "b"]},
+    ]))
+    level_two = _item(_reload(), 17, x, y)
+    assert level_two[7]["staffRoles"] == ["Geologist", "Miner"]
+    assert level_two[7]["staffRoster"] == [
+        "friend-geologist", "friend-miner",
+    ]
+
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_SELL,
+         "args": [x, y, 17, 0, 0, Constant.SELL_REASON_UPGRADE]},
+        {"cmd": Constant.CMD_BUY,
+         "args": [18, x, y, 0, 0, 0, 1, "b"]},
+    ]))
+    level_three = _item(_reload(), 18, x, y)
+    assert level_three[7]["si"] == [
+        "friend-geologist", "friend-miner",
+    ], "Stone Mine III did not preserve its two matching level-I workers"
+    assert level_three[7]["staffRoles"] == ["Geologist", "Miner"]
+
+    for _ in range(3):
+        command.command(UID, _batch([
+            {"cmd": Constant.CMD_BUY_SI_HELP, "args": [x, y, 0, 18]},
+        ]))
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_FINISH_SI, "args": [x, y, 0, 18]},
+    ]))
+    opened = _item(_reload(), 18, x, y)
+    assert opened[7]["si"] is None
+    assert opened[7]["staffRoles"] == [
+        "Geologist", "Miner", "Cartographer", "Engineer", "Supervisor",
+    ]
+    assert opened[7]["staffRoster"][:2] == [
+        "friend-geologist", "friend-miner",
+    ]
+
+
+def test_same_role_workshop_upgrade_does_not_rehire_staff(tmp):
+    save = sessions.session(UID)
+    town = save["maps"][0]
+    town["stone"] = town["wood"] = town["coins"] = 100000
+    x, y = 58, 58
+    roles = [
+        "Engineer", "Assistant", "Apprentice", "Bullet Crafter",
+        "Powder Mixer", "Transporter", "Carpenter", "Alchemist",
+    ]
+    town["items"].append([
+        49, x, y, 0, 0, 0, [],
+        {"si": None, "staffRoles": roles, "staffRoster": [0] * len(roles)},
+    ])
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_SELL,
+         "args": [x, y, 49, 0, 0, Constant.SELL_REASON_UPGRADE]},
+        {"cmd": Constant.CMD_BUY,
+         "args": [50, x, y, 0, 0, 0, 1, "b"]},
+    ]))
+    upgraded = _item(_reload(), 50, x, y)
+    assert upgraded[7]["si"] is None, \
+        "Workshop III charged for Workshop II's identical eight jobs again"
+    assert upgraded[7]["staffRoles"] == roles
+
+
+def test_unstaffed_cathedral_cannot_train_monks(tmp):
+    save = sessions.session(UID)
+    town = save["maps"][0]
+    cathedral_id, monk_id = Constant.ID_BUILDING_CATHEDRAL, 569
+    x, y = 60, 60
+    spawn_x, spawn_y = 62, 60
+    town["coins"] = town["food"] = 100000
+    save["playerInfo"]["cash"] = 100
+    town["items"].append([
+        cathedral_id, x, y, 0, 0, 0, [], {"si": []},
+    ])
+    before = {
+        "coins": town["coins"],
+        "food": town["food"],
+        "cash": save["playerInfo"]["cash"],
+    }
+
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_BUY,
+         "args": [
+             monk_id, spawn_x, spawn_y, 0, 0, 0, 1, "u",
+             x, y, cathedral_id,
+         ]},
+        {"cmd": Constant.CMD_BUY_UNIT_WITH_CASH,
+         "args": [
+             monk_id, spawn_x, spawn_y, 0, 0, x, y, cathedral_id,
+         ]},
+    ]))
+    reloaded = _reload()
+    town = reloaded["maps"][0]
+    assert not any(
+        item[0] == monk_id and item[1:3] == [spawn_x, spawn_y]
+        for item in town["items"]
+    ), "Cathedral trained a monk before all twelve staff roles were filled"
+    assert town["coins"] == before["coins"]
+    assert town["food"] == before["food"]
+    assert reloaded["playerInfo"]["cash"] == before["cash"]
+
+    cathedral = _item(reloaded, cathedral_id, x, y)
+    cathedral[7]["si"] = [0] * 12
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_FINISH_SI,
+         "args": [x, y, 0, cathedral_id]},
+        {"cmd": Constant.CMD_BUY,
+         "args": [
+             monk_id, spawn_x, spawn_y, 0, 0, 0, 1, "u",
+             x, y, cathedral_id,
+         ]},
+    ]))
+    assert any(
+        item[0] == monk_id and item[1:3] == [spawn_x, spawn_y]
+        for item in _reload()["maps"][0]["items"]
+    ), "a fully staffed Cathedral could not train its monk"
+
+
+def test_unstaffed_producer_rejects_worker_and_activation(tmp):
+    save = sessions.session(UID)
+    town = save["maps"][0]
+    mine_id, villager_id = 16, 500
+    x, y = 62, 62
+    ux, uy = 60, 62
+    town["items"].extend([
+        [mine_id, x, y, 0, 0, 0, [], {"si": []}],
+        [villager_id, ux, uy, 0, 0, 0],
+    ])
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_PUSH_UNIT,
+         "args": [ux, uy, villager_id, x, y, 0]},
+        {"cmd": Constant.CMD_ACTIVATE,
+         "args": [x, y, 0, mine_id, 2]},
+    ]))
+    reloaded = _reload()
+    mine = _item(reloaded, mine_id, x, y)
+    assert mine[6] == [], "unstaffed Stone Mine accepted a worker"
+    assert "cp" not in mine[7], "unstaffed Stone Mine started production"
+    assert any(
+        item[0] == villager_id and item[1:3] == [ux, uy]
+        for item in reloaded["maps"][0]["items"]
+    ), "rejected worker assignment deleted the villager"
+
+
+def test_social_staff_requires_target_acceptance_and_persists(tmp):
     friend_id = "test-gameplay-friend-0002"
     _add_saved_player(tmp, friend_id, "Helper Empire")
     sessions.load_saved_villages()
@@ -461,9 +786,20 @@ def test_hire_friends_staffs_social_buildings_and_persists(tmp):
     reloaded = _reload()
     recruitment = _item(reloaded, recruitment_id, rx, ry)
     table = _item(reloaded, table_id, tx, ty)
+    assert recruitment[7]["si"] == [], "requester filled a role without acceptance"
+    assert table[7]["si"] == [], "Round Table request auto-accepted"
+    assert table[7]["sif"] == {friend_id: True}
+    pending = command.incoming_social_staff_requests(friend_id)
+    assert len(pending) == 2, f"staffing requests were not queued: {pending}"
+    assert all(command.resolve_social_staff_request(
+        friend_id, request["key"], True
+    ) for request in pending)
+
+    reloaded = _reload()
+    recruitment = _item(reloaded, recruitment_id, rx, ry)
+    table = _item(reloaded, table_id, tx, ty)
     assert recruitment[7]["si"] == [friend_id]
     assert table[7]["si"] == [friend_id]
-    assert table[7]["sif"] == {friend_id: True}
     assert friend_id in {
         str(entry["uid"]) for entry in sessions.fb_friends_str(UID)
     }, "linked player was missing from the in-game hire-friends list"
@@ -534,26 +870,472 @@ def test_live_enemy_camp_survives_reload_without_respawning(tmp):
         "clearing the camp did not start the real cooldown"
 
 
-def test_natural_resources_initialize_once_and_do_not_regrow(tmp):
+def test_natural_resources_use_persisted_random_respawns(tmp):
     stone = Constant.ID_BUILDING_STONE_1
-    regen = Constant.ID_BUILDING_REGEN_STONE
+    gold = Constant.ID_BUILDING_GOLD_1
+    tree = Constant.ID_BUILDING_TREE_1
+    stone_ids = {
+        Constant.ID_BUILDING_STONE_1,
+        Constant.ID_BUILDING_STONE_2,
+        Constant.ID_BUILDING_STONE_3,
+        Constant.ID_BUILDING_STONE_4,
+    }
+    gold_ids = {
+        Constant.ID_BUILDING_GOLD_1,
+        Constant.ID_BUILDING_GOLD_2,
+        Constant.ID_BUILDING_GOLD_3,
+        Constant.ID_BUILDING_GOLD_4,
+    }
+    _set_now(_local(12, 10))
     command.command(UID, _batch([
         {"cmd": Constant.CMD_BUY,
          "args": [stone, 72, 72, 0, 0, 1, 1, 0]},
+        {"cmd": Constant.CMD_BUY,
+         "args": [gold, 73, 72, 0, 0, 1, 1, 0]},
+        {"cmd": Constant.CMD_BUY,
+         "args": [tree, 74, 74, 0, 0, 1, 1, 0]},
     ]))
     town = sessions.session(UID)["maps"][0]
     assert town["naturalResourcesInitialized"] == 1
 
+    # A mature map reload may try to run MapInitializer's free population
+    # buys again. The server rejects that batch instead of instantly replacing
+    # harvested nodes.
     command.command(UID, _batch([
         {"cmd": Constant.CMD_BUY,
-         "args": [stone, 74, 74, 0, 0, 1, 1, 0]},
-        {"cmd": Constant.CMD_BUY,
-         "args": [regen, 72, 72, 0, 0, 1, 1, 0]},
+         "args": [stone, 76, 76, 0, 0, 1, 1, 0]},
     ]))
-    assert not any(item[0] == stone and item[1:3] == [74, 74]
-                   for item in town["items"]), "wild stone respawned on reload"
-    assert not any(item[0] == regen for item in town["items"]), \
-        "depleted stone installed a three-hour regrowth blocker"
+    assert not any(item[0] == stone and item[1:3] == [76, 76]
+                   for item in town["items"]), \
+        "browser reload bypassed the natural-resource cooldown"
+
+    # A cached older client may still request same-tile IDs 80/81. The server
+    # rejects those placeholders because each harvest already created exactly
+    # one persisted random-respawn timer.
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_SELL,
+         "args": [72, 72, stone, 0, 0, Constant.SELL_REASON_HARVEST]},
+        {"cmd": Constant.CMD_BUY,
+         "args": [
+             Constant.ID_BUILDING_REGEN_STONE,
+             72, 72, 0, 0, 0, 1, 0,
+         ]},
+        {"cmd": Constant.CMD_SELL,
+         "args": [73, 72, gold, 0, 0, Constant.SELL_REASON_HARVEST]},
+        {"cmd": Constant.CMD_BUY,
+         "args": [
+             Constant.ID_BUILDING_REGEN_GOLD,
+             73, 72, 0, 0, 0, 1, 0,
+         ]},
+    ]))
+    assert not any(
+        item[0] in (
+            Constant.ID_BUILDING_REGEN_GOLD,
+            Constant.ID_BUILDING_REGEN_STONE,
+        )
+        for item in town["items"]
+    ), "same-tile mineral placeholder was accepted"
+    assert {
+        entry["family"] for entry in town["pendingMineralRespawns"]
+    } == {"gold", "stone"}
+
+    reloaded = _reload()
+    assert len(reloaded["maps"][0]["pendingMineralRespawns"]) == 2, \
+        "browser/server reload lost a mineral cooldown"
+    town = reloaded["maps"][0]
+
+    # Trees and minerals share the same three-hour persistence rule.
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_SELL,
+         "args": [74, 74, tree, 0, 0, Constant.SELL_REASON_HARVEST]},
+    ]))
+    assert not any(item[0] == tree and item[1:3] == [74, 74]
+                   for item in town["items"])
+    _set_now(_local(12, 12))
+    get_player_info.get_player_info(UID)
+    assert not any(item[0] == tree and item[1:3] == [74, 74]
+                   for item in town["items"]), "tree respawned before 3h"
+    assert not any(item[0] in stone_ids | gold_ids
+                   for item in town["items"]), \
+        "gold/stone respawned before their three-hour timer"
+
+    _set_now(_local(12, 13))
+    get_player_info.get_player_info(UID)
+    assert any(item[0] == tree and item[1:3] == [74, 74]
+               for item in town["items"]), "tree did not regrow after 3h"
+    respawned_stone = next(
+        item for item in town["items"] if item[0] in stone_ids
+    )
+    respawned_gold = next(
+        item for item in town["items"] if item[0] in gold_ids
+    )
+    assert respawned_stone[1:3] != [72, 72], \
+        "stone regenerated on its depleted tile"
+    assert respawned_gold[1:3] != [73, 72], \
+        "gold regenerated on its depleted tile"
+    for item in (respawned_stone, respawned_gold):
+        big_tile = (int(item[2]) // 20) * 5 + int(item[1]) // 20 + 1
+        assert big_tile not in town["expansions"], \
+            "natural mineral respawned inside owned/buildable land"
+    assert town["pendingMineralRespawns"] == []
+
+    reloaded = _reload()
+    assert sum(
+        1 for item in reloaded["maps"][0]["items"]
+        if item[0] == tree and item[1:3] == [74, 74]
+    ) == 1, "tree cooldown duplicated the respawn after reload"
+    assert sum(
+        1 for item in reloaded["maps"][0]["items"]
+        if item[0] in stone_ids
+    ) == 1, "stone cooldown duplicated its random respawn after reload"
+    assert sum(
+        1 for item in reloaded["maps"][0]["items"]
+        if item[0] in gold_ids
+    ) == 1, "gold cooldown duplicated its random respawn after reload"
+
+
+def test_legacy_mineral_placeholders_migrate_without_resetting_timer(tmp):
+    town = sessions.session(UID)["maps"][0]
+    town["naturalResourcesInitialized"] = 1
+    town["naturalResourceRecoveryVersion"] = 1
+    town["items"].append([
+        Constant.ID_BUILDING_REGEN_STONE,
+        70, 71, 0, _local(12, 10), 0,
+    ])
+
+    _set_now(_local(12, 12))
+    get_player_info.get_player_info(UID)
+    assert not any(
+        item[0] == Constant.ID_BUILDING_REGEN_STONE
+        for item in town["items"]
+    ), "legacy same-tile placeholder survived migration"
+    assert town["pendingMineralRespawns"] == [{
+        "family": "stone",
+        "source_x": 70,
+        "source_y": 71,
+        "at": _local(12, 13),
+    }]
+    assert not any(
+        item[0] in {
+            Constant.ID_BUILDING_STONE_1,
+            Constant.ID_BUILDING_STONE_2,
+            Constant.ID_BUILDING_STONE_3,
+            Constant.ID_BUILDING_STONE_4,
+        }
+        for item in town["items"]
+    ), "legacy cooldown was completed early during migration"
+
+    _set_now(_local(12, 13))
+    get_player_info.get_player_info(UID)
+    replacement = next(
+        item for item in town["items"]
+        if item[0] in {
+            Constant.ID_BUILDING_STONE_1,
+            Constant.ID_BUILDING_STONE_2,
+            Constant.ID_BUILDING_STONE_3,
+            Constant.ID_BUILDING_STONE_4,
+        }
+    )
+    assert replacement[1:3] != [70, 71]
+    assert town["pendingMineralRespawns"] == []
+
+
+def test_random_mineral_respawn_respects_stock_family_cap(tmp):
+    town = sessions.session(UID)["maps"][0]
+    stone_ids = (
+        Constant.ID_BUILDING_STONE_1,
+        Constant.ID_BUILDING_STONE_2,
+        Constant.ID_BUILDING_STONE_3,
+        Constant.ID_BUILDING_STONE_4,
+    )
+    for index in range(21):
+        town["items"].append([
+            stone_ids[index % len(stone_ids)],
+            index,
+            80,
+            0,
+            _local(12, 10),
+            0,
+        ])
+    town["pendingMineralRespawns"] = [{
+        "family": "stone",
+        "source_x": 72,
+        "source_y": 72,
+        "at": _local(12, 11),
+    }]
+
+    _set_now(_local(12, 12))
+    get_player_info.get_player_info(UID)
+    assert sum(
+        1 for item in town["items"] if item[0] in stone_ids
+    ) == 21, "random respawn exceeded the original stone population cap"
+    assert town["pendingMineralRespawns"] == []
+
+
+def test_legacy_empty_map_gets_one_stock_resource_repopulation(tmp):
+    save = sessions.session(UID)
+    town = save["maps"][0]
+    natural_ids = {
+        Constant.ID_BUILDING_TREE_1,
+        Constant.ID_BUILDING_TREE_2,
+        Constant.ID_BUILDING_TREE_3,
+        Constant.ID_BUILDING_STONE_1,
+        Constant.ID_BUILDING_STONE_2,
+        Constant.ID_BUILDING_STONE_3,
+        Constant.ID_BUILDING_STONE_4,
+        Constant.ID_BUILDING_GOLD_1,
+        Constant.ID_BUILDING_GOLD_2,
+        Constant.ID_BUILDING_GOLD_3,
+        Constant.ID_BUILDING_GOLD_4,
+        Constant.ID_BUILDING_REGEN_GOLD,
+        Constant.ID_BUILDING_REGEN_STONE,
+    }
+    town["items"] = [
+        item for item in town["items"]
+        if not item or int(item[0]) not in natural_ids
+    ]
+    town["pendingTreeRespawns"] = []
+    town["naturalResourcesInitialized"] = 1
+    town.pop("naturalResourceRecoveryVersion", None)
+
+    response = get_player_info.get_player_info(UID, 0)
+    marker = str(Constant.SUBCATFUNC_RESOURCE_REGEN)
+    assert town["naturalResourcesInitialized"] == 0
+    assert marker not in response["privateState"]["arrayAnimals"], \
+        "legacy empty map was not reopened for stock resource population"
+
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_BUY,
+         "args": [Constant.ID_BUILDING_GOLD_1, 71, 71, 0, 0, 1, 1, 0]},
+        {"cmd": Constant.CMD_BUY,
+         "args": [Constant.ID_BUILDING_STONE_1, 72, 72, 0, 0, 1, 1, 0]},
+        {"cmd": Constant.CMD_BUY,
+         "args": [Constant.ID_BUILDING_TREE_1, 73, 73, 0, 0, 1, 1, 0]},
+    ]))
+    reloaded = _reload()
+    town = reloaded["maps"][0]
+    assert town["naturalResourcesInitialized"] == 1
+    assert all(any(item[0] == item_id for item in town["items"])
+               for item_id in (
+                   Constant.ID_BUILDING_GOLD_1,
+                   Constant.ID_BUILDING_STONE_1,
+                   Constant.ID_BUILDING_TREE_1,
+               )), "one-time recovery did not persist the new resources"
+
+    # Once recovered, a later reload cannot invoke population as an instant
+    # respawn shortcut.
+    get_player_info.get_player_info(UID, 0)
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_BUY,
+         "args": [Constant.ID_BUILDING_GOLD_1, 74, 74, 0, 0, 1, 1, 0]},
+    ]))
+    assert not any(item[0] == Constant.ID_BUILDING_GOLD_1
+                   and item[1:3] == [74, 74]
+                   for item in sessions.session(UID)["maps"][0]["items"]), \
+        "legacy recovery remained enabled after its one allowed population"
+
+
+def test_ship_quest_requires_a_fully_staffed_harbour(tmp):
+    town = sessions.session(UID)["maps"][0]
+    quest_id = str(get_game_config()["globals"]["ISLE_ORDER"][0])
+    harbour = [
+        Constant.ID_BUILDING_DOCK,
+        68, 68, 0, _local(12, 10), 0, [], {"si": []},
+    ]
+    town["items"].append(harbour)
+
+    assert command.do_command(
+        UID, Constant.CMD_START_QUEST, [quest_id, 0]
+    ) is False, "Ship Land opened while the Harbor was unstaffed"
+
+    harbour[7]["si"] = None
+    assert command.do_command(
+        UID, Constant.CMD_START_QUEST, [quest_id, 0]
+    ) is not False, "a completed Harbor did not unlock Ship Land"
+
+
+def test_producer_limit_applies_across_upgrade_family(tmp):
+    town = sessions.session(UID)["maps"][0]
+    town["coins"] = 100000
+    # Owning Gold Mine II must prevent placing Gold Mine I beside it.
+    town["items"].append([14, 70, 70, 0, 0, 0, [], {"si": None}])
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_BUY,
+         "args": [13, 72, 72, 0, 0, 0, 1, 0]},
+    ]))
+    assert not any(item[0] == 13 and item[1:3] == [72, 72]
+                   for item in town["items"]), \
+        "a lower mine tier bypassed the one-per-family limit"
+
+    # A real upgrade removes the old tier before placing the new one.
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_SELL,
+         "args": [70, 70, 14, 0, 0, "UPGR"]},
+        {"cmd": Constant.CMD_BUY,
+         "args": [15, 70, 70, 0, 0, 0, 1, 0]},
+    ]))
+    assert any(item[0] == 15 and item[1:3] == [70, 70]
+               for item in _reload()["maps"][0]["items"]), \
+        "the family limit blocked a legitimate upgrade"
+
+
+def test_weather_spell_and_mana_state_survive_reload(tmp):
+    save = sessions.session(UID)
+    town = save["maps"][0]
+    town["level"] = 50
+    town["coins"] = 100000
+    save["playerInfo"]["cash"] = 100
+    state = save["privateState"]
+    state["mana"] = 0
+    state["magics"] = {}
+    state["unlockedSkins"] = {}
+
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_UNLOCK_SKIN, "args": ["2"]},
+        {"cmd": Constant.CMD_SET_SKIN, "args": [0, "2"]},
+        {"cmd": Constant.CMD_BUY_MAGIC, "args": [2, 0, 0]},
+        {"cmd": Constant.CMD_USE_MAGIC, "args": [2]},
+        {"cmd": Constant.CMD_BUY_MANA, "args": [0, 0]},
+    ]))
+    reloaded = _reload()
+    state = reloaded["privateState"]
+    assert reloaded["maps"][0]["skin"] == 2
+    assert state["unlockedSkins"] == {"2": "true"}
+    assert state["magics"]["2"] == 1, "spell use count disappeared"
+    # Learning Fire Havoc grants its five mana, casting spends five, and the
+    # explicit purchase adds five.
+    assert state["mana"] == 5
+    cash_after = reloaded["playerInfo"]["cash"]
+    coins_after = reloaded["maps"][0]["coins"]
+
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_UNLOCK_SKIN, "args": ["2"]},
+        {"cmd": Constant.CMD_BUY_MAGIC, "args": [2, 0, 0]},
+    ]))
+    assert sessions.session(UID)["playerInfo"]["cash"] == cash_after, \
+        "reselecting an unlocked weather theme charged cash again"
+    assert sessions.session(UID)["maps"][0]["coins"] == coins_after, \
+        "buying an already learned spell charged gold again"
+
+
+def test_building_damage_and_repair_survive_reload(tmp):
+    item_id, x, y = 1, 74, 74  # House I
+    town = sessions.session(UID)["maps"][0]
+    town["items"].append([item_id, x, y, 0, 0, 0, [], {}])
+    maximum = int(get_attribute_from_item_id(item_id, "life"))
+    damaged = maximum // 2
+    command.command(UID, _batch([
+        {"cmd": "set_item_health", "args": [x, y, 0, item_id, damaged]},
+    ]))
+    item = _item(_reload(), item_id, x, y)
+    assert item[7]["hp"] == damaged, "building healed on browser/server reload"
+
+    command.command(UID, _batch([
+        {"cmd": "set_item_health", "args": [x, y, 0, item_id, maximum]},
+    ]))
+    assert "hp" not in _item(_reload(), item_id, x, y)[7], \
+        "fully repaired building remained marked as damaged"
+
+
+def test_home_unit_damage_and_healing_survive_reload(tmp):
+    item_id, x, y = 512, 76, 76  # Light Knight
+    town = sessions.session(UID)["maps"][0]
+    town["items"].append([item_id, x, y, 0, 0, 0, [], {}])
+    maximum = int(get_attribute_from_item_id(item_id, "life"))
+    damaged = maximum // 2
+    command.command(UID, _batch([
+        {"cmd": "set_item_health", "args": [x, y, 0, item_id, damaged]},
+    ]))
+    assert _item(_reload(), item_id, x, y)[7]["hp"] == damaged, \
+        "wounded home unit healed on browser/server reload"
+
+    command.command(UID, _batch([
+        {"cmd": "set_item_health", "args": [x, y, 0, item_id, maximum]},
+    ]))
+    assert "hp" not in _item(_reload(), item_id, x, y)[7], \
+        "fully healed home unit remained marked as damaged"
+
+
+def test_stored_building_uses_owned_storage_not_gifts(tmp):
+    item_id, x, y = 1, 78, 78  # House I
+    save = sessions.session(UID)
+    town = save["maps"][0]
+    town["store"] = {}
+    save["privateState"]["gifts"] = []
+    town["items"].append([item_id, x, y, 0, 0, 0, [], {}])
+
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_STORE_ITEM, "args": [x, y, 0, item_id]},
+    ]))
+    reloaded = _reload()
+    assert reloaded["maps"][0]["store"] == {str(item_id): 1}
+    assert reloaded["privateState"]["gifts"] == [], \
+        "owned building became a gift and would re-award placement XP"
+
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_PLACE_STORED_ITEM,
+         "args": [item_id, x + 1, y, 0, 0]},
+    ]))
+    reloaded = _reload()
+    assert reloaded["maps"][0]["store"] == {}
+    assert _item(reloaded, item_id, x + 1, y) is not None
+
+
+def test_quest_rewards_pay_once_and_progress_by_order_index(tmp):
+    save = sessions.session(UID)
+    town = save["maps"][0]
+    state = save["privateState"]
+    town["coins"] = town["xp"] = 0
+    state["unlockedQuestIndex"] = 0
+    state["questsRank"] = {}
+    state["gifts"] = []
+
+    def finish(qid, win=1, difficulty=1):
+        command.command(UID, _batch([{
+            "cmd": Constant.CMD_END_QUEST,
+            "args": [json.dumps({
+                "map": 0,
+                "resources": {"g": 100, "x": 10},
+                "units": [],
+                "win": win,
+                "duration": 60,
+                "voluntary_end": 0,
+                "quest_id": qid,
+                "item_rewards": {"537": 1},
+                "difficulty": difficulty,
+            })],
+        }]))
+
+    finish("100000006")
+    reloaded = _reload()
+    assert reloaded["privateState"]["unlockedQuestIndex"] == 1, \
+        "quest id was stored as the unlocked quest index"
+    assert reloaded["maps"][0]["coins"] == 100
+    assert reloaded["maps"][0]["xp"] == 10
+    assert reloaded["privateState"]["gifts"][537] == 1
+
+    finish("100000006", difficulty=2)
+    replayed = _reload()
+    assert replayed["maps"][0]["coins"] == 100
+    assert replayed["maps"][0]["xp"] == 10
+    assert replayed["privateState"]["gifts"][537] == 1, \
+        "replaying a completed quest paid its unit reward again"
+    assert replayed["privateState"]["questsRank"]["100000006"] == 2, \
+        "a replay failed to retain the improved star rank"
+
+    finish("100000007", win=0)
+    assert sessions.session(UID)["privateState"]["unlockedQuestIndex"] == 1
+    finish("100000007")
+    assert _reload()["privateState"]["unlockedQuestIndex"] == 2
+
+
+def test_invalid_quest_id_progress_is_repaired_on_load(tmp):
+    state = sessions.session(UID)["privateState"]
+    state["questsRank"] = {"100000006": 1}
+    state["unlockedQuestIndex"] = 100000007
+    sessions.save_session(UID)
+    assert _reload()["privateState"]["unlockedQuestIndex"] == 1, \
+        "legacy quest-id progress still unlocked the complete campaign"
 
 
 def test_destroyed_wall_is_removed_and_stays_removed(tmp):
@@ -702,13 +1484,12 @@ def test_storing_unit_warehouse_moves_units_to_general_storage(tmp):
     ]))
     reloaded = _reload()
     town = reloaded["maps"][0]
-    gifts = reloaded["privateState"]["gifts"]
     assert town["warehousedUnits"] == {}
     assert town["warehouseAditionalCapacitySingle"] == 3, \
         "moving the Warehouse incorrectly erased purchased capacity"
-    assert gifts[unit_id] == 2, \
+    assert town["store"][str(unit_id)] == 2, \
         "Warehouse contents were lost instead of moved to Gifts/Storage"
-    assert gifts[warehouse_id] == 1
+    assert town["store"][str(warehouse_id)] == 1
 
 
 TESTS = [
@@ -723,10 +1504,30 @@ TESTS = [
     test_quest_casualties_and_rescued_units_persist,
     test_pvp_history_limits_and_casualties_persist,
     test_market_staffing_trade_and_allies_choice_persist,
-    test_hire_friends_staffs_social_buildings_and_persists,
+    test_zero_staff_social_building_stays_locked_on_browser_reload,
+    test_reload_bootstrap_cannot_create_a_phantom_social_worker,
+    test_scripted_zeppelin_unlock_does_not_charge_worker_cash,
+    test_legacy_auto_opened_harbour_returns_to_manual_staffing,
+    test_unstaffed_social_building_cannot_upgrade_past_roles,
+    test_staff_carries_by_role_and_only_new_upgrade_jobs_are_vacant,
+    test_same_role_workshop_upgrade_does_not_rehire_staff,
+    test_unstaffed_cathedral_cannot_train_monks,
+    test_unstaffed_producer_rejects_worker_and_activation,
+    test_social_staff_requires_target_acceptance_and_persists,
     test_round_table_rejects_fake_players_and_persists_real_rewards,
     test_live_enemy_camp_survives_reload_without_respawning,
-    test_natural_resources_initialize_once_and_do_not_regrow,
+    test_natural_resources_use_persisted_random_respawns,
+    test_legacy_mineral_placeholders_migrate_without_resetting_timer,
+    test_random_mineral_respawn_respects_stock_family_cap,
+    test_legacy_empty_map_gets_one_stock_resource_repopulation,
+    test_ship_quest_requires_a_fully_staffed_harbour,
+    test_producer_limit_applies_across_upgrade_family,
+    test_weather_spell_and_mana_state_survive_reload,
+    test_building_damage_and_repair_survive_reload,
+    test_home_unit_damage_and_healing_survive_reload,
+    test_stored_building_uses_owned_storage_not_gifts,
+    test_quest_rewards_pay_once_and_progress_by_order_index,
+    test_invalid_quest_id_progress_is_repaired_on_load,
     test_destroyed_wall_is_removed_and_stays_removed,
     test_deployed_unit_sale_refund_and_removal_survive_reload,
     test_collectible_drop_and_collection_shape_survive_reload,

@@ -90,6 +90,45 @@ def test_get_player_info_serves_session_village():
     assert body["playerInfo"]["pid"] == UID, "player info served for the POSTED USERID (spoofable)"
 
 
+def test_ship_map_route_requires_completed_harbour_staffing():
+    from constants import Constant
+    from get_game_config import get_game_config
+
+    save = sessions.session(UID)
+    town = save["maps"][0]
+    town["items"] = [
+        item for item in town["items"]
+        if int(item[0]) not in (
+            Constant.ID_BUILDING_DOCK,
+            Constant.ID_BUILDING_TROLL_HARBOUR,
+        )
+    ]
+    harbour = [
+        Constant.ID_BUILDING_DOCK,
+        68, 68, 0, 1, 0, [], {"si": []},
+    ]
+    town["items"].append(harbour)
+    quest_id = str(get_game_config()["globals"]["ISLE_ORDER"][0])
+    payload = {
+        "USERID": UID,
+        "user": quest_id,
+        "map": "0",
+        "user_key": "k",
+        "language": "en",
+        "client_id": "1",
+    }
+    c = _client(logged_in_as=UID)
+
+    locked = c.post(API + "/get_player_info.php", data=payload)
+    assert locked.status_code == 403
+    assert locked.get_json()["error"] == "harbour_staffing_required"
+
+    harbour[7]["si"] = None
+    opened = c.post(API + "/get_player_info.php", data=payload)
+    assert opened.status_code == 200, \
+        "completed Harbor did not unlock its Ship Land map"
+
+
 def test_player_info_includes_town_list():
     # The client feeds privateState.maps to TownManager.init(); a missing
     # field crashes hasSecondTown() (null.length, AVM2 #1009) when the Town /
@@ -174,23 +213,30 @@ def test_other_saves_are_pvp_opponents_not_automatic_neighbors():
         str(entry["pid"]) == OTHER for entry in player["neighbors"]
     ), "unrelated save leaked into the social neighbour list"
 
+    rival_level = sessions.save_info(OTHER)["level"]
     r = c.get(
         API + "/get_continent_ranking.php",
         query_string={
             "USERID": OTHER, "worldChange": "0", "map": "0",
-            "user_key": "k", "level_id": "7",
+            "user_key": "k", "level_id": str(rival_level),
         },
     )
     assert r.status_code == 200
     body = r.get_json()
     ids = {str(entry["user_id"]) for entry in body["continent"]}
-    assert UID in ids and OTHER in ids, \
-        "real saved villages are missing from PvP matchmaking"
+    assert OTHER in ids and UID not in ids, \
+        "PvP matchmaking omitted the rival or included the current player"
     assert all(
         entry.get("name") and entry.get("race") and entry.get("level")
-        and entry.get("nivel") == 7
+        and entry.get("nivel") == rival_level
         for entry in body["continent"]
     ), f"PvP continent still contains blank/stub players: {body}"
+    other_island = c.get(
+        API + "/get_continent_ranking.php",
+        query_string={"USERID": UID, "user_key": "k", "level_id": "50"},
+    ).get_json()["continent"]
+    assert not any(str(entry["user_id"]) == OTHER for entry in other_island), \
+        "the same opponent was replicated on an unrelated PvP island"
 
 
 def test_friends_page_links_and_unlinks_real_players_reciprocally():
@@ -261,7 +307,10 @@ def test_player_cards_and_visits_use_the_saved_empire_name():
 
     ranking = c.get(
         API + "/get_continent_ranking.php",
-        query_string={"USERID": UID, "user_key": "k", "level_id": "7"},
+        query_string={
+            "USERID": UID, "user_key": "k",
+            "level_id": str(sessions.save_info(OTHER)["level"]),
+        },
     ).get_json()["continent"]
     card = next(entry for entry in ranking if str(entry["user_id"]) == OTHER)
     assert card["name"] == "Rival Kingdom"
@@ -298,6 +347,7 @@ def test_ruffle_page_uses_current_origin_and_supported_autoplay():
     assert "autoplay: true" not in html
     assert 'unmuteOverlay: "hidden"' in html, "Click-to-unmute overlay not suppressed"
     assert 'swftoload: "http://localhost:5099/' in html
+    assert "static/socialempires/flash/x?build=" in html
     assert 'staticUrl: "http://localhost:5099/' in html
     assert 'dynamicUrl: "http://localhost:5099/' in html
 
@@ -319,6 +369,7 @@ def test_nginx_forwarded_origin_needs_no_body_substitution():
     assert r.status_code == 200
     html = r.get_data(as_text=True)
     assert 'swftoload: "https://social-empires.local/' in html
+    assert "static/socialempires/flash/x?build=" in html
     assert 'staticUrl: "https://social-empires.local/' in html
     assert 'dynamicUrl: "https://social-empires.local/' in html
     assert "127.0.0.1:5050" not in html
@@ -386,7 +437,7 @@ def test_public_player_profile_returns_stats():
     assert isinstance(body.get("map_names"), list) and body["map_names"], "map_names missing"
 
 
-def test_ally_popup_api_lists_candidates_and_links_instantly():
+def test_ally_popup_api_sends_request_and_requires_acceptance():
     # The in-game ADD ALLY popup (ruffle.html) uses these JSON routes; the
     # Flash client calls the page's gotoNeighbors hook, so no SWF is involved.
     s = sessions
@@ -406,18 +457,15 @@ def test_ally_popup_api_lists_candidates_and_links_instantly():
 
     r = c.post("/api/add_ally", json={"pid": OTHER})
     assert r.status_code == 200 and r.get_json()["result"] == "ok"
-    assert s.is_friend(UID, OTHER) and s.is_friend(OTHER, UID), \
-        "instant add did not create a reciprocal link"
-    # Persisted on both sides.
-    mine = json.load(open(os.path.join(_TMP, f"{UID}.save.json")))
+    assert not s.is_friend(UID, OTHER), \
+        "client-side add ally bypassed the target player's acceptance"
     other = json.load(open(os.path.join(_TMP, f"{OTHER}.save.json")))
-    assert OTHER in [str(v) for v in mine["privateState"]["neighbors"]]
-    assert UID in [str(v) for v in other["privateState"]["neighbors"]]
+    assert UID in [str(v) for v in other["privateState"]["friendRequests"]]
 
-    # Linked players drop out of the candidate list.
+    # Pending players stay visible but are marked requested.
     body = c.get("/api/ally_candidates").get_json()
-    assert not any(e["userid"] == OTHER for e in body["candidates"]), \
-        "already-linked ally still offered in the popup"
+    pending = next(e for e in body["candidates"] if e["userid"] == OTHER)
+    assert pending["requested"] is True
 
     # Garbage pids are rejected without effect.
     assert c.post("/api/add_ally", json={"pid": "no-such"}).status_code == 404
@@ -477,6 +525,7 @@ TESTS = [
     test_command_ignores_posted_userid,
     test_get_player_info_requires_login,
     test_get_player_info_serves_session_village,
+    test_ship_map_route_requires_completed_harbour_staffing,
     test_player_info_includes_town_list,
     test_switch_to_own_second_town_no_500,
     test_second_town_shows_global_level,
@@ -494,7 +543,7 @@ TESTS = [
     test_mini_fireball_combat_asset_served,
     test_public_player_profile_requires_login,
     test_public_player_profile_returns_stats,
-    test_ally_popup_api_lists_candidates_and_links_instantly,
+    test_ally_popup_api_sends_request_and_requires_acceptance,
     test_friend_request_and_accept_flow,
     test_friend_request_decline,
     test_mutual_request_auto_accepts,

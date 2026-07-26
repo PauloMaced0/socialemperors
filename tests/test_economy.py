@@ -132,6 +132,25 @@ def test_resource_upgrade_chains_are_monotonic(tmp):
         "Troll Mill II is still a free upgrade"
 
 
+def test_upgraded_social_buildings_list_inherited_roles_first(tmp):
+    social = {
+        int(item["id"]): [
+            role.strip()
+            for role in str(item.get("workers", "")).split(",")
+            if role.strip()
+        ]
+        for item in get_game_config()["social_items"]
+    }
+    assert social[18][:2] == ["Geologist", "Miner"], \
+        "Stone Mine III no longer maps inherited level-I staff by role"
+    assert social[18][2:] == ["Cartographer", "Engineer", "Supervisor"], \
+        "Stone Mine III did not leave exactly its three new jobs vacant"
+    assert social[189][:3] == social[23], \
+        "Market III no longer carries Market I's three staff roles"
+    assert social[50] == social[49], \
+        "Workshop III changed the already-filled Workshop II role set"
+
+
 # --- GD-05: daily bonus ---------------------------------------------------
 # The client (PopupNewDaily/Utils.isDailyBonusReady) gates the popup by UTC
 # CALENDAR DAY and displays reward index (bonusNextId - 1) % 5. The server
@@ -310,6 +329,7 @@ TESTS = [
     test_upgrade_charges_next_tier_less_resale_credit,
     test_normal_sale_still_refunds_five_percent,
     test_resource_upgrade_chains_are_monotonic,
+    test_upgraded_social_buildings_list_inherited_roles_first,
     test_daily_bonus_uses_config_not_client,
     test_daily_bonus_cooldown_blocks_second_claim,
     test_daily_bonus_next_day_gives_next_reward,
