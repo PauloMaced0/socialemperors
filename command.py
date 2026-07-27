@@ -1704,6 +1704,38 @@ def do_command(USERID, cmd, args):
             _add_gifts(save, int(raw_id))
         print("Store add items:", item_ids)
 
+    elif cmd == Constant.CMD_END_SURVIVAL:
+        # Survival arena finished: [survival_map_id, time_survived, json({id:count})].
+        # PopupSurvivalResults.givePrizes() already dropped the prizes into the
+        # client's local storage panel via Base.Main.storeItem(ref, false, false)
+        # - which sends NO store command (param3=false) - so this is the ONLY
+        # signal that persists them. Without a handler the prizes were silently
+        # dropped and vanished on the next reload (the arena "gave no reward").
+        # storeItem targets the player's warehouse, so mirror it into the home
+        # town's owned-item storage (map.store).
+        try:
+            prizes = json.loads(args[2]) if len(args) > 2 and args[2] else {}
+        except (ValueError, TypeError):
+            prizes = {}
+        home = save["maps"][0]
+        stored_total = 0
+        if isinstance(prizes, dict):
+            for raw_id, raw_count in prizes.items():
+                try:
+                    item_id = int(raw_id)
+                    count = max(0, int(raw_count))
+                except (TypeError, ValueError):
+                    continue
+                if item_id < 0 or count <= 0:
+                    continue
+                _add_stored_item(home, item_id, count)
+                stored_total += count
+        print(
+            f"Survival ended (map {args[0] if args else '?'}): "
+            f"stored {stored_total} prize(s)."
+        )
+        return True
+
     elif cmd == Constant.CMD_DARTS_NEW_FREE:
         # The client sends this when its stored timeStampDartsNewFree is on an
         # earlier LOCAL calendar day: one free game per day. It does NOT clear

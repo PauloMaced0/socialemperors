@@ -366,6 +366,21 @@ def test_quest_reward_paid_once_per_difficulty(tmp):
     assert int(m["coins"]) == snap, "loss paid a prize"
 
 
+def test_survival_end_stores_prizes(tmp):
+    # The survival arena gives its prizes to the client's warehouse locally but
+    # only persists them via end_survival; with no handler the prizes vanished
+    # on reload (arena "gave no reward").
+    save = sessions.session(UID)
+    m = save["maps"][0]
+    m["store"] = {}
+    _do(Constant.CMD_END_SURVIVAL, ["100000035", 300, json.dumps({"535": 2, "531": 1})])
+    assert m["store"].get("535") == 2, "survival prize (x2) not stored"
+    assert m["store"].get("531") == 1, "survival prize (x1) not stored"
+    # A malformed / empty payload must not crash.
+    _do(Constant.CMD_END_SURVIVAL, ["100000035", 0, ""])
+    assert m["store"].get("535") == 2, "empty survival payload mutated storage"
+
+
 def test_collect_treasure_stamps_kill_time(tmp):
     # Killing the enemy camp must persist timestampLastTreasure; the client
     # gates the camp respawn on it, so without this a reload respawns the
@@ -667,6 +682,7 @@ TESTS = [
     test_kill_reward_persists_when_enemy_moved,
     test_kill_reward_credited_for_client_only_enemy,
     test_quest_reward_paid_once_per_difficulty,
+    test_survival_end_stores_prizes,
 ]
 
 
