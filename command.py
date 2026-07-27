@@ -7,6 +7,7 @@ from sessions import (
     session, save_session, fresh_town_map, neighbor_session, is_friend,
     is_enemy_camp_marker, mark_enemy_camp_active,
     is_natural_resource, is_depleted_resource_placeholder,
+    is_regrowable_resource,
 )
 from get_game_config import get_game_config, get_level_from_xp, get_name_from_item_id, get_attribute_from_mission_id, get_xp_from_level, get_attribute_from_item_id, get_item_from_subcat_functional
 from constants import Constant
@@ -657,6 +658,21 @@ def do_command(USERID, cmd, args):
             if item[0] == id and item[1] == x and item[2] == y:
                 map["items"].remove(item)
                 break
+        # A fully harvested wild stone/gold deposit (the client's regrowth timer
+        # was patched out of the SWF) is scheduled to reappear at the same tile
+        # after TIMER_RESOURCE_REGEN_SECONDS. get_player_info re-populates it on
+        # the next map load. Only natural depletion (HARV) regrows - a bulldoze
+        # or upgrade sale of the same tile must not.
+        if reason == Constant.SELL_REASON_HARVEST and is_regrowable_resource(id):
+            pending = map.setdefault("pendingResourceRespawns", [])
+            pending[:] = [
+                p for p in pending
+                if not (int(p.get("x")) == int(x) and int(p.get("y")) == int(y))
+            ]
+            pending.append({
+                "id": int(id), "x": int(x), "y": int(y),
+                "at": timestamp_now() + Constant.TIMER_RESOURCE_REGEN_SECONDS,
+            })
         # Upgrades are represented by the client as ``sell(old, "UPGR")``
         # followed by ``buy(new)``. The client applies the normal 5% resale
         # credit locally before charging the next tier's full listed price, so
@@ -1393,6 +1409,32 @@ def do_command(USERID, cmd, args):
         town_id = args[1]
         print(f"Start quest {quest_id}")
 
+    elif cmd == Constant.CMD_SET_QUEST_VAR:
+        # The quest/enemy-camp state machine persists its progress one key at a
+        # time: args = [town_id, key, json_value] where key is
+        # spawned/activators/boss/treasure. The client reads it back on load as
+        # map.currentQuestVars -> Base.Main.currentQuestProperties. This was
+        # unhandled, so quest progress was silently dropped: after a reload the
+        # camp/quest reset and desynced from the enemies already killed, leaving
+        # a cleared camp with no collectable prize and freed prisoners gone.
+        # The client sends both progress and the reset batch (spawned=false,
+        # empty lists) through this same command, so simply persisting whatever
+        # arrives keeps client and server in step.
+        try:
+            town_id = int(args[0])
+            key = str(args[1])
+            raw = args[2]
+        except (IndexError, ValueError, TypeError):
+            print("set_quest_var: bad args", args)
+            return
+        try:
+            value = json.loads(raw) if isinstance(raw, str) else raw
+        except (ValueError, TypeError):
+            value = raw
+        quest_vars = save["maps"][town_id].setdefault("currentQuestVars", {})
+        quest_vars[key] = value
+        print(f"Quest var persisted (town {town_id}): {key} = {value}")
+
     elif cmd == Constant.CMD_END_QUEST:
         data = json.loads(args[0])
         town_id = data["map"]
@@ -1407,13 +1449,31 @@ def do_command(USERID, cmd, args):
         activators_left = data["activators_left"] if "activators_left" in data else None
         difficulty = data["difficulty"]
 
-        # Resources
-        save["maps"][town_id]["coins"] += int(gold_gained)
-        save["maps"][town_id]["xp"] += int(xp_gained)
+        # A story quest pays its (large) gold/XP completion prize only the FIRST
+        # time it is beaten. unlockedQuestIndex is "highest quest cleared + 1",
+        # so a quest_id below it was already won; replaying it - or losing it -
+        # must not (re-)award the prize. Casualties/rescues still reconcile
+        # because the units really did fight.
+        prev_unlocked = int(save["privateState"].get("unlockedQuestIndex", 0) or 0)
+        first_clear = win and quest_id >= prev_unlocked
+        if first_clear:
+            save["maps"][town_id]["coins"] += int(gold_gained)
+            save["maps"][town_id]["xp"] += int(xp_gained)
+        elif int(gold_gained) or int(xp_gained):
+            print(
+                f"Quest {quest_id} prize not awarded "
+                f"({'replay' if quest_id < prev_unlocked else 'not a win'}); "
+                f"unlocked={prev_unlocked}."
+            )
         unit_result = _reconcile_battle_units(save["maps"][town_id], units)
 
-        # Update quests data
-        save["privateState"]["unlockedQuestIndex"] = max(quest_id + 1, save["privateState"]["unlockedQuestIndex"], 0)
+        # Update quests data. Only a win advances progression - a loss must not
+        # unlock the next quest, or a lost-then-retried quest would count as an
+        # already-cleared "replay" and never pay out.
+        if win:
+            save["privateState"]["unlockedQuestIndex"] = max(
+                quest_id + 1, prev_unlocked, 0
+            )
         # Star rank: questsRank is keyed by the quest id string (matches the
         # client's ISLE_ORDER lookup) and holds the best difficulty cleared. The
         # island shows that many stars, so it must persist on a win.

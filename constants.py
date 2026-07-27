@@ -126,6 +126,10 @@ class Constant:
     ID_BUILDING_MINE_WOOD_3 = 79
     ID_BUILDING_REGEN_GOLD = 80
     ID_BUILDING_REGEN_STONE = 81
+    # Seconds a depleted wild stone/gold deposit stays gone before the server
+    # re-populates it at the same tile. Matches the stock client's 3h regrowth
+    # timer (removed from the SWF; see tools/patch_attack_click_swf.py).
+    TIMER_RESOURCE_REGEN_SECONDS = 3 * 60 * 60
     ID_BUILDING_TREE_1 = 19
     ID_BUILDING_TREE_2 = 20
     ID_BUILDING_TREE_3 = 21
