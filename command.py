@@ -1333,14 +1333,38 @@ def do_command(USERID, cmd, args):
         type = args[4]
         print("Kill", str(get_name_from_item_id(id)), "from", f"({x},{y}).")
         map = save["maps"][town_id]
-        # CMD_KILL only ever fires for enemy (non-PLAYER_SELF) elements -
-        # camp trolls and their buildings (IsoFightingElement.kill). Those
-        # entities wander in combat, so the client's reported kill tile
-        # (iLastPosSentToServer) often no longer matches the spawn tile the
-        # server stored at CMD_BUY. Match the exact tile first, then fall back
-        # to any leftover item of the same id; otherwise the "killed" enemy is
-        # never removed (it respawns on reload) and its gold/xp - credited only
-        # inside this block - vanishes on the next load.
+        # CMD_KILL only ever fires for enemy (non-PLAYER_SELF) elements in the
+        # home village (IsoFightingElement.kill). The client credits the player
+        # +5 gold (+xp/collectible) for EVERY such kill via Token(TOKEN_GOLD,5),
+        # whether or not the enemy was ever a persisted server item -
+        # reinforcements and boss adds are spawned client-side and never
+        # CMD_BUY'd. Credit the reward for the kill itself; gating it on finding
+        # a stored item dropped that gold on the next reload (client showed +5,
+        # server recorded nothing). Mirror the client drops exactly:
+        #   enemy unit  -> +5 gold, +collect_xp xp (+ a collectible)
+        #   enemy tower -> +5 gold, +ceil(floor(cost/4)*0.02) xp when the
+        #                  building attacks and costs stone.
+        if str(type) == "u":
+            map["coins"] = int(map.get("coins", 0) or 0) + 5
+            apply_collect_xp(map, id)
+        else:
+            try:
+                attack = int(float(get_attribute_from_item_id(id, "attack") or 0))
+            except (TypeError, ValueError):
+                attack = 0
+            if attack > 0:
+                map["coins"] = int(map.get("coins", 0) or 0) + 5
+                base = 0
+                if str(get_attribute_from_item_id(id, "cost_type")) == "s":
+                    try:
+                        base = int(float(get_attribute_from_item_id(id, "cost") or 0)) // 4
+                    except (TypeError, ValueError):
+                        base = 0
+                map["xp"] = int(map.get("xp", 0) or 0) + math.ceil(base * 0.02)
+        # Remove the enemy from the save if it was a persisted item. Camp
+        # entities wander, so match the exact tile first, then fall back to any
+        # leftover item of the same id; a client-only spawn simply has nothing
+        # to remove.
         victim = next(
             (item for item in map["items"]
              if item[0] == id and item[1] == x and item[2] == y),
@@ -1349,28 +1373,6 @@ def do_command(USERID, cmd, args):
         if victim is None:
             victim = next((item for item in map["items"] if item[0] == id), None)
         if victim is not None:
-            # Mirror the client's home-village kill drops
-            # (IsoFightingElement, GAME_MODE_NORMAL branch):
-            #   enemy unit  -> +5 gold, +collect_xp xp (+ a collectible)
-            #   enemy tower -> +5 gold, +ceil(floor(cost/4)*0.02) xp when
-            #                  the building attacks and costs stone.
-            if str(type) == "u":
-                map["coins"] = int(map.get("coins", 0) or 0) + 5
-                apply_collect_xp(map, id)
-            else:
-                try:
-                    attack = int(float(get_attribute_from_item_id(id, "attack") or 0))
-                except (TypeError, ValueError):
-                    attack = 0
-                if attack > 0:
-                    map["coins"] = int(map.get("coins", 0) or 0) + 5
-                    base = 0
-                    if str(get_attribute_from_item_id(id, "cost_type")) == "s":
-                        try:
-                            base = int(float(get_attribute_from_item_id(id, "cost") or 0)) // 4
-                        except (TypeError, ValueError):
-                            base = 0
-                    map["xp"] = int(map.get("xp", 0) or 0) + math.ceil(base * 0.02)
             map["items"].remove(victim)
     
     elif cmd == Constant.CMD_COMPLETE_MISSION:

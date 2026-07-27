@@ -306,6 +306,21 @@ def test_kill_reward_persists_when_enemy_moved(tmp):
         "moved enemy not removed -> respawns on reload"
 
 
+def test_kill_reward_credited_for_client_only_enemy(tmp):
+    # Reinforcements / boss adds are spawned client-side and never CMD_BUY'd,
+    # so no server item exists to match. The client still shows +5 gold for the
+    # kill; the server must credit it too or the gold vanishes on reload.
+    save = sessions.session(UID)
+    m = save["maps"][0]
+    boss_add = 547  # a Troll unit id with no matching stored item here
+    m["items"] = [it for it in m["items"] if it[0] != boss_add]  # ensure none
+    gold0, xp0 = int(m["coins"]), int(m["xp"])
+    _do(Constant.CMD_KILL, [40, 40, boss_add, 0, "u"])
+    assert int(m["coins"]) == gold0 + 5, \
+        "client-only enemy kill gold not credited -> vanishes on reload"
+    assert int(m["xp"]) >= xp0, "xp went backwards on client-only kill"
+
+
 def _end_quest(quest_id, difficulty, gold, xp, win=True, town=0):
     payload = {
         "map": town,
@@ -650,6 +665,7 @@ TESTS = [
     test_loading_scrubs_leaked_playerinfo_fields,
     test_mission_reward_is_paid_only_once_after_completion,
     test_kill_reward_persists_when_enemy_moved,
+    test_kill_reward_credited_for_client_only_enemy,
     test_quest_reward_paid_once_per_difficulty,
 ]
 
