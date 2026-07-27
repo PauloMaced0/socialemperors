@@ -202,6 +202,11 @@ def _random_wild_resource_position(town, occupied, excluded):
     return None
 
 
+# Absolute per-family ceiling for gold/stone respawns. Well above any stock
+# population (~24 per family); reaching it means the save is corrupt, not full.
+_MINERAL_FAMILY_HARD_CAP = 60
+
+
 def _respawn_mature_minerals(save, now):
     """Restore depleted gold/stone at their ORIGINAL harvested tile.
 
@@ -241,10 +246,14 @@ def _respawn_mature_minerals(save, now):
             if int(now) < ready_at:
                 remaining.append(entry)
                 continue
-            if family_counts[family] >= 21:
-                # Another legitimate population/respawn already filled this
-                # family. Discard the surplus timer rather than exceeding the
-                # stock three-cluster (3 x 5-7) maximum.
+            if family_counts[family] >= _MINERAL_FAMILY_HARD_CAP:
+                # Runaway guard only. Each pending timer maps 1:1 to a real
+                # prior harvest removal, so restoring it can never push the
+                # family past its original population - only genuine corruption
+                # reaches this ceiling. The old cap of 21 wrongly discarded
+                # respawns on maps that legitimately seed more than 21 gold/
+                # stone nodes (the stock village spawns ~24), so gold/stone
+                # simply stopped coming back.
                 changed = True
                 continue
             occupied = any(

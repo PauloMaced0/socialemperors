@@ -1039,7 +1039,13 @@ def test_legacy_mineral_placeholders_migrate_without_resetting_timer(tmp):
     assert town["pendingMineralRespawns"] == []
 
 
-def test_random_mineral_respawn_respects_stock_family_cap(tmp):
+def test_mineral_respawn_works_above_legacy_21_cap(tmp):
+    # The stock village seeds ~24 gold/stone nodes per family - above the old
+    # hardcoded cap of 21, which discarded every respawn timer once the family
+    # sat at/over 21, so harvested gold/stone never came back. A pending timer
+    # maps 1:1 to a real harvest, so restoring it can't exceed the original
+    # population; it must succeed regardless of the count.
+    _set_now(_local(12, 10))
     town = sessions.session(UID)["maps"][0]
     stone_ids = (
         Constant.ID_BUILDING_STONE_1,
@@ -1047,28 +1053,38 @@ def test_random_mineral_respawn_respects_stock_family_cap(tmp):
         Constant.ID_BUILDING_STONE_3,
         Constant.ID_BUILDING_STONE_4,
     )
-    for index in range(21):
-        town["items"].append([
-            stone_ids[index % len(stone_ids)],
-            index,
-            80,
-            0,
-            _local(12, 10),
-            0,
-        ])
-    town["pendingMineralRespawns"] = [{
-        "family": "stone",
-        "source_x": 72,
-        "source_y": 72,
-        "at": _local(12, 11),
-    }]
+    town["items"] = [
+        item for item in town["items"]
+        if not item or int(item[0]) not in stone_ids
+    ]
+    for index in range(24):  # seed a family well above the old cap of 21
+        town["items"].append(
+            [stone_ids[index % len(stone_ids)], index, 80, 0, _local(12, 10), 0]
+        )
+    n0 = sum(1 for item in town["items"] if item[0] in stone_ids)
+    assert n0 == 24
 
+    # Harvest one deposit -> 23 present + one pending respawn.
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_SELL,
+         "args": [5, 80, stone_ids[1], 0, 0, Constant.SELL_REASON_HARVEST]},
+    ]))
+    assert sum(1 for item in town["items"] if item[0] in stone_ids) == 23
+    assert len(town["pendingMineralRespawns"]) == 1
+
+    # Before 3h: still 23. After 3h: restored to 24 (not discarded by a cap).
     _set_now(_local(12, 12))
     get_player_info.get_player_info(UID)
-    assert sum(
-        1 for item in town["items"] if item[0] in stone_ids
-    ) == 21, "random respawn exceeded the original stone population cap"
+    assert sum(1 for item in town["items"] if item[0] in stone_ids) == 23, \
+        "mineral respawned before its 3h timer"
+
+    _set_now(_local(12, 13))
+    get_player_info.get_player_info(UID)
+    assert sum(1 for item in town["items"] if item[0] in stone_ids) == 24, \
+        "gold/stone did not respawn because the family was above 21"
     assert town["pendingMineralRespawns"] == []
+    assert any(item[0] in stone_ids and item[1:3] == [5, 80]
+               for item in town["items"]), "respawn not on original tile"
 
 
 def test_legacy_empty_map_gets_one_stock_resource_repopulation(tmp):
@@ -1324,7 +1340,7 @@ def test_quest_rewards_pay_once_and_progress_by_order_index(tmp):
             })],
         }]))
 
-    finish("100000006")
+    finish("100000006", difficulty=1)
     reloaded = _reload()
     assert reloaded["privateState"]["unlockedQuestIndex"] == 1, \
         "quest id was stored as the unlocked quest index"
@@ -1332,14 +1348,24 @@ def test_quest_rewards_pay_once_and_progress_by_order_index(tmp):
     assert reloaded["maps"][0]["xp"] == 10
     assert reloaded["privateState"]["gifts"][537] == 1
 
+    # A NEW difficulty pays its own (progressive) prize on first clear.
+    finish("100000006", difficulty=2)
+    harder = _reload()
+    assert harder["maps"][0]["coins"] == 200, \
+        "a new difficulty did not pay its own prize"
+    assert harder["maps"][0]["xp"] == 20
+    assert harder["privateState"]["gifts"][537] == 2
+    assert harder["privateState"]["questsRank"]["100000006"] == 2, \
+        "the improved star rank was not retained"
+
+    # Replaying an ALREADY-cleared difficulty pays nothing.
     finish("100000006", difficulty=2)
     replayed = _reload()
-    assert replayed["maps"][0]["coins"] == 100
-    assert replayed["maps"][0]["xp"] == 10
-    assert replayed["privateState"]["gifts"][537] == 1, \
-        "replaying a completed quest paid its unit reward again"
-    assert replayed["privateState"]["questsRank"]["100000006"] == 2, \
-        "a replay failed to retain the improved star rank"
+    assert replayed["maps"][0]["coins"] == 200, \
+        "replaying a cleared difficulty paid its prize again"
+    assert replayed["maps"][0]["xp"] == 20
+    assert replayed["privateState"]["gifts"][537] == 2, \
+        "replaying a cleared difficulty paid its unit reward again"
 
     finish("100000007", win=0)
     assert sessions.session(UID)["privateState"]["unlockedQuestIndex"] == 1
@@ -1548,7 +1574,7 @@ TESTS = [
     test_live_enemy_camp_survives_reload_without_respawning,
     test_natural_resources_use_persisted_random_respawns,
     test_legacy_mineral_placeholders_migrate_without_resetting_timer,
-    test_random_mineral_respawn_respects_stock_family_cap,
+    test_mineral_respawn_works_above_legacy_21_cap,
     test_legacy_empty_map_gets_one_stock_resource_repopulation,
     test_reload_marker_relocks_so_trees_do_not_wander,
     test_ship_quest_requires_a_fully_staffed_harbour,
