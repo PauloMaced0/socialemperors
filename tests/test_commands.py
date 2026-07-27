@@ -287,6 +287,70 @@ def test_kill_rewards_persist_for_units_and_towers(tmp):
         "killed items not removed"
 
 
+def test_kill_reward_persists_when_enemy_moved(tmp):
+    # Camp trolls wander in combat, so the client's reported kill tile no
+    # longer matches the spawn tile stored at CMD_BUY. The kill must still
+    # credit gold/xp and remove the enemy - otherwise the "killed" troll
+    # respawns on reload and its gold vanishes.
+    save = sessions.session(UID)
+    m = save["maps"][0]
+    troll = 525  # Small Troll (collect_xp 1)
+    m["items"].append([troll, 70, 70, 0, 0, 0])
+    gold0, xp0 = int(m["coins"]), int(m["xp"])
+    n0 = sum(1 for it in m["items"] if it[0] == troll)
+    # Report the kill at a DIFFERENT tile than where it was placed.
+    _do(Constant.CMD_KILL, [88, 91, troll, 0, "u"])
+    assert int(m["coins"]) == gold0 + 5, "moved-enemy kill gold not credited"
+    assert int(m["xp"]) == xp0 + 1, "moved-enemy kill xp not credited"
+    assert sum(1 for it in m["items"] if it[0] == troll) == n0 - 1, \
+        "moved enemy not removed -> respawns on reload"
+
+
+def _end_quest(quest_id, difficulty, gold, xp, win=True, town=0):
+    payload = {
+        "map": town,
+        "resources": {"g": gold, "x": xp},
+        "units": [],
+        "win": 1 if win else 0,
+        "duration": 10,
+        "voluntary_end": 0,
+        "quest_id": quest_id,
+        "difficulty": difficulty,
+    }
+    _do(Constant.CMD_END_QUEST, [json.dumps(payload)])
+
+
+def test_quest_reward_paid_once_per_difficulty(tmp):
+    # A prize is granted per difficulty level (progressive), first clear only.
+    # Replaying a difficulty already cleared pays nothing; a new, harder
+    # difficulty pays again.
+    save = sessions.session(UID)
+    m = save["maps"][0]
+    quest = 100000006
+    base = int(m["coins"])
+
+    _end_quest(quest, 1, 100, 10)          # first clear of difficulty 1
+    assert int(m["coins"]) == base + 100, "difficulty 1 prize not paid"
+
+    _end_quest(quest, 1, 100, 10)          # replay difficulty 1 - no prize
+    assert int(m["coins"]) == base + 100, "difficulty 1 paid twice"
+
+    _end_quest(quest, 2, 250, 25)          # first clear of difficulty 2
+    assert int(m["coins"]) == base + 350, "difficulty 2 prize not paid"
+
+    _end_quest(quest, 3, 500, 50)          # first clear of difficulty 3
+    assert int(m["coins"]) == base + 850, "difficulty 3 prize not paid"
+
+    _end_quest(quest, 3, 500, 50)          # replay difficulty 3 - no prize
+    assert int(m["coins"]) == base + 850, "difficulty 3 paid twice"
+
+    # A loss never pays, even at a fresh difficulty.
+    other = 100000007
+    snap = int(m["coins"])
+    _end_quest(other, 1, 100, 10, win=False)
+    assert int(m["coins"]) == snap, "loss paid a prize"
+
+
 def test_collect_treasure_stamps_kill_time(tmp):
     # Killing the enemy camp must persist timestampLastTreasure; the client
     # gates the camp respawn on it, so without this a reload respawns the
@@ -585,6 +649,8 @@ TESTS = [
     test_market_II_needs_no_staff,
     test_loading_scrubs_leaked_playerinfo_fields,
     test_mission_reward_is_paid_only_once_after_completion,
+    test_kill_reward_persists_when_enemy_moved,
+    test_quest_reward_paid_once_per_difficulty,
 ]
 
 
