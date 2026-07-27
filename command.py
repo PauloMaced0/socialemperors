@@ -1333,33 +1333,45 @@ def do_command(USERID, cmd, args):
         type = args[4]
         print("Kill", str(get_name_from_item_id(id)), "from", f"({x},{y}).")
         map = save["maps"][town_id]
-        for item in map["items"]:
-            if item[0] == id and item[1] == x and item[2] == y:
-                # Mirror the client's home-village kill drops
-                # (IsoFightingElement, GAME_MODE_NORMAL branch), or the gold/xp
-                # the player sees vanishes on the next reload:
-                #   enemy unit  -> +5 gold, +collect_xp xp (+ a collectible)
-                #   enemy tower -> +5 gold, +ceil(floor(cost/4)*0.02) xp when
-                #                  the building attacks and costs stone.
-                if str(type) == "u":
+        # CMD_KILL only ever fires for enemy (non-PLAYER_SELF) elements -
+        # camp trolls and their buildings (IsoFightingElement.kill). Those
+        # entities wander in combat, so the client's reported kill tile
+        # (iLastPosSentToServer) often no longer matches the spawn tile the
+        # server stored at CMD_BUY. Match the exact tile first, then fall back
+        # to any leftover item of the same id; otherwise the "killed" enemy is
+        # never removed (it respawns on reload) and its gold/xp - credited only
+        # inside this block - vanishes on the next load.
+        victim = next(
+            (item for item in map["items"]
+             if item[0] == id and item[1] == x and item[2] == y),
+            None,
+        )
+        if victim is None:
+            victim = next((item for item in map["items"] if item[0] == id), None)
+        if victim is not None:
+            # Mirror the client's home-village kill drops
+            # (IsoFightingElement, GAME_MODE_NORMAL branch):
+            #   enemy unit  -> +5 gold, +collect_xp xp (+ a collectible)
+            #   enemy tower -> +5 gold, +ceil(floor(cost/4)*0.02) xp when
+            #                  the building attacks and costs stone.
+            if str(type) == "u":
+                map["coins"] = int(map.get("coins", 0) or 0) + 5
+                apply_collect_xp(map, id)
+            else:
+                try:
+                    attack = int(float(get_attribute_from_item_id(id, "attack") or 0))
+                except (TypeError, ValueError):
+                    attack = 0
+                if attack > 0:
                     map["coins"] = int(map.get("coins", 0) or 0) + 5
-                    apply_collect_xp(map, id)
-                else:
-                    try:
-                        attack = int(float(get_attribute_from_item_id(id, "attack") or 0))
-                    except (TypeError, ValueError):
-                        attack = 0
-                    if attack > 0:
-                        map["coins"] = int(map.get("coins", 0) or 0) + 5
-                        base = 0
-                        if str(get_attribute_from_item_id(id, "cost_type")) == "s":
-                            try:
-                                base = int(float(get_attribute_from_item_id(id, "cost") or 0)) // 4
-                            except (TypeError, ValueError):
-                                base = 0
-                        map["xp"] = int(map.get("xp", 0) or 0) + math.ceil(base * 0.02)
-                map["items"].remove(item)
-                break
+                    base = 0
+                    if str(get_attribute_from_item_id(id, "cost_type")) == "s":
+                        try:
+                            base = int(float(get_attribute_from_item_id(id, "cost") or 0)) // 4
+                        except (TypeError, ValueError):
+                            base = 0
+                    map["xp"] = int(map.get("xp", 0) or 0) + math.ceil(base * 0.02)
+            map["items"].remove(victim)
     
     elif cmd == Constant.CMD_COMPLETE_MISSION:
         mission_id = int(args[0])
@@ -2180,14 +2192,24 @@ def do_command(USERID, cmd, args):
         state = save["privateState"]
         prev_unlocked = int(state.get("unlockedQuestIndex", 0) or 0)
         quest_key = str(quest_id)
+        difficulty_int = int(difficulty)
         ranks = state.get("questsRank")
         if not isinstance(ranks, dict):
             ranks = {}
             state["questsRank"] = ranks
+        # Rewards are granted once PER DIFFICULTY per island, not once per
+        # island. Each of the 3 difficulties pays its own (progressive,
+        # client-computed) prize the first time it is cleared; replaying a
+        # difficulty already cleared pays nothing. questsPaidDifficulty is the
+        # persisted proof of which difficulties have already paid for a quest.
+        paid = state.get("questsPaidDifficulty")
+        if not isinstance(paid, dict):
+            paid = {}
+            state["questsPaidDifficulty"] = paid
+        paid_list = paid.setdefault(quest_key, [])
         # unlockedQuestIndex is an index into ISLE_ORDER. Quest ids are large
         # constants (100000006, ...), so comparing/storing the id here unlocked
-        # the complete campaign after one win. A rank is the persisted proof
-        # that this island has already paid its first-clear reward.
+        # the complete campaign after one win.
         order = [
             str(value) for value in
             get_game_config().get("globals", {}).get("ISLE_ORDER", [])
@@ -2196,8 +2218,9 @@ def do_command(USERID, cmd, args):
             quest_index = order.index(quest_key)
         except ValueError:
             quest_index = None
-        first_clear = win and quest_key not in ranks
+        first_clear = win and difficulty_int not in paid_list
         if first_clear:
+            paid_list.append(difficulty_int)
             save["maps"][town_id]["coins"] += int(gold_gained)
             save["maps"][town_id]["xp"] += int(xp_gained)
             if isinstance(item_rewards, dict):
@@ -2214,10 +2237,11 @@ def do_command(USERID, cmd, args):
                         gifts.append(0)
                     gifts[item_id] += count
         elif int(gold_gained) or int(xp_gained):
-            print(
-                f"Quest {quest_id} prize not awarded "
-                f"({'replay' if win else 'not a win'})."
+            reason = (
+                f"difficulty {difficulty_int} already rewarded"
+                if win else "not a win"
             )
+            print(f"Quest {quest_id} prize not awarded ({reason}).")
         unit_result = _reconcile_battle_units(save["maps"][town_id], units)
 
         if win and quest_index is not None:
