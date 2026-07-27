@@ -209,6 +209,30 @@ def test_allies_building_opens_once_and_never_re_asks(tmp):
     assert save["playerInfo"]["cash"] == cash_after_open, "re-charged after opening"
 
 
+def test_festival_decoration_harvest_pays_gold_but_not_quest_treasure(tmp):
+    # Festival/monument decorations (subcat 811) are harvested once and
+    # consumed via SELL_REASON_TREASURE; pay a fixed gold reward instead of 0.
+    save = sessions.session(UID)
+    m = save["maps"][0]
+    m["coins"] = 0
+    festival = 487  # Chinese Festival
+    m["items"].append([festival, 60, 60, 0, 0, 0])
+    _do(Constant.CMD_SELL, [60, 60, festival, 0, 0, Constant.SELL_REASON_TREASURE])
+    # 1000 treasure gold plus the ordinary 5% resale credit on the 300g cost.
+    assert m["coins"] >= Constant.TREASURE_DECORATION_GOLD, \
+        "festival harvest did not pay its treasure gold"
+    assert not any(it[1:3] == [60, 60] for it in m["items"]), \
+        "harvested festival not consumed"
+
+    # A quest camp treasure shares the subcat/reason but must NOT be paid here
+    # (its reward comes from CMD_COLLECT_TREASURE) - no double reward.
+    m["coins"] = 0
+    chest = Constant.ID_BUILDING_TREASURE_CHEST
+    m["items"].append([chest, 61, 61, 0, 0, 0])
+    _do(Constant.CMD_SELL, [61, 61, chest, 0, 0, Constant.SELL_REASON_TREASURE])
+    assert m["coins"] == 0, "quest treasure chest wrongly paid festival gold"
+
+
 def test_bank_exchanges_gold_for_cash(tmp):
     # The Bank window's EXCHANGE button (repurposed direction): 15,000 gold ->
     # 1 cash. Without enough gold the command is rejected outright, so a
@@ -540,6 +564,7 @@ TESTS = [
     test_comeback_bonus_day_gate,
     test_collect_treasure_clamped_and_persisted,
     test_allies_building_opens_once_and_never_re_asks,
+    test_festival_decoration_harvest_pays_gold_but_not_quest_treasure,
     test_bank_exchanges_gold_for_cash,
     test_kill_rewards_persist_for_units_and_towers,
     test_collect_treasure_stamps_kill_time,

@@ -1227,6 +1227,22 @@ def do_command(USERID, cmd, args):
                 map["items"].remove(item)
                 removed = True
                 break
+        # Festival / monument decorations (subcat_functional 811) are harvested
+        # once and consumed via SELL_REASON_TREASURE. Their config reward is 0,
+        # so pay a fixed gold amount here instead of letting them vanish for
+        # nothing. Only the purchasable decoration ids qualify - camp/quest
+        # treasures share the reason but are paid by CMD_COLLECT_TREASURE.
+        if (
+            removed
+            and reason == Constant.SELL_REASON_TREASURE
+            and int(id) in Constant.TREASURE_DECORATION_IDS
+        ):
+            map["coins"] = int(map.get("coins", 0) or 0) \
+                + Constant.TREASURE_DECORATION_GOLD
+            print(
+                f"Harvested treasure decoration {get_name_from_item_id(id)}: "
+                f"+{Constant.TREASURE_DECORATION_GOLD} gold."
+            )
         # Unlike gold/stone, the stock client has no visible regeneration
         # placeholder for a felled tree.  Record the depleted tile and restore
         # it only after the natural-resource cooldown.  This prevents a page
