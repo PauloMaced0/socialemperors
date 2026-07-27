@@ -278,5 +278,31 @@
                 };
             })();
         </script>
+        <!-- No-op stubs for the game's Facebook-era ExternalInterface calls.
+             With allowScriptAccess:true (needed for the ally popup), the SWF
+             now actually invokes these; an undefined JS callee makes Ruffle
+             abort the calling ActionScript handler, which left the PvP/quest
+             "Mission result" popup stuck on "Saving Results..." (showFeed).
+             Define every FB bridge name as a harmless no-op; the `||` keeps the
+             real handlers set above (gotoNeighbors etc.) intact. -->
+        <script>
+            (function () {
+                var fbStubs = [
+                    "showFeed", "showFeedItemFound", "showFeedSEHire",
+                    "share_newtown", "sendFbMessage",
+                    "gotoBuy", "gotoBuyWithOfferBuilding", "gotoAdVideo",
+                    "gotoGifts", "gotoInitialGifts",
+                    "showPopupInvite", "showPopupInviteTournament",
+                    "showPopupSEHelpCollect", "showPopupSEHelpNest",
+                    "showPopupSEHelpPotion",
+                    "askForAchievementPermission", "askInstallApplication",
+                    "bookmarDialog", "likeDialog", "openGame",
+                    "openSpecialGiftFromFlash", "leveledUp", "flashInitialized"
+                ];
+                fbStubs.forEach(function (name) {
+                    window[name] = window[name] || function () {};
+                });
+            })();
+        </script>
     </body>
 </html>
