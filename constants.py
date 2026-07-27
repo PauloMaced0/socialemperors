@@ -131,6 +131,10 @@ class Constant:
     # the same natural-resource window to harvested trees instead of allowing
     # MapInitializer to replace them on every browser refresh.
     TIMER_RESOURCE_REGEN_SECONDS = 3 * 60 * 60
+    # Bank window exchange rate (gold -> cash); mirrored by the patched
+    # PopupBuyGold client class, which displays and charges the same numbers.
+    BANK_EXCHANGE_GOLD_COST = 15000
+    BANK_EXCHANGE_CASH_GAIN = 1
     ID_BUILDING_TREE_1 = 19
     ID_BUILDING_TREE_2 = 20
     ID_BUILDING_TREE_3 = 21
