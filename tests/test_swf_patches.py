@@ -96,6 +96,12 @@ def test_unit_health_and_training_stable_client_fixes_are_present():
     assert data.count(
         b"socialemperors-harbour-reload-staff-v1"
     ) == 1, "the Harbor still auto-completes staffing during map reload"
+    assert data.count(
+        b"socialemperors-mission-popup-crash-guard-v1"
+    ) == 1, (
+        "MissionPopup.misionCompletada can still throw #1009 and hang "
+        "the quest/PvP result popup on 'Saving Results'"
+    )
 
 
 def test_attack_click_patch_is_idempotent():
