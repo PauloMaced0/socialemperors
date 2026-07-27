@@ -268,7 +268,10 @@ def _repair_natural_resource_state(save: dict) -> bool:
         if missing_family:
             # MapInitializer will fill only what is missing, based on the
             # counts returned with player-info. This is not a recurring
-            # respawn switch: the migration version prevents another reset.
+            # respawn switch: the migration version prevents another reset,
+            # and _sync_natural_resource_reload_marker re-locks the flag as
+            # soon as the resources are present again, so it cannot re-fire
+            # every reload and re-scatter existing trees/minerals.
             town["naturalResourcesInitialized"] = 0
         town["naturalResourceRecoveryVersion"] = (
             _NATURAL_RESOURCE_RECOVERY_VERSION

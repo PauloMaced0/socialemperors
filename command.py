@@ -1289,6 +1289,7 @@ def do_command(USERID, cmd, args):
             pending[:] = deduplicated
             pending.append({
                 "family": family,
+                "id": int(id),
                 "source_x": int(x),
                 "source_y": int(y),
                 "at": (
