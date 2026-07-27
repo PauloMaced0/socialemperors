@@ -135,6 +135,31 @@ class Constant:
     # PopupBuyGold client class, which displays and charges the same numbers.
     BANK_EXCHANGE_GOLD_COST = 15000
     BANK_EXCHANGE_CASH_GAIN = 1
+
+    # Festival / monument decorations carry subcat_functional 811
+    # (SUBCATFUNC_TREASURE), so the client harvests them once (peasant click)
+    # and consumes the building via CMD_SELL(SELL_REASON_TREASURE). Their
+    # configured reward is 0, so they used to vanish for nothing. Grant this
+    # one-time gold payout instead. Scoped to these purchasable decoration ids
+    # only - quest camp treasures (chest/prisoners) share the subcat but are
+    # rewarded through CMD_COLLECT_TREASURE and must NOT be paid here too.
+    TREASURE_DECORATION_GOLD = 1000
+    TREASURE_DECORATION_IDS = frozenset({
+        487,   # Chinese Festival
+        489,   # Golem Headquarters
+        490,   # Viking Festival
+        492,   # Black Yeti Cave
+        493,   # Tlaloc Altar
+        495,   # Viper Nest
+        497,   # Tree of Life
+        499,   # Sarcophagus
+        1200,  # Deep Hole
+        1202,  # Big Nest
+        1204,  # Captive Cleopatra
+        1205,  # Atlantis Decoration
+        1207,  # Infernal Field
+        1208,  # Tree (Chinese decoration)
+    })
     ID_BUILDING_TREE_1 = 19
     ID_BUILDING_TREE_2 = 20
     ID_BUILDING_TREE_3 = 21
