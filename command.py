@@ -1509,10 +1509,21 @@ def do_command(USERID, cmd, args):
         save["playerInfo"]["map_names"][town_id] = new_name
 
     elif cmd == Constant.CMD_EXCHANGE_CASH:
+        # The Bank window's EXCHANGE button. Repurposed (with the matching
+        # PopupBuyGold client patch) from the stock cash->gold direction to
+        # gold->cash: 15,000 gold buys 1 cash. Reject when the town can't
+        # afford it so a forged command can't mint cash from nothing.
         town_id = args[0]
-        print("Exchange cash -> coins.")
-        save["playerInfo"]["cash"] = max(save["playerInfo"]["cash"] - 5, 0)#maybe make function for editing resources
-        save["maps"][town_id]["coins"] += 2500
+        coins = int(save["maps"][town_id].get("coins", 0) or 0)
+        if coins < Constant.BANK_EXCHANGE_GOLD_COST:
+            print(f"Exchange rejected - {coins} gold is less than "
+                  f"{Constant.BANK_EXCHANGE_GOLD_COST}.")
+            return False
+        save["maps"][town_id]["coins"] = coins - Constant.BANK_EXCHANGE_GOLD_COST
+        save["playerInfo"]["cash"] = int(save["playerInfo"].get("cash", 0) or 0) \
+            + Constant.BANK_EXCHANGE_CASH_GAIN
+        print(f"Bank exchange: -{Constant.BANK_EXCHANGE_GOLD_COST} gold -> "
+              f"+{Constant.BANK_EXCHANGE_CASH_GAIN} cash.")
 
     elif cmd == Constant.CMD_TOURNAMENT_SUBSTRACT_RESOURCES or cmd == Constant.CMD_TOURNAMENT_REFUND_RESOURCES:
         # Tournament entry fee bookkeeping. The client subtracts the fee when

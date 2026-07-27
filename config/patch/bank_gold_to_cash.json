@@ -1,0 +1,4 @@
+[
+	{ "op": "test", "path": "/localization_strings/688/id", "value": 689 },
+	{ "op": "replace", "path": "/localization_strings/688/text", "value": "Exchange your gold for cash!" }
+]

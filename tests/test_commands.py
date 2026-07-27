@@ -183,6 +183,24 @@ def test_comeback_bonus_day_gate(tmp):
 
 # --- treasure + buy with cash ----------------------------------------------
 
+def test_bank_exchanges_gold_for_cash(tmp):
+    # The Bank window's EXCHANGE button (repurposed direction): 15,000 gold ->
+    # 1 cash. Without enough gold the command is rejected outright, so a
+    # forged exchange_cash_new can't mint cash.
+    save = sessions.session(UID)
+    m = save["maps"][0]
+    m["coins"] = 14999
+    _do(Constant.CMD_EXCHANGE_CASH, [0])
+    assert save["playerInfo"]["cash"] == 0, "exchange minted cash without gold"
+    assert m["coins"] == 14999, "rejected exchange still took gold"
+
+    m["coins"] = 31000
+    _do(Constant.CMD_EXCHANGE_CASH, [0])
+    assert save["playerInfo"]["cash"] == 1 and m["coins"] == 16000
+    _do(Constant.CMD_EXCHANGE_CASH, [0])
+    assert save["playerInfo"]["cash"] == 2 and m["coins"] == 1000
+
+
 def test_collect_treasure_clamped_and_persisted(tmp):
     save = sessions.session(UID)
     m = save["maps"][0]
@@ -495,6 +513,7 @@ TESTS = [
     test_monday_bonus_unit_whitelisted,
     test_comeback_bonus_day_gate,
     test_collect_treasure_clamped_and_persisted,
+    test_bank_exchanges_gold_for_cash,
     test_kill_rewards_persist_for_units_and_towers,
     test_collect_treasure_stamps_kill_time,
     test_buy_unit_with_cash,
