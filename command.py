@@ -2678,10 +2678,13 @@ def do_command(USERID, cmd, args):
         if not isinstance(staff, list) or len(staff) < required:
             print(f"Social building finish rejected - {len(staff) if isinstance(staff, list) else 0}/{required} workers.")
             return False
-        if item_id == Constant.ID_BUILDING_SUMMIT or len(args) > 4:
-            # Summit/social-feed helpers are a repeatable reward cycle. The
-            # client clears both arrays after collection instead of opening
-            # the building permanently.
+        if item_id != Constant.ID_BUILDING_SUMMIT and len(args) > 4:
+            # Round Table / social-feed helpers are a repeatable reward cycle:
+            # the client clears both arrays after collection instead of opening
+            # the building permanently. The Allies Building (Summit) is
+            # deliberately excluded - the player pays for its cavaliers once and
+            # the building then stays opened (si=None below), so a reload never
+            # re-asks for payment.
             if item_id == Constant.ID_BUILDING_ROUND_TABLE:
                 count = len(staff)
                 gold = 1000 if count >= 4 else 0

@@ -1,0 +1,4 @@
+[
+	{ "op": "test", "path": "/items/456/id", "value": "470" },
+	{ "op": "replace", "path": "/items/456/population", "value": "50" }
+]

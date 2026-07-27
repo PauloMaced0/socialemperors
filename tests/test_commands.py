@@ -183,6 +183,32 @@ def test_comeback_bonus_day_gate(tmp):
 
 # --- treasure + buy with cash ----------------------------------------------
 
+def test_allies_building_opens_once_and_never_re_asks(tmp):
+    # Allies Building (Summit, id 234): buying its allies with cash spawns the
+    # cavaliers, and the building must then stay OPENED (si=None) so a reload
+    # doesn't request payment again.
+    save = sessions.session(UID)
+    save["playerInfo"]["cash"] = 100
+    summit = Constant.ID_BUILDING_SUMMIT
+    save["maps"][0]["items"].append([summit, 60, 60, 0, 0, 0, [], {}])
+    social = command._social_item(summit)
+    required = command._social_worker_count(social)
+
+    for _ in range(required):
+        _do(Constant.CMD_BUY_SI_HELP, [60, 60, 0, summit])
+    _do(Constant.CMD_FINISH_SI, [60, 60, 0, summit])
+
+    item = command._find_map_item(save["maps"][0], summit, 60, 60)
+    assert command._item_attrs(item).get("si", 0) is None, \
+        "Allies Building did not stay opened -> reload would re-ask for payment"
+
+    # A further staffing purchase after opening is rejected (no double charge).
+    cash_after_open = save["playerInfo"]["cash"]
+    ok = command.do_command(UID, Constant.CMD_BUY_SI_HELP, [60, 60, 0, summit])
+    assert ok is False, "opened Allies Building accepted another paid worker"
+    assert save["playerInfo"]["cash"] == cash_after_open, "re-charged after opening"
+
+
 def test_bank_exchanges_gold_for_cash(tmp):
     # The Bank window's EXCHANGE button (repurposed direction): 15,000 gold ->
     # 1 cash. Without enough gold the command is rejected outright, so a
@@ -513,6 +539,7 @@ TESTS = [
     test_monday_bonus_unit_whitelisted,
     test_comeback_bonus_day_gate,
     test_collect_treasure_clamped_and_persisted,
+    test_allies_building_opens_once_and_never_re_asks,
     test_bank_exchanges_gold_for_cash,
     test_kill_rewards_persist_for_units_and_towers,
     test_collect_treasure_stamps_kill_time,

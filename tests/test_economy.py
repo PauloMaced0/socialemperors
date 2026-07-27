@@ -132,6 +132,17 @@ def test_resource_upgrade_chains_are_monotonic(tmp):
         "Troll Mill II is still a free upgrade"
 
 
+def test_great_church_grants_population(tmp):
+    # Great Church (id 470) shipped with population=10; a config patch raises
+    # it to a meaningful housing boost. The plain Church (24) stays 0.
+    items = {int(item["id"]): item for item in get_game_config()["items"]
+             if str(item.get("name") or "")}
+    great = next(it for it in get_game_config()["items"]
+                 if str(it.get("id")) == "470" and it.get("name") == "Great Church")
+    assert int(great["population"]) == 50, \
+        "Great Church population boost not applied"
+
+
 def test_training_stables_has_a_real_production_cycle(tmp):
     # Item 227 shipped with activation=0 and collect=0 in every config dump.
     # The client computes the progress bar as (serverTime - item[4]) / activation,
@@ -343,6 +354,7 @@ TESTS = [
     test_upgrade_charges_next_tier_less_resale_credit,
     test_normal_sale_still_refunds_five_percent,
     test_resource_upgrade_chains_are_monotonic,
+    test_great_church_grants_population,
     test_training_stables_has_a_real_production_cycle,
     test_upgraded_social_buildings_list_inherited_roles_first,
     test_daily_bonus_uses_config_not_client,
