@@ -193,6 +193,32 @@ def test_collect_treasure_clamped_and_persisted(tmp):
     assert m["idCurrentTreasure"] == 3, "next quest id not persisted"
 
 
+def test_kill_rewards_persist_for_units_and_towers(tmp):
+    # The client shows +5 gold (+collect_xp xp) for a killed enemy unit and
+    # +5 gold (+ceil(floor(cost/4)*0.02) xp) for a destroyed attacking stone
+    # tower, but the server only recorded unit xp - the gold (and tower xp)
+    # vanished on the next reload.
+    save = sessions.session(UID)
+    m = save["maps"][0]
+    troll, tower = 525, 29  # Small Troll (collect_xp 1), Tower I (cost 125)
+    m["items"].extend([
+        [troll, 70, 70, 0, 0, 0],
+        [tower, 71, 71, 0, 0, 0],
+    ])
+    gold0, xp0 = int(m["coins"]), int(m["xp"])
+
+    _do(Constant.CMD_KILL, [70, 70, troll, 0, "u"])
+    assert int(m["coins"]) == gold0 + 5, "unit kill gold not credited"
+    assert int(m["xp"]) == xp0 + 1, "unit kill xp not credited"
+
+    _do(Constant.CMD_KILL, [71, 71, tower, 0, "b"])
+    # floor(125/4)=31 -> ceil(31*0.02)=1
+    assert int(m["coins"]) == gold0 + 10, "tower kill gold not credited"
+    assert int(m["xp"]) == xp0 + 2, "tower kill xp not credited"
+    assert not any(it[1:3] in ([70, 70], [71, 71]) for it in m["items"]), \
+        "killed items not removed"
+
+
 def test_collect_treasure_stamps_kill_time(tmp):
     # Killing the enemy camp must persist timestampLastTreasure; the client
     # gates the camp respawn on it, so without this a reload respawns the
@@ -469,6 +495,7 @@ TESTS = [
     test_monday_bonus_unit_whitelisted,
     test_comeback_bonus_day_gate,
     test_collect_treasure_clamped_and_persisted,
+    test_kill_rewards_persist_for_units_and_towers,
     test_collect_treasure_stamps_kill_time,
     test_buy_unit_with_cash,
     test_buy_map_creates_second_town_with_gold,
