@@ -1403,6 +1403,11 @@ def test_collectible_drop_and_collection_shape_survive_reload(tmp):
     save["privateState"].pop("collectionsCompleted", None)
     get_player_info.get_player_info(UID)
     assert len(save["privateState"]["collections"]) == 24
+    # Index 0 is a 1-based-alignment dummy and MUST be empty, or the client's
+    # collection-book loader throws at i=0 (arCollected[0] doesn't exist) and
+    # the try/catch drops every earned collectible on reload.
+    assert save["privateState"]["collections"][0] == [], \
+        "collections[0] must be empty so the client book loader survives reload"
 
     command.command(UID, _batch([
         {"cmd": Constant.CMD_ADD_COLLECTABLE, "args": [5, 3]},
@@ -1412,6 +1417,13 @@ def test_collectible_drop_and_collection_shape_survive_reload(tmp):
     assert reloaded["collections"][5][3] == 2, \
         "earned collectible count disappeared or was stored at the wrong slot"
     assert reloaded["collectionsCompleted"] == []
+
+    # The count must survive a subsequent player-info load (the reload path the
+    # player actually hits), and index 0 must stay empty.
+    get_player_info.get_player_info(UID)
+    after = sessions.session(UID)["privateState"]
+    assert after["collections"][5][3] == 2, "collectible lost on player-info reload"
+    assert after["collections"][0] == [], "collections[0] repopulated to non-empty"
 
 
 def test_merge_did_not_duplicate_social_staffing_handler(tmp):
