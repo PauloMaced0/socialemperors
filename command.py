@@ -1318,7 +1318,29 @@ def do_command(USERID, cmd, args):
         map = save["maps"][town_id]
         for item in map["items"]:
             if item[0] == id and item[1] == x and item[2] == y:
-                apply_collect_xp(map, id)
+                # Mirror the client's home-village kill drops
+                # (IsoFightingElement, GAME_MODE_NORMAL branch), or the gold/xp
+                # the player sees vanishes on the next reload:
+                #   enemy unit  -> +5 gold, +collect_xp xp (+ a collectible)
+                #   enemy tower -> +5 gold, +ceil(floor(cost/4)*0.02) xp when
+                #                  the building attacks and costs stone.
+                if str(type) == "u":
+                    map["coins"] = int(map.get("coins", 0) or 0) + 5
+                    apply_collect_xp(map, id)
+                else:
+                    try:
+                        attack = int(float(get_attribute_from_item_id(id, "attack") or 0))
+                    except (TypeError, ValueError):
+                        attack = 0
+                    if attack > 0:
+                        map["coins"] = int(map.get("coins", 0) or 0) + 5
+                        base = 0
+                        if str(get_attribute_from_item_id(id, "cost_type")) == "s":
+                            try:
+                                base = int(float(get_attribute_from_item_id(id, "cost") or 0)) // 4
+                            except (TypeError, ValueError):
+                                base = 0
+                        map["xp"] = int(map.get("xp", 0) or 0) + math.ceil(base * 0.02)
                 map["items"].remove(item)
                 break
     
