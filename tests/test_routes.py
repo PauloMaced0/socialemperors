@@ -329,6 +329,19 @@ def test_level_14_arthur_village_finishes_loading():
     body = r.get_json()
     assert body["result"] == "ok"
     assert body["playerInfo"]["name"] and isinstance(body["map"]["items"], list)
+    # A 200 alone did not prove the visit works: Arthur's bundled save omits the
+    # privateState/map fields the client reads on load, and their absence makes
+    # the loader silently loop 0->100 forever. The visit response must be seeded
+    # the same way a self-load is.
+    ps = body["privateState"]
+    assert isinstance(ps.get("collections"), list) and len(ps["collections"]) >= 24, \
+        "neighbor visit not seeded with collections -> client loading bar loops"
+    assert ps["collections"][0] == []
+    assert isinstance(ps.get("templeStep"), list)
+    assert isinstance(ps.get("attacksReceived"), list)
+    assert ps.get("dartsHasFree") in (0, 1), "dartsHasFree must be numeric 0/1"
+    m = body["map"]
+    assert "warehousedUnits" in m and "numTradesDone" in m
 
 
 def test_ruffle_page_uses_current_origin_and_supported_autoplay():

@@ -429,6 +429,13 @@ def get_player_info(USERID, map_number=None):
     colls = pState.setdefault("collections", [])
     while len(colls) < 24:
         colls.append([0])
+    # Collection index 0 is a 1-based-alignment dummy (the client's arCollected
+    # and collectible ids are 1..NUM_COLLECTIONS). The client's load loop starts
+    # at i=0 and, for any non-empty collections[0], does arCollected[0][0]=... -
+    # but arCollected[0] never exists, so it throws; the surrounding try/catch
+    # then aborts the WHOLE loop and every earned collectible vanishes on
+    # reload. An empty entry at index 0 makes the loader skip it.
+    colls[0] = []
     _ensure_town_list(save)
     _sync_global_level(save)
     # player
@@ -457,6 +464,56 @@ def get_player_info(USERID, map_number=None):
         save_session(USERID)
     return player_info
 
+def _seed_neighbor_client_state(save, now):
+    """Seed the privateState / per-map structures the client reads when it
+    loads a VISITED village. The self-load path seeds these inline in
+    get_player_info, but a bundled neighbor save such as Arthur omits them
+    (collections, templeStep, PvP lists, market/warehouse fields); the client's
+    loader then silently fails in a try/catch and, because its map-load error
+    handler is a no-op, the loading bar loops 0->100 forever. Idempotent."""
+    pState = save["privateState"]
+    pState.setdefault("timeStampLastDart",
+                      int(pState.get("timeStampDartsNewFree", 0) or 0))
+    pState.setdefault("templeStep", [])
+    pState.setdefault("timeStampTemple", 0)
+    if not isinstance(pState.get("attacksSent"), list):
+        pState["attacksSent"] = []
+    if not isinstance(pState.get("attacksReceived"), list):
+        pState["attacksReceived"] = []
+    for pvp_key in (
+        "attacksWon", "attacksLost", "honor", "tsAttacksReset",
+        "attacksPack", "spyingsPack", "tsSpyingsReset",
+    ):
+        try:
+            pState[pvp_key] = int(pState.get(pvp_key, 0) or 0)
+        except (TypeError, ValueError):
+            pState[pvp_key] = 0
+    if not isinstance(pState.get("spyings"), list):
+        pState["spyings"] = []
+    pState.setdefault("collectionsCompleted", [])
+    colls = pState.setdefault("collections", [])
+    while len(colls) < 24:
+        colls.append([0])
+    colls[0] = []
+    for m in save["maps"]:
+        try:
+            trades_done = int(m.get("numTradesDone", 0) or 0)
+        except (TypeError, ValueError):
+            trades_done = 0
+        m["numTradesDone"] = min(max(trades_done, 0), 20)
+        try:
+            m["timestampLastTrade"] = max(
+                0, int(m.get("timestampLastTrade", 0) or 0)
+            )
+        except (TypeError, ValueError):
+            m["timestampLastTrade"] = 0
+        if not isinstance(m.get("resourcesTraded"), dict):
+            m["resourcesTraded"] = {}
+        m.setdefault("resourceAlliesMarket", "n")
+        m.setdefault("warehouseAditionalCapacitySingle", 0)
+        m.setdefault("warehousedUnits", {})
+
+
 def get_neighbor_info(userid, map_number):
     save = neighbor_session(userid)
     if save is None:
@@ -471,14 +528,20 @@ def get_neighbor_info(userid, map_number):
         pi["name"] = names[default]
     _ensure_town_list(save)
     _sync_global_level(save)
+    now = timestamp_now()
+    _seed_neighbor_client_state(save, now)
     map_idx = _clamp_map(save, map_number)
+    response_pstate = copy.deepcopy(save["privateState"])
+    # The old Flash JSON reader treats a bare false as a truthy object; emit
+    # this protocol flag as numeric 0/1 (matches the self-load path).
+    response_pstate["dartsHasFree"] = 1 if save["privateState"].get("dartsHasFree") else 0
     neighbor_info = {
         "result": "ok",
         "processed_errors": 0,
-        "timestamp": timestamp_now(),
+        "timestamp": now,
         "playerInfo": save["playerInfo"],
         "map": save["maps"][map_idx],
-        "privateState": save["privateState"],
+        "privateState": response_pstate,
         "neighbors": neighbors(userid)
     }
     return neighbor_info
