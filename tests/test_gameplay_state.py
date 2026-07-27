@@ -969,14 +969,12 @@ def test_natural_resources_use_persisted_random_respawns(tmp):
     respawned_gold = next(
         item for item in town["items"] if item[0] in gold_ids
     )
-    assert respawned_stone[1:3] != [72, 72], \
-        "stone regenerated on its depleted tile"
-    assert respawned_gold[1:3] != [73, 72], \
-        "gold regenerated on its depleted tile"
-    for item in (respawned_stone, respawned_gold):
-        big_tile = (int(item[2]) // 20) * 5 + int(item[1]) // 20 + 1
-        assert big_tile not in town["expansions"], \
-            "natural mineral respawned inside owned/buildable land"
+    # Minerals now regrow on their ORIGINAL harvested tile (like trees), so a
+    # reload never relocates a deposit.
+    assert respawned_stone[1:3] == [72, 72], \
+        "stone did not regrow on its original tile"
+    assert respawned_gold[1:3] == [73, 72], \
+        "gold did not regrow on its original tile"
     assert town["pendingMineralRespawns"] == []
 
     reloaded = _reload()
@@ -1036,7 +1034,8 @@ def test_legacy_mineral_placeholders_migrate_without_resetting_timer(tmp):
             Constant.ID_BUILDING_STONE_4,
         }
     )
-    assert replacement[1:3] != [70, 71]
+    # Regrowth restores the deposit on its original tile now, not a random one.
+    assert replacement[1:3] == [70, 71]
     assert town["pendingMineralRespawns"] == []
 
 
@@ -1133,6 +1132,25 @@ def test_legacy_empty_map_gets_one_stock_resource_repopulation(tmp):
                    and item[1:3] == [74, 74]
                    for item in sessions.session(UID)["maps"][0]["items"]), \
         "legacy recovery remained enabled after its one allowed population"
+
+
+def test_reload_marker_relocks_so_trees_do_not_wander(tmp):
+    # A town left with naturalResourcesInitialized=0 while it still HAS wild
+    # resources would clear the client reload marker on every load, so the
+    # client repopulation pass re-randomizes ("wanders") existing trees each
+    # reload. Serving must re-lock the flag and set the marker.
+    save = sessions.session(UID)
+    save["playerInfo"]["completed_tutorial"] = 1
+    town = save["maps"][0]
+    town["items"].append([Constant.ID_BUILDING_TREE_1, 55, 55, 0, 0, 0])
+    town["naturalResourcesInitialized"] = 0
+
+    marker = str(Constant.SUBCATFUNC_RESOURCE_REGEN)
+    body = get_player_info.get_player_info(UID, 0)
+    assert town["naturalResourcesInitialized"] == 1, \
+        "reload marker flag not re-locked while resources are present"
+    assert body["privateState"]["arrayAnimals"].get(marker) == 1, \
+        "client repopulation not suppressed -> trees would wander on reload"
 
 
 def test_ship_quest_requires_a_fully_staffed_harbour(tmp):
@@ -1532,6 +1550,7 @@ TESTS = [
     test_legacy_mineral_placeholders_migrate_without_resetting_timer,
     test_random_mineral_respawn_respects_stock_family_cap,
     test_legacy_empty_map_gets_one_stock_resource_repopulation,
+    test_reload_marker_relocks_so_trees_do_not_wander,
     test_ship_quest_requires_a_fully_staffed_harbour,
     test_producer_limit_applies_across_upgrade_family,
     test_weather_spell_and_mana_state_survive_reload,

@@ -203,11 +203,15 @@ def _random_wild_resource_position(town, occupied, excluded):
 
 
 def _respawn_mature_minerals(save, now):
-    """Replace depleted gold/stone at a new random wild-map position.
+    """Restore depleted gold/stone at their ORIGINAL harvested tile.
 
-    Each harvested node owns one persisted three-hour timer. The timer is
-    removed only when a replacement is created (or its family is already at
-    the stock hard cap), so reloads cannot accelerate or duplicate respawns.
+    Each harvested node owns one persisted three-hour timer carrying the tile
+    it was mined from. When the timer elapses the deposit reappears on that
+    exact tile (mirroring the tree cooldown), so a reload never relocates it.
+    If the player has since built on the tile the pending entry is consumed.
+    The timer is removed only when the deposit is restored, skipped (tile
+    taken), or its family is already at the stock hard cap, so reloads cannot
+    accelerate or duplicate respawns.
     """
     changed = False
     for town in save.get("maps", []):
@@ -215,7 +219,6 @@ def _respawn_mature_minerals(save, now):
         if not isinstance(pending, list) or not pending:
             continue
         items = town.setdefault("items", [])
-        occupied = _occupied_map_tiles(town)
         family_counts = {
             family: sum(
                 1 for item in items
@@ -227,10 +230,7 @@ def _respawn_mature_minerals(save, now):
         for entry in pending:
             try:
                 family = str(entry["family"])
-                source = (
-                    int(entry["source_x"]),
-                    int(entry["source_y"]),
-                )
+                x, y = int(entry["source_x"]), int(entry["source_y"])
                 ready_at = int(entry["at"])
             except (KeyError, TypeError, ValueError):
                 changed = True
@@ -247,27 +247,48 @@ def _respawn_mature_minerals(save, now):
                 # stock three-cluster (3 x 5-7) maximum.
                 changed = True
                 continue
-            position = _random_wild_resource_position(
-                town, occupied, source
+            occupied = any(
+                item and int(item[1]) == x and int(item[2]) == y
+                for item in items
             )
-            if position is None:
-                remaining.append(entry)
-                continue
-            resource_id = random.choice(_MINERAL_RESPAWN_IDS[family])
-            items.append([
-                resource_id,
-                position[0],
-                position[1],
-                0,
-                int(now),
-                0,
-            ])
-            occupied.add(position)
-            family_counts[family] += 1
+            if not occupied:
+                # Prefer the original deposit id if it was recorded; otherwise
+                # any member of the family reads identically to the client.
+                try:
+                    resource_id = int(entry.get("id", 0)) or 0
+                except (TypeError, ValueError):
+                    resource_id = 0
+                if resource_id not in _MINERAL_RESPAWN_IDS[family]:
+                    resource_id = _MINERAL_RESPAWN_IDS[family][0]
+                items.append([resource_id, x, y, 0, int(now), 0])
+                family_counts[family] += 1
+            # Whether restored or the tile was claimed, the timer is consumed.
             changed = True
         if remaining != pending:
             town["pendingMineralRespawns"] = remaining
     return changed
+
+
+_ALL_NATURAL_RESOURCE_IDS = (
+    frozenset(_MINERAL_RESPAWN_IDS["gold"])
+    | frozenset(_MINERAL_RESPAWN_IDS["stone"])
+    | {Constant.ID_BUILDING_TREE_1, Constant.ID_BUILDING_TREE_2,
+       Constant.ID_BUILDING_TREE_3}
+)
+
+
+def _town_has_natural_resources(town):
+    """True if the town still has wild trees/minerals present or a pending
+    server-side respawn scheduled for one. Used to re-lock the reload marker
+    after the one-time legacy repopulation so it cannot re-fire each reload."""
+    for item in town.get("items", []):
+        if item and int(item[0]) in _ALL_NATURAL_RESOURCE_IDS:
+            return True
+    for key in ("pendingTreeRespawns", "pendingMineralRespawns"):
+        pending = town.get(key)
+        if isinstance(pending, list) and pending:
+            return True
+    return False
 
 
 def _sync_natural_resource_reload_marker(save, map_idx):
@@ -286,6 +307,15 @@ def _sync_natural_resource_reload_marker(save, map_idx):
         save["playerInfo"].get("completed_tutorial", 0) or 0
     )
     initialized = int(town.get("naturalResourcesInitialized", 0) or 0)
+    # A legacy-empty town is reopened once (naturalResourcesInitialized=0) so
+    # MapInitializer can repopulate it. Re-lock the flag the moment the town
+    # actually has its wild resources again (present items or a pending
+    # respawn), otherwise the flag stays 0, the marker is cleared on EVERY
+    # reload, and the client repopulation pass re-randomizes - i.e. visibly
+    # "wanders" - the existing trees/minerals each time.
+    if not initialized and _town_has_natural_resources(town):
+        town["naturalResourcesInitialized"] = 1
+        initialized = 1
     if tutorial_done and initialized:
         animals[marker] = 1
     else:
