@@ -232,6 +232,16 @@ def test_festival_decoration_harvest_pays_gold_but_not_quest_treasure(tmp):
     _do(Constant.CMD_SELL, [61, 61, chest, 0, 0, Constant.SELL_REASON_TREASURE])
     assert m["coins"] == 0, "quest treasure chest wrongly paid festival gold"
 
+    # An enemy-guarded festival (Viking Festival) must NOT pay on the ungated
+    # harvest path - otherwise the reward is collectable without killing its
+    # goblins (and is a buy-low/harvest-high exploit).
+    m["coins"] = 0
+    viking = 490  # Viking Festival - spawns goblins that must be cleared
+    m["items"].append([viking, 62, 62, 0, 0, 0])
+    _do(Constant.CMD_SELL, [62, 62, viking, 0, 0, Constant.SELL_REASON_TREASURE])
+    assert m["coins"] < Constant.TREASURE_DECORATION_GOLD, \
+        "enemy-guarded festival paid treasure gold without a fight"
+
 
 def test_bank_exchanges_gold_for_cash(tmp):
     # The Bank window's EXCHANGE button (repurposed direction): 15,000 gold ->

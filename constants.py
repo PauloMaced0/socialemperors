@@ -137,28 +137,22 @@ class Constant:
     BANK_EXCHANGE_CASH_GAIN = 1
 
     # Festival / monument decorations carry subcat_functional 811
-    # (SUBCATFUNC_TREASURE), so the client harvests them once (peasant click)
-    # and consumes the building via CMD_SELL(SELL_REASON_TREASURE). Their
-    # configured reward is 0, so they used to vanish for nothing. Grant this
-    # one-time gold payout instead. Scoped to these purchasable decoration ids
-    # only - quest camp treasures (chest/prisoners) share the subcat but are
-    # rewarded through CMD_COLLECT_TREASURE and must NOT be paid here too.
+    # (SUBCATFUNC_TREASURE). The client harvests them once (peasant click) and
+    # consumes the building via CMD_SELL(SELL_REASON_TREASURE) on an UNGATED
+    # code path (IsoElement) - there is no server check that any guarding
+    # enemies were cleared first. Most 811 decorations (Viking Festival, Golem
+    # Headquarters, Viper Nest, Big Nest, Black Yeti Cave, ...) are enemy-
+    # guarded treasures: you are meant to defeat their spawns before the reward.
+    # Paying a flat gold reward for ALL of them let the player collect the money
+    # WITHOUT killing the goblins/enemies (and, since they cost 300g to place,
+    # a buy-low/harvest-high loop). The combat gate is client-side and cannot be
+    # verified here, so only the plain cosmetic festival the user validated
+    # (Chinese Festival) is paid on harvest. Enemy-guarded ids intentionally pay
+    # nothing on this path. Quest camp treasures (chest/prisoners) share the
+    # subcat too and are rewarded through CMD_COLLECT_TREASURE - never here.
     TREASURE_DECORATION_GOLD = 1000
     TREASURE_DECORATION_IDS = frozenset({
-        487,   # Chinese Festival
-        489,   # Golem Headquarters
-        490,   # Viking Festival
-        492,   # Black Yeti Cave
-        493,   # Tlaloc Altar
-        495,   # Viper Nest
-        497,   # Tree of Life
-        499,   # Sarcophagus
-        1200,  # Deep Hole
-        1202,  # Big Nest
-        1204,  # Captive Cleopatra
-        1205,  # Atlantis Decoration
-        1207,  # Infernal Field
-        1208,  # Tree (Chinese decoration)
+        487,   # Chinese Festival (cosmetic, no guarding enemies)
     })
     ID_BUILDING_TREE_1 = 19
     ID_BUILDING_TREE_2 = 20
