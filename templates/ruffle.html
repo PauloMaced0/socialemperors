@@ -152,7 +152,20 @@
                         friendsInfo: {{ friendsInfo | tojson }},
                         serverTime: "{{serverTime}}",
                         forceSyncError: "1",
-                        forceAttackReload: "0",
+                        // canvasAddress is where the client navigates the top
+                        // window to reload the game (sync-error / attack-end).
+                        // Without it those navigations went to "undefined?..."
+                        // and did nothing. /play.html re-auths the session and
+                        // redirects back into the game.
+                        canvasaddress: "/play.html",
+                        // Reload the game when returning from a PvP attack, so
+                        // the village reflects the server-reconciled army
+                        // (dead troops gone, freshly-placed units kept). The
+                        // client otherwise rebuilds the home map from a stale
+                        // in-memory snapshot (Base.Main.buildingArray) that is
+                        // never reconciled with battle casualties, so the army
+                        // only updated on a manual reload.
+                        forceAttackReload: "1",
                         forceQuestReload: "0"
                     }
                 });
