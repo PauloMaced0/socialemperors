@@ -826,13 +826,57 @@ def _find_open_unit_position(town):
     return (50, 50)
 
 
-def _reconcile_battle_units(town, counted_units):
+# Units the client's IsoFightingElement.checkPutToGraveyard never stores.
+_GRAVEYARD_EXCLUDED_IDS = frozenset({
+    Constant.ID_UNIT_PEASANT_MALE,
+    Constant.ID_UNIT_PEASANT_FEMALE,
+    Constant.ID_UNIT_BLUE_PHOENIX,
+})
+
+
+def _add_to_graveyard(save, unit_id, count=1):
+    """Persist a fallen unit so the Graveyard can resurrect it after a reload.
+
+    The client reads ``privateState.deadHeroes`` as an id->count map and splits
+    heroes (hero-resurrect popup) from regular units (Graveyard) itself, so a
+    single dict feeds both. Peasants and the Blue Phoenix are never stored,
+    mirroring checkPutToGraveyard. Without this the graveyard was always empty
+    - the client tracks deaths only locally and nothing persisted them.
+    """
+    unit_id, count = int(unit_id), int(count)
+    if count <= 0 or unit_id in _GRAVEYARD_EXCLUDED_IDS:
+        return
+    grave = save["privateState"].get("deadHeroes")
+    if not isinstance(grave, dict):
+        grave = {}
+        save["privateState"]["deadHeroes"] = grave
+    key = str(unit_id)
+    grave[key] = int(grave.get(key, 0) or 0) + count
+
+
+def _remove_from_graveyard(save, unit_id):
+    """Consume one stored unit when it is resurrected, so it does not linger."""
+    grave = save["privateState"].get("deadHeroes")
+    if not isinstance(grave, dict):
+        return
+    key = str(int(unit_id))
+    if int(grave.get(key, 0) or 0) <= 0:
+        return
+    grave[key] -= 1
+    if grave[key] <= 0:
+        del grave[key]
+
+
+def _reconcile_battle_units(town, counted_units, graveyard_save=None):
     """Persist casualties and explicit rescued/free units from a battle.
 
     The Flash counted array is [id, initial, killed, recovered]. Units already
     exist on the home map while the temporary quest/PvP map runs. Therefore
     only ``killed - recovered`` must be removed. A row with recovery greater
     than its killed count represents newly rescued/free units and is added.
+
+    ``graveyard_save`` (the save that owns ``town``) receives every permanent
+    casualty so the Graveyard keeps troops that died vs trolls or players.
     """
     if not isinstance(counted_units, list):
         return {"removed": 0, "added": 0}
@@ -844,6 +888,10 @@ def _reconcile_battle_units(town, counted_units):
         unit_id, _initial, killed, recovered = values
         losses = max(0, killed - recovered)
         bonuses = max(0, recovered - killed)
+        # Every permanent death goes to the graveyard (matching the client's
+        # local deadUnits tally), whether or not a home-map item still backs it.
+        if graveyard_save is not None and losses > 0:
+            _add_to_graveyard(graveyard_save, unit_id, losses)
         for _ in range(losses):
             victim = next((
                 item for item in town.get("items", [])
@@ -1322,7 +1370,12 @@ def do_command(USERID, cmd, args):
             if get_attribute_from_item_id(id, "cost_type") != "c":
                 apply_cost(save["playerInfo"], save["maps"][town_id], id, price_multiplier)
         if reason == 'KILL':
-            pass # TODO : add to graveyard
+            # A home-village unit death: the client appends its
+            # checkPutToGraveyard() result as the last arg (1 = store it,
+            # 0 = peasant/summoned/hero-handled-separately). Persist it so the
+            # Graveyard keeps the fallen troop.
+            if removed and len(args) > 6 and int(args[6] or 0) == 1:
+                _add_to_graveyard(save, id)
         return removed
     
     elif cmd == Constant.CMD_KILL:
@@ -2100,6 +2153,8 @@ def do_command(USERID, cmd, args):
         level = 0 # TODO
         orientation = 0
         map["items"] += [[unit_id, x, y, orientation, collected_at_timestamp, level]]
+        # Consume it from the graveyard so a reload does not resurrect it again.
+        _remove_from_graveyard(save, unit_id)
 
     elif cmd == Constant.CMD_BUY_SUPER_OFFER_PACK:
         town_id = args[0]
@@ -2276,7 +2331,7 @@ def do_command(USERID, cmd, args):
                 if win else "not a win"
             )
             print(f"Quest {quest_id} prize not awarded ({reason}).")
-        unit_result = _reconcile_battle_units(save["maps"][town_id], units)
+        unit_result = _reconcile_battle_units(save["maps"][town_id], units, save)
 
         if win and quest_index is not None:
             state["unlockedQuestIndex"] = min(
@@ -2512,7 +2567,7 @@ def do_command(USERID, cmd, args):
         map["coins"] += gold_gained
         map["xp"] += xp_gained
         casualties = _reconcile_battle_units(
-            map, data.get("attacker_units") or []
+            map, data.get("attacker_units") or [], save
         )
         if not victim_id:
             # Older clients and the enemy-camp return flow reuse end_attack
@@ -2566,6 +2621,7 @@ def do_command(USERID, cmd, args):
             _reconcile_battle_units(
                 defender["maps"][defender_map_id],
                 data.get("victim_units") or [],
+                defender,
             )
             save_session(victim_id)
 
