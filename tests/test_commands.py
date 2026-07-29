@@ -462,6 +462,21 @@ def test_buy_unit_with_cash(tmp):
     assert save["playerInfo"]["cash"] == 0, "cash price not charged"
 
 
+def test_recruitment_prize_buyable_with_cash(tmp):
+    # The Recruitment Prize (387) can't be earned on a private server (no real
+    # invites), so it is a cash purchase (config patch: cost_type c, cost 10).
+    from constants import Constant as C
+    assert get_game_config()  # config loaded (patch applied)
+    save = sessions.session(UID)
+    save["playerInfo"]["cash"] = 25
+    n_items = len(_items(save))
+    prize = C.ID_BUILDING_ALLIES_RECRUITMENT  # 387
+    _do(Constant.CMD_BUY, [prize, 40, 40, 0, 0, 0, 1, "b"])
+    assert _items(save)[-1][0] == prize, "Recruitment Prize not placed"
+    assert save["playerInfo"]["cash"] == 15, \
+        f"cash price (10) not charged: {save['playerInfo']['cash']}"
+
+
 # --- buy second town -------------------------------------------------------
 
 def test_buy_map_creates_second_town_with_gold(tmp):
@@ -721,6 +736,7 @@ TESTS = [
     test_kill_rewards_persist_for_units_and_towers,
     test_collect_treasure_stamps_kill_time,
     test_buy_unit_with_cash,
+    test_recruitment_prize_buyable_with_cash,
     test_buy_map_creates_second_town_with_gold,
     test_buy_map_with_cash,
     test_buy_map_rejects_second_purchase,
