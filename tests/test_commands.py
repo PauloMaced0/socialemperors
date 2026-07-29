@@ -331,6 +331,54 @@ def test_kill_reward_credited_for_client_only_enemy(tmp):
     assert int(m["xp"]) >= xp0, "xp went backwards on client-only kill"
 
 
+def test_battle_deaths_are_kept_in_the_graveyard(tmp):
+    # Units that die vs trolls (quest) or players must land in the Graveyard so
+    # they can be resurrected. Counted array row = [id, initial, killed,
+    # recovered]; permanent losses = killed - recovered.
+    save = sessions.session(UID)
+    soldier = 535   # Ranger (stored)
+    peasant = 500   # peasant - never stored
+    payload = {
+        "map": 0, "resources": {"g": 0, "x": 0},
+        "units": [[soldier, 3, 2, 1], [peasant, 1, 1, 0]],
+        "win": 1, "duration": 10, "voluntary_end": 0,
+        "quest_id": 100000006, "difficulty": 1,
+    }
+    _do(Constant.CMD_END_QUEST, [json.dumps(payload)])
+    grave = save["privateState"].get("deadHeroes")
+    assert isinstance(grave, dict), "graveyard was not created"
+    assert grave.get(str(soldier)) == 1, "battle death not kept in graveyard"
+    assert str(peasant) not in grave, "peasant wrongly stored in graveyard"
+
+
+def test_pvp_attacker_casualties_go_to_graveyard(tmp):
+    save = sessions.session(UID)
+    soldier = 535
+    payload = {
+        "attacker": {"name": "me", "level": 1, "user_id": UID,
+                     "world_id": 0, "map": 0, "race": "h"},
+        "victim": {}, "resources": {"g": 0, "x": 0},
+        "resources_victim": {"g": 0},
+        "attacker_units": [[soldier, 2, 2, 0]],  # both killed, none recovered
+        "victim_units": [], "win": 1, "duration": 10,
+        "voluntary_end": 0, "townhall_gold": 0, "honor": 0,
+    }
+    _do(Constant.CMD_END_ATTACK, [json.dumps(payload)])
+    grave = save["privateState"].get("deadHeroes")
+    assert isinstance(grave, dict) and grave.get(str(soldier)) == 2, \
+        "PvP attacker casualties not kept in graveyard"
+
+
+def test_resurrect_consumes_from_graveyard(tmp):
+    save = sessions.session(UID)
+    m = save["maps"][0]
+    save["privateState"]["deadHeroes"] = {str(RANGER): 2}
+    m["coins"] = 1500  # gold-path resurrect (cost_unit_cash 3 * 500)
+    _do(Constant.CMD_RESURRECT_HERO, [RANGER, 5, 5, 0])
+    assert save["privateState"]["deadHeroes"].get(str(RANGER)) == 1, \
+        "resurrect did not consume the unit from the graveyard"
+
+
 def _end_quest(quest_id, difficulty, gold, xp, win=True, town=0):
     payload = {
         "map": town,
@@ -691,6 +739,9 @@ TESTS = [
     test_mission_reward_is_paid_only_once_after_completion,
     test_kill_reward_persists_when_enemy_moved,
     test_kill_reward_credited_for_client_only_enemy,
+    test_battle_deaths_are_kept_in_the_graveyard,
+    test_pvp_attacker_casualties_go_to_graveyard,
+    test_resurrect_consumes_from_graveyard,
     test_quest_reward_paid_once_per_difficulty,
     test_survival_end_stores_prizes,
 ]
