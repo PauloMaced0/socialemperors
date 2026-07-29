@@ -312,17 +312,19 @@ def test_pvp_load_strips_defenders_enemy_camp(tmp):
     dm["race"] = "h"
     dm["enemyCampActive"] = 1
     dm["items"].extend([
-        [525, 10, 10, 0, 0, 0],   # goblin
+        [525, 10, 10, 0, 0, 0],   # goblin (troll race)
         [526, 11, 10, 0, 0, 0],   # goblin
-        [291, 12, 10, 0, 0, 0],   # troll camp tower
-        [83, 13, 10, 0, 0, 0],    # prisoner (camp marker)
-        [536, 14, 10, 0, 0, 0],   # good troll - player-ownable, must stay
+        [601, 16, 10, 0, 0, 0],   # Rhinorider - high-tier camp (race t)
+        [590, 17, 10, 0, 0, 0],   # Troll Healer - high-tier camp (race t)
+        [291, 12, 10, 0, 0, 0],   # troll camp tower (race t building)
+        [83, 13, 10, 0, 0, 0],    # prisoner (camp marker, race n)
+        [536, 14, 10, 0, 0, 0],   # good troll - player-ownable (race h), must stay
         [29, 15, 10, 0, 0, 0],    # Tower I - defender's real defence, must stay
     ])
 
     served = get_player_info.get_neighbor_info(other, 0)["map"]
     ids = [it[0] for it in served["items"] if it]
-    for gid in (525, 526, 291, 83):
+    for gid in (525, 526, 601, 590, 291, 83):
         assert gid not in ids, f"camp entity {gid} served to attacker"
     assert 536 in ids, "player-owned good troll wrongly stripped"
     assert 29 in ids, "defender's real tower wrongly stripped"
