@@ -153,19 +153,20 @@
                         serverTime: "{{serverTime}}",
                         forceSyncError: "1",
                         // canvasAddress is where the client navigates the top
-                        // window to reload the game (sync-error / attack-end).
-                        // Without it those navigations went to "undefined?..."
-                        // and did nothing. /play.html re-auths the session and
+                        // window to reload the game (sync-error path). Without
+                        // it that navigation went to "undefined?..." and did
+                        // nothing. /play.html re-auths the session and
                         // redirects back into the game.
                         canvasaddress: "/play.html",
-                        // Reload the game when returning from a PvP attack, so
-                        // the village reflects the server-reconciled army
-                        // (dead troops gone, freshly-placed units kept). The
-                        // client otherwise rebuilds the home map from a stale
-                        // in-memory snapshot (Base.Main.buildingArray) that is
-                        // never reconciled with battle casualties, so the army
-                        // only updated on a manual reload.
-                        forceAttackReload: "1",
+                        // forceAttackReload is DISABLED: enabling it auto-
+                        // reloaded the page on attack-end, but the reload
+                        // navigated away before the async END_ATTACK POST (which
+                        // credits the win rewards) finished, so the browser
+                        // aborted it and the player LOST the rewards. Reward
+                        // loss is worse than the stale-army display it aimed to
+                        // fix, so the village army again only refreshes on a
+                        // manual reload until a save-safe fix exists.
+                        forceAttackReload: "0",
                         forceQuestReload: "0"
                     }
                 });
