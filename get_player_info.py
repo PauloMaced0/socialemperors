@@ -553,27 +553,22 @@ def _seed_neighbor_client_state(save, now):
         m.setdefault("warehousedUnits", {})
 
 
-# Neutral enemy-camp entities (invading goblins/trolls, their camp structures,
-# and prize markers) that occupy a HUMAN village. They are NOT the defender's
-# army, so they must not be served to a PvP attacker/visitor - otherwise they
-# spawn as hostiles and attack the attacker's troops. Scoped to human towns:
-# a troll-race player's own base legitimately uses these ids. Player-ownable
-# trolls (rehabbed 532, good 536, war 552) are deliberately excluded.
-_PVP_HOSTILE_CAMP_IDS = frozenset(_ENEMY_CAMP_MARKER_IDS | {
-    Constant.ID_UNIT_TROLL_1, Constant.ID_UNIT_TROLL_2, Constant.ID_UNIT_TROLL_3,
-    Constant.ID_UNIT_TROLL_4, Constant.ID_UNIT_TROLL_5, Constant.ID_UNIT_TROLL_6,
-    Constant.ID_UNIT_TROLL_7, Constant.ID_UNIT_TROLL_8,
-    Constant.ID_BUILDING_LOST_TROLL,
-    Constant.ID_BUILDING_TROLL_TOWNHALL_1, Constant.ID_BUILDING_TROLL_FARM_1,
-    Constant.ID_BUILDING_TROLL_TOWER_1, Constant.ID_BUILDING_TROLL_WALL_1,
-    Constant.ID_BUILDING_TROLL_TOWER_2, Constant.ID_BUILDING_TROLL_TOWER_3,
-    Constant.ID_BUILDING_TROLL_WALL_2, Constant.ID_BUILDING_TROLL_WALL_3,
-    Constant.ID_BUILDING_TROLL_HOUSE_1, Constant.ID_BUILDING_TROLL_HOUSE_2,
-    Constant.ID_BUILDING_TROLL_HOUSE_3, Constant.ID_BUILDING_TROLL_FARM_2,
-    Constant.ID_BUILDING_TROLL_FARM_3, Constant.ID_BUILDING_TROLL_TOWNHALL_2,
-    Constant.ID_BUILDING_TROLL_TOWNHALL_3, Constant.ID_BUILDING_TROLL_TOWER_4,
-    Constant.ID_BUILDING_TROLL_TOWER_5,
-})
+def _is_pvp_camp_entity(item):
+    """True if a saved item is part of a human village's invading enemy camp.
+
+    The camp is entirely troll-RACE (config race 't': goblins/trolls of every
+    tier - TROLL_1..8, Rhinorider, Healer, ... - plus troll camp buildings),
+    or a neutral camp prize marker (prisoners/treasures/totems, in
+    _ENEMY_CAMP_MARKER_IDS). Player-ownable "trolls" (rehabbed/good/war) are
+    config race 'h', so they are NOT matched. Using the config race instead of
+    a hand-maintained id list means new/higher-tier camp units are covered
+    automatically."""
+    if not item:
+        return False
+    iid = int(item[0])
+    if iid in _ENEMY_CAMP_MARKER_IDS:
+        return True
+    return str(get_attribute_from_item_id(iid, "race")) == "t"
 
 
 def _strip_pvp_camp(town):
@@ -582,16 +577,16 @@ def _strip_pvp_camp(town):
     A PvP attacker/visitor loads the defender's map; the neutral goblin/troll
     camp otherwise spawns and attacks them. Deep-copy so the defender's real
     save keeps its camp - only the served copy is stripped. Troll-race towns
-    are left untouched (their own base uses these ids)."""
+    are left untouched (their own base legitimately uses troll-race ids)."""
     if not isinstance(town, dict) or str(town.get("race", "h")) != "h":
         return town
     items = town.get("items") or []
-    if not any(item and int(item[0]) in _PVP_HOSTILE_CAMP_IDS for item in items):
+    if not any(_is_pvp_camp_entity(item) for item in items):
         return town
     clone = copy.deepcopy(town)
     clone["items"] = [
         item for item in clone.get("items", [])
-        if not (item and int(item[0]) in _PVP_HOSTILE_CAMP_IDS)
+        if not _is_pvp_camp_entity(item)
     ]
     clone["enemyCampActive"] = 0
     return clone
