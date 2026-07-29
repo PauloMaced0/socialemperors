@@ -5,7 +5,7 @@ import random
 from sessions import (
     session, save_session, neighbor_session, neighbors,
     refresh_enemy_camp_timer, _display_name, _repair_social_building_state,
-    _repair_natural_resource_state,
+    _repair_natural_resource_state, _ENEMY_CAMP_MARKER_IDS,
 )
 from engine import timestamp_now
 from constants import Constant
@@ -553,6 +553,50 @@ def _seed_neighbor_client_state(save, now):
         m.setdefault("warehousedUnits", {})
 
 
+# Neutral enemy-camp entities (invading goblins/trolls, their camp structures,
+# and prize markers) that occupy a HUMAN village. They are NOT the defender's
+# army, so they must not be served to a PvP attacker/visitor - otherwise they
+# spawn as hostiles and attack the attacker's troops. Scoped to human towns:
+# a troll-race player's own base legitimately uses these ids. Player-ownable
+# trolls (rehabbed 532, good 536, war 552) are deliberately excluded.
+_PVP_HOSTILE_CAMP_IDS = frozenset(_ENEMY_CAMP_MARKER_IDS | {
+    Constant.ID_UNIT_TROLL_1, Constant.ID_UNIT_TROLL_2, Constant.ID_UNIT_TROLL_3,
+    Constant.ID_UNIT_TROLL_4, Constant.ID_UNIT_TROLL_5, Constant.ID_UNIT_TROLL_6,
+    Constant.ID_UNIT_TROLL_7, Constant.ID_UNIT_TROLL_8,
+    Constant.ID_BUILDING_LOST_TROLL,
+    Constant.ID_BUILDING_TROLL_TOWNHALL_1, Constant.ID_BUILDING_TROLL_FARM_1,
+    Constant.ID_BUILDING_TROLL_TOWER_1, Constant.ID_BUILDING_TROLL_WALL_1,
+    Constant.ID_BUILDING_TROLL_TOWER_2, Constant.ID_BUILDING_TROLL_TOWER_3,
+    Constant.ID_BUILDING_TROLL_WALL_2, Constant.ID_BUILDING_TROLL_WALL_3,
+    Constant.ID_BUILDING_TROLL_HOUSE_1, Constant.ID_BUILDING_TROLL_HOUSE_2,
+    Constant.ID_BUILDING_TROLL_HOUSE_3, Constant.ID_BUILDING_TROLL_FARM_2,
+    Constant.ID_BUILDING_TROLL_FARM_3, Constant.ID_BUILDING_TROLL_TOWNHALL_2,
+    Constant.ID_BUILDING_TROLL_TOWNHALL_3, Constant.ID_BUILDING_TROLL_TOWER_4,
+    Constant.ID_BUILDING_TROLL_TOWER_5,
+})
+
+
+def _strip_pvp_camp(town):
+    """Return the town with its invading enemy camp removed (human towns only).
+
+    A PvP attacker/visitor loads the defender's map; the neutral goblin/troll
+    camp otherwise spawns and attacks them. Deep-copy so the defender's real
+    save keeps its camp - only the served copy is stripped. Troll-race towns
+    are left untouched (their own base uses these ids)."""
+    if not isinstance(town, dict) or str(town.get("race", "h")) != "h":
+        return town
+    items = town.get("items") or []
+    if not any(item and int(item[0]) in _PVP_HOSTILE_CAMP_IDS for item in items):
+        return town
+    clone = copy.deepcopy(town)
+    clone["items"] = [
+        item for item in clone.get("items", [])
+        if not (item and int(item[0]) in _PVP_HOSTILE_CAMP_IDS)
+    ]
+    clone["enemyCampActive"] = 0
+    return clone
+
+
 def get_neighbor_info(userid, map_number):
     save = neighbor_session(userid)
     if save is None:
@@ -579,7 +623,7 @@ def get_neighbor_info(userid, map_number):
         "processed_errors": 0,
         "timestamp": now,
         "playerInfo": save["playerInfo"],
-        "map": save["maps"][map_idx],
+        "map": _strip_pvp_camp(save["maps"][map_idx]),
         "privateState": response_pstate,
         "neighbors": neighbors(userid)
     }

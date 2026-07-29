@@ -300,6 +300,41 @@ def test_saved_players_are_not_automatic_neighbors(tmp):
         "friendship disappeared after reload"
 
 
+def test_pvp_load_strips_defenders_enemy_camp(tmp):
+    # Attacking/visiting a human player must not spawn their neutral enemy camp
+    # (goblins/trolls, troll towers, prisoners) - those would attack the
+    # attacker. The defender's own army/defences stay, and the defender's real
+    # save keeps its camp.
+    other = "test-gameplay-camp-0003"
+    _add_saved_player(tmp, other, "Camp Empire")
+    sessions.load_saved_villages()
+    dm = sessions.session(other)["maps"][0]
+    dm["race"] = "h"
+    dm["enemyCampActive"] = 1
+    dm["items"].extend([
+        [525, 10, 10, 0, 0, 0],   # goblin
+        [526, 11, 10, 0, 0, 0],   # goblin
+        [291, 12, 10, 0, 0, 0],   # troll camp tower
+        [83, 13, 10, 0, 0, 0],    # prisoner (camp marker)
+        [536, 14, 10, 0, 0, 0],   # good troll - player-ownable, must stay
+        [29, 15, 10, 0, 0, 0],    # Tower I - defender's real defence, must stay
+    ])
+
+    served = get_player_info.get_neighbor_info(other, 0)["map"]
+    ids = [it[0] for it in served["items"] if it]
+    for gid in (525, 526, 291, 83):
+        assert gid not in ids, f"camp entity {gid} served to attacker"
+    assert 536 in ids, "player-owned good troll wrongly stripped"
+    assert 29 in ids, "defender's real tower wrongly stripped"
+    assert served.get("enemyCampActive") == 0, "camp left active in PvP map"
+
+    # Defender's own save keeps the camp for their own game.
+    own = sessions.session(other)["maps"][0]
+    own_ids = [it[0] for it in own["items"] if it]
+    assert 525 in own_ids and 291 in own_ids, \
+        "stripping the served copy corrupted the defender's real camp"
+
+
 def test_invalid_market_values_and_xp_level_are_repaired_on_load(tmp):
     save = sessions.session(UID)
     town = save["maps"][0]
@@ -1556,6 +1591,7 @@ TESTS = [
     test_late_worker_bonus_is_prorated_and_client_count_is_ignored,
     test_stone_mine_staffing_and_open_state_survive_reload,
     test_saved_players_are_not_automatic_neighbors,
+    test_pvp_load_strips_defenders_enemy_camp,
     test_invalid_market_values_and_xp_level_are_repaired_on_load,
     test_quest_casualties_and_rescued_units_persist,
     test_pvp_history_limits_and_casualties_persist,
