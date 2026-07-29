@@ -1,5 +1,5 @@
 [
 	{ "op": "test", "path": "/items/386/id", "value": "387" },
 	{ "op": "replace", "path": "/items/386/cost_type", "value": "c" },
-	{ "op": "replace", "path": "/items/386/cost", "value": "10" }
+	{ "op": "replace", "path": "/items/386/cost", "value": "0" }
 ]
