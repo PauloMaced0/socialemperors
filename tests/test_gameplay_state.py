@@ -1076,6 +1076,43 @@ def test_legacy_mineral_placeholders_migrate_without_resetting_timer(tmp):
     assert town["pendingMineralRespawns"] == []
 
 
+def test_mineral_regrows_in_place_from_regen_placeholder(tmp):
+    # Minerals actually deplete by the client placing a same-tile regen
+    # placeholder (80/81), not a harvest sell. The server used to reject it, so
+    # gold/stone never regrew. Now it queues an in-place regrow at that exact
+    # tile, so the deposit grows back inside the player's territory.
+    _set_now(_local(12, 10))
+    town = sessions.session(UID)["maps"][0]
+    stone_ids = {
+        Constant.ID_BUILDING_STONE_1, Constant.ID_BUILDING_STONE_2,
+        Constant.ID_BUILDING_STONE_3, Constant.ID_BUILDING_STONE_4,
+    }
+    town["items"] = [it for it in town["items"] if not it or int(it[0]) not in stone_ids]
+    town["items"].append([Constant.ID_BUILDING_STONE_1, 44, 44, 0, _local(12, 10), 0])
+    town["pendingMineralRespawns"] = []
+
+    # Client mines it out: removes the deposit, then places the regen object.
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_SELL,
+         "args": [44, 44, Constant.ID_BUILDING_STONE_1, 0, 0, Constant.SELL_REASON_HARVEST]},
+        {"cmd": Constant.CMD_BUY,
+         "args": [Constant.ID_BUILDING_REGEN_STONE, 44, 44, 1, 0, 0, 1, "b"]},
+    ]))
+    pend = town["pendingMineralRespawns"]
+    assert len(pend) == 1 and pend[0]["family"] == "stone", \
+        f"depletion did not queue exactly one in-place regrow: {pend}"
+    assert (pend[0]["source_x"], pend[0]["source_y"]) == (44, 44), \
+        "regrow queued at the wrong tile (not in place)"
+    # The regen placeholder itself must not persist as a map item.
+    assert not any(it and int(it[0]) == Constant.ID_BUILDING_REGEN_STONE
+                   for it in town["items"]), "regen placeholder leaked into items"
+
+    _set_now(_local(12, 10) + 3 * 60 * 60 + 60)
+    get_player_info.get_player_info(UID)
+    assert any(it and int(it[0]) in stone_ids and it[1] == 44 and it[2] == 44
+               for it in town["items"]), "stone did not regrow on its original tile"
+
+
 def test_mineral_respawn_works_above_legacy_21_cap(tmp):
     # The stock village seeds ~24 gold/stone nodes per family - above the old
     # hardcoded cap of 21, which discarded every respawn timer once the family
@@ -1612,6 +1649,7 @@ TESTS = [
     test_live_enemy_camp_survives_reload_without_respawning,
     test_natural_resources_use_persisted_random_respawns,
     test_legacy_mineral_placeholders_migrate_without_resetting_timer,
+    test_mineral_regrows_in_place_from_regen_placeholder,
     test_mineral_respawn_works_above_legacy_21_cap,
     test_legacy_empty_map_gets_one_stock_resource_repopulation,
     test_reload_marker_relocks_so_trees_do_not_wander,

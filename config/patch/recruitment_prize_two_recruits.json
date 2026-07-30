@@ -1,0 +1,4 @@
+[
+	{ "op": "test", "path": "/social_items/28/id", "value": 387 },
+	{ "op": "replace", "path": "/social_items/28/workers", "value": "New Recruit,New Recruit" }
+]
