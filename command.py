@@ -379,6 +379,39 @@ _STONE_DEPOSIT_IDS = frozenset({
 })
 
 
+def _queue_mineral_regrow(town, family, x, y, deposit_id=None):
+    """Queue an IN-PLACE gold/stone regrow at (x, y) after the regen cooldown.
+
+    Deduplicated by family + source tile so a single depletion regrows exactly
+    once even if it arrives as both a harvest sell AND the client's same-tile
+    regen placeholder. _respawn_mature_minerals restores the deposit on that
+    same tile, so it grows back inside the player's own territory."""
+    pending = town.get("pendingMineralRespawns")
+    if not isinstance(pending, list):
+        pending = []
+        town["pendingMineralRespawns"] = pending
+
+    def _same_tile(entry):
+        if not isinstance(entry, dict) or str(entry.get("family")) != family:
+            return False
+        try:
+            return (int(entry.get("source_x", -1)) == int(x)
+                    and int(entry.get("source_y", -1)) == int(y))
+        except (TypeError, ValueError):
+            return False
+
+    pending[:] = [entry for entry in pending if not _same_tile(entry)]
+    entry = {
+        "family": family,
+        "source_x": int(x),
+        "source_y": int(y),
+        "at": timestamp_now() + Constant.TIMER_RESOURCE_REGEN_SECONDS,
+    }
+    if deposit_id is not None:
+        entry["id"] = int(deposit_id)
+    pending.append(entry)
+
+
 def _natural_resource_cap(item_id):
     item_id = int(item_id)
     if item_id in _TREE_IDS:
@@ -1128,15 +1161,21 @@ def do_command(USERID, cmd, args):
                 )
                 return False
         if is_depleted_resource_placeholder(id):
-            # Older cached clients may still try to place IDs 80/81 on the
-            # depleted tile. The server already owns the timer and will create
-            # one random replacement; accepting this would revive same-tile
-            # regeneration and count the same harvest twice.
-            print(
-                "Legacy natural-resource placeholder rejected - random "
-                "respawn is server-authoritative."
+            # The client marks a mined-out gold/stone tile by placing its
+            # same-tile regeneration object (IDs 80/81). This - not a harvest
+            # sell - is how minerals actually deplete, so rejecting it left them
+            # never regrowing. Queue an IN-PLACE regrow at this exact tile
+            # (dedup'd with the harvest path) so the deposit grows back where it
+            # was, inside the player's territory, after the cooldown. Do not
+            # persist the placeholder item; the server owns the single timer.
+            family = (
+                "gold"
+                if int(id) == Constant.ID_BUILDING_REGEN_GOLD
+                else "stone"
             )
-            return False
+            _queue_mineral_regrow(map, family, x, y)
+            print(f"Mineral depleted at ({x},{y}); {family} regrows here in 3h.")
+            return True
         if is_natural_resource(id):
             if not _natural_resource_buy_allowed(map, id, x, y):
                 print("Natural resource buy rejected - cap reached or tile occupied.")
@@ -1330,37 +1369,7 @@ def do_command(USERID, cmd, args):
                 if int(id) in _MATURE_GOLD_DEPOSIT_IDS
                 else "stone"
             )
-            pending = map.setdefault("pendingMineralRespawns", [])
-            if not isinstance(pending, list):
-                pending = []
-                map["pendingMineralRespawns"] = pending
-            deduplicated = []
-            for entry in pending:
-                duplicate = False
-                if (
-                    isinstance(entry, dict)
-                    and str(entry.get("family")) == family
-                ):
-                    try:
-                        duplicate = (
-                            int(entry.get("source_x", -1)) == int(x)
-                            and int(entry.get("source_y", -1)) == int(y)
-                        )
-                    except (TypeError, ValueError):
-                        duplicate = False
-                if not duplicate:
-                    deduplicated.append(entry)
-            pending[:] = deduplicated
-            pending.append({
-                "family": family,
-                "id": int(id),
-                "source_x": int(x),
-                "source_y": int(y),
-                "at": (
-                    timestamp_now()
-                    + Constant.TIMER_RESOURCE_REGEN_SECONDS
-                ),
-            })
+            _queue_mineral_regrow(map, family, x, y, deposit_id=id)
         # Upgrades are represented by the client as ``sell(old, "UPGR")``
         # followed by ``buy(new)``. The client applies the normal 5% resale
         # credit locally before charging the next tier's full listed price, so
