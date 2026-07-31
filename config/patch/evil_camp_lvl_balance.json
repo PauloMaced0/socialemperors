@@ -1,0 +1,8 @@
+[
+	{ "op": "test", "path": "/items/654/id", "value": "669" },
+	{ "op": "replace", "path": "/items/654/life", "value": "1500" },
+
+	{ "op": "test", "path": "/items/655/id", "value": "670" },
+	{ "op": "replace", "path": "/items/655/life", "value": "300" },
+	{ "op": "replace", "path": "/items/655/attack", "value": "16" }
+]
