@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import datetime
@@ -825,6 +826,37 @@ def _consume_stored_item(town, item_id):
     if stored[key] <= 0:
         stored.pop(key, None)
     return True
+
+
+def _stash_stored_staff(town, item_id, attrs):
+    """Preserve a staffed building's opened/staffing state while it sits in
+    storage. ``map.store`` only tracks a count per id, so without this a stored
+    social/staffed building (Harbor, Allies Building, ...) comes back unstaffed
+    and demands its (already-paid) staffing again. Only stash when the item
+    actually carries staffing state (attrs.si present: a populated roster or the
+    ``None`` opened-marker)."""
+    if not isinstance(attrs, dict) or "si" not in attrs:
+        return
+    stash = town.setdefault("storedStaff", {})
+    if not isinstance(stash, dict):
+        stash = {}
+        town["storedStaff"] = stash
+    stash.setdefault(str(int(item_id)), []).append(copy.deepcopy(attrs))
+
+
+def _pop_stored_staff(town, item_id):
+    """Return (and remove) one preserved staffing state for this id, or None."""
+    stash = town.get("storedStaff")
+    if not isinstance(stash, dict):
+        return None
+    key = str(int(item_id))
+    saved = stash.get(key)
+    if not isinstance(saved, list) or not saved:
+        return None
+    attrs = saved.pop()
+    if not saved:
+        stash.pop(key, None)
+    return attrs
 
 
 def _battle_counts(row):
@@ -1786,6 +1818,10 @@ def do_command(USERID, cmd, args):
         found = False
         for item in map["items"]:
             if item[0] == item_id and item[1] == x and item[2] == y:
+                # Preserve any staffing/opened state (attrs.si) so re-placing
+                # this building doesn't demand its already-paid staffing again.
+                if len(item) > 7 and isinstance(item[7], dict):
+                    _stash_stored_staff(map, item_id, item[7])
                 map["items"].remove(item)
                 found = True
                 break
@@ -1951,7 +1987,15 @@ def do_command(USERID, cmd, args):
         orientation = 0#TODO
         collected_at_timestamp = timestamp_now()
         level = 0
-        items += [[item_id, x, y, orientation, collected_at_timestamp, level]]#maybe make function for adding items
+        item_row = [item_id, x, y, orientation, collected_at_timestamp, level]
+        if cmd == Constant.CMD_PLACE_STORED_ITEM:
+            # Restore the staffing/opened state saved when this building was
+            # stored, so a staffed Harbor/Allies Building comes back already
+            # paid for instead of prompting to buy its staff again.
+            staff_attrs = _pop_stored_staff(town, item_id)
+            if staff_attrs is not None:
+                item_row += [[], staff_attrs]  # units, attrs
+        items.append(item_row)
         if item_id == Constant.ID_BUILDING_UNIT_WAREHOUSE:
             _initialize_unit_warehouse(town)
         if cmd == Constant.CMD_PLACE_GIFT:
