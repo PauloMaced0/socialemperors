@@ -143,6 +143,18 @@ def test_great_church_grants_population(tmp):
         "Great Church population boost not applied"
 
 
+def test_dragon_rider_buildings_have_store_descriptions(tmp):
+    literals = {
+        int(entry["id"]): entry["text"]
+        for entry in get_game_config()["localization_strings"]
+        if isinstance(entry, dict)
+    }
+    assert "Train dragon riders" in literals[1288], \
+        "Rider Academy store description is still blank"
+    assert "compatible dragon" in literals[1289], \
+        "Dragon Riding store description is still blank"
+
+
 def test_training_stables_has_a_real_production_cycle(tmp):
     # Item 227 shipped with activation=0 and collect=0 in every config dump.
     # The client computes the progress bar as (serverTime - item[4]) / activation,
@@ -355,6 +367,7 @@ TESTS = [
     test_normal_sale_still_refunds_five_percent,
     test_resource_upgrade_chains_are_monotonic,
     test_great_church_grants_population,
+    test_dragon_rider_buildings_have_store_descriptions,
     test_training_stables_has_a_real_production_cycle,
     test_upgraded_social_buildings_list_inherited_roles_first,
     test_daily_bonus_uses_config_not_client,

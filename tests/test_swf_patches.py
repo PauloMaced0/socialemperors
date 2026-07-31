@@ -97,11 +97,32 @@ def test_unit_health_and_training_stable_client_fixes_are_present():
         b"socialemperors-harbour-reload-staff-v1"
     ) == 1, "the Harbor still auto-completes staffing during map reload"
     assert data.count(
+        b"socialemperors-building-family-limit-v1"
+    ) == 1, "the store still limits mine/mill tiers independently"
+    assert data.count(
+        b"socialemperors-open-market-goal-v2"
+    ) == 1, "an opened Market still loses its goal progress on reload"
+    assert data.count(
+        b"socialemperors-open-market-staff-goal-v3"
+    ) == 1, "an unstaffed Market can incorrectly complete Open Market"
+    assert data.count(
+        b"socialemperors-empty-pvp-continent-v1"
+    ) == 1, "an empty PvP continent can still leave the world loading forever"
+    assert data.count(
         b"socialemperors-mission-popup-crash-guard-v1"
     ) == 1, (
         "MissionPopup.misionCompletada can still throw #1009 and hang "
         "the quest/PvP result popup on 'Saving Results'"
     )
+    assert data.count(
+        b"socialemperors-battle-levelup-flow-v1"
+    ) == 1, "battle rewards still skip the live level-up transition"
+    assert data.count(
+        b"socialemperors-pvp-levelup-return-v1"
+    ) == 1, "PvP returns home before showing crossed-level unlock popups"
+    assert data.count(
+        b"socialemperors-quest-levelup-return-v1"
+    ) == 1, "quests return home before showing crossed-level unlock popups"
 
 
 def test_attack_click_patch_is_idempotent():

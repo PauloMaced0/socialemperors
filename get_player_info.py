@@ -12,6 +12,13 @@ from constants import Constant
 from get_game_config import get_attribute_from_item_id, get_level_from_xp
 
 
+def _safe_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
 def _ensure_town_list(save):
     """Populate privateState.maps, the town list the client feeds to
     TownManager.init(). TownManager.hasSecondTown() does `maps.length > 1`
@@ -61,20 +68,28 @@ def _refresh_daily_animal_budget(save, now):
     Existing animals remain persisted map items, so the client only creates
     animals which are actually missing, capped by ANIMALS_PER_DAY.
     """
+    changed = False
     pstate = save["privateState"]
     last = int(pstate.get("timestampAnimalsReset", 0) or 0)
     if last > 0 and not _same_local_day(last, now):
         pstate["arrayAnimals"] = {}
-    pstate.setdefault("arrayAnimals", {})
-    pstate["timestampAnimalsReset"] = int(now)
+        changed = True
+    if not isinstance(pstate.get("arrayAnimals"), dict):
+        pstate["arrayAnimals"] = {}
+        changed = True
+    if last != int(now):
+        pstate["timestampAnimalsReset"] = int(now)
+        changed = True
+    return changed
 
 
 def _respawn_mature_trees(save, now):
     """Restore harvested trees after the natural-resource cooldown.
 
     Trees have no visible regeneration object, so their cooldown is persisted
-    here. If a player built on a depleted tile, the pending tree is consumed
-    rather than reappearing through the building.
+    here. Once mature, a tree receives one new random empty wild tile. That
+    chosen position is persisted, so later browser reloads cannot move it
+    again. This is distinct from rerolling resources on every page load.
     """
     changed = False
     tree_ids = {
@@ -87,6 +102,7 @@ def _respawn_mature_trees(save, now):
         if not isinstance(pending, list) or not pending:
             continue
         items = town.setdefault("items", [])
+        occupied_tiles = _occupied_map_tiles(town)
         tree_count = sum(
             1 for item in items
             if item and int(item[0]) in tree_ids
@@ -106,14 +122,20 @@ def _respawn_mature_trees(save, now):
             if int(now) < ready_at:
                 remaining.append(entry)
                 continue
-            occupied = any(
-                item and int(item[1]) == x and int(item[2]) == y
-                for item in items
+            position = _random_wild_resource_position(
+                town, occupied_tiles, (x, y)
             )
-            if not occupied and tree_count < 300:
-                items.append([tree_id, x, y, 0, int(now), 0])
+            if position is not None and tree_count < 300:
+                items.append([
+                    tree_id, position[0], position[1], 0, int(now), 0
+                ])
+                occupied_tiles.add(position)
                 tree_count += 1
-            changed = True
+                changed = True
+            else:
+                # A full map is temporary: keep the matured timer and retry
+                # on a later load rather than losing this tree permanently.
+                remaining.append(entry)
         if remaining != pending:
             town["pendingTreeRespawns"] = remaining
     return changed
@@ -161,6 +183,213 @@ def _occupied_map_tiles(town):
     return occupied
 
 
+def _big_tile_for_position(position):
+    x, y = position
+    if not (0 <= int(x) < 100 and 0 <= int(y) < 100):
+        return None
+    return (int(y) // 20) * 5 + (int(x) // 20) + 1
+
+
+def _position_is_wild(town, position):
+    """Natural resources may remain on newly bought land until harvested.
+
+    New/regrown resources, however, belong outside every owned expansion. The
+    centre tile (13) is owned even in malformed legacy saves which omitted the
+    expansions list.
+    """
+    try:
+        owned = {int(value) for value in town.get("expansions", [])}
+    except (TypeError, ValueError):
+        owned = set()
+    owned.add(13)
+    big_tile = _big_tile_for_position(position)
+    return big_tile is not None and big_tile not in owned
+
+
+def _town_has_operational_market(town):
+    """Whether this town contains a built Market the player can actually use."""
+    for item in town.get("items", []):
+        if not item:
+            continue
+        try:
+            functional = int(get_attribute_from_item_id(
+                int(item[0]), "subcat_functional"
+            ))
+        except (TypeError, ValueError, IndexError):
+            continue
+        if functional != Constant.SUBCATFUNC_BUILDING_MARKET:
+            continue
+        attrs = item[7] if len(item) > 7 and isinstance(item[7], dict) else {}
+        # Social Market tiers are normalized before this check. Their `si`
+        # field is a list while roles remain vacant and None after opening.
+        # Non-social upgrade tiers have no `si` key and are operational once
+        # their construction has completed.
+        if "si" not in attrs or attrs.get("si") is None:
+            return True
+    return False
+
+
+def _item_subcat(item):
+    try:
+        return int(get_attribute_from_item_id(
+            int(item[0]), "subcat_functional"
+        ))
+    except (TypeError, ValueError, IndexError):
+        return -1
+
+
+def _count_items(towns, *, ids=None, subcat=None):
+    wanted = {int(value) for value in ids} if ids is not None else None
+    total = 0
+    for town in towns:
+        for item in town.get("items", []):
+            if not item:
+                continue
+            if wanted is not None and int(item[0]) not in wanted:
+                continue
+            if subcat is not None and _item_subcat(item) != int(subcat):
+                continue
+            total += 1
+    return total
+
+
+def _count_contained(towns, building_ids, unit_subcat):
+    wanted = {int(value) for value in building_ids}
+    total = 0
+    for town in towns:
+        for item in town.get("items", []):
+            if not item or int(item[0]) not in wanted:
+                continue
+            contained = item[6] if len(item) > 6 and isinstance(item[6], list) else []
+            for raw_unit in contained:
+                unit_id = raw_unit[0] if isinstance(raw_unit, list) and raw_unit else raw_unit
+                try:
+                    if int(get_attribute_from_item_id(
+                        int(unit_id), "subcat_functional"
+                    )) == int(unit_subcat):
+                        total += 1
+                except (TypeError, ValueError, IndexError):
+                    continue
+    return total
+
+
+def _repair_persisted_mission_progress(save):
+    """Recover state-based goals whose one-shot client event was missed.
+
+    Building/containment goals describe the village's current state, so they
+    remain true after a reload or an upgrade. Action/history goals (collect,
+    kill, trade, attack, etc.) are intentionally not inferred here.
+    """
+    pstate = save.setdefault("privateState", {})
+    completed = pstate.setdefault("completedMissions", [])
+    completed_ids = {
+        _safe_int(value, -1) for value in completed
+    }
+    towns = save.get("maps", [])
+    barracks = {
+        Constant.ID_BUILDING_BARRACKS_1,
+        Constant.ID_BUILDING_BARRACKS_2,
+        Constant.ID_BUILDING_BARRACKS_3,
+    }
+    archery = {
+        Constant.ID_BUILDING_ARCHERY_1,
+        Constant.ID_BUILDING_ARCHERY_2,
+        Constant.ID_BUILDING_ARCHERY_3,
+    }
+    sheep_ranches = {
+        Constant.ID_BUILDING_RANCH_SHEEP,
+        Constant.ID_BUILDING_RANCH_SHEEP_2,
+        Constant.ID_BUILDING_RANCH_SHEEP_3,
+    }
+    cow_ranches = {
+        Constant.ID_BUILDING_RANCH_COW,
+        Constant.ID_BUILDING_RANCH_COW_2,
+        Constant.ID_BUILDING_RANCH_COW_3,
+    }
+    gold_mines = {
+        Constant.ID_BUILDING_MINE_GOLD_1,
+        Constant.ID_BUILDING_MINE_GOLD_2,
+        Constant.ID_BUILDING_MINE_GOLD_3,
+    }
+    lumber_mills = {
+        Constant.ID_BUILDING_MINE_WOOD_1,
+        Constant.ID_BUILDING_MINE_WOOD_2,
+        Constant.ID_BUILDING_MINE_WOOD_3,
+        Constant.ID_BUILDING_MINE_WOOD_4,
+    }
+    observable = {
+        1: _count_items(towns, subcat=Constant.SUBCATFUNC_BUILDING_FARM) >= 1,
+        2: _count_items(towns, subcat=Constant.SUBCATFUNC_UNIT_PEASANT) >= 2,
+        7: _count_items(towns, subcat=Constant.SUBCATFUNC_BUILDING_FARM) >= 2,
+        8: _count_items(towns, subcat=Constant.SUBCATFUNC_BUILDING_HOUSE) >= 4,
+        9: _count_items(towns, ids=barracks) >= 1,
+        11: _count_items(towns, subcat=Constant.SUBCATFUNC_UNIT_PEASANT) >= 4,
+        12: _count_items(towns, subcat=Constant.SUBCATFUNC_BUILDING_MILL) >= 1,
+        13: _count_contained(
+            towns,
+            {
+                Constant.ID_BUILDING_WINDMILL_1,
+                Constant.ID_BUILDING_WINDMILL_2,
+                Constant.ID_BUILDING_WINDMILL_3,
+                Constant.ID_BUILDING_WINDMILL_4,
+            },
+            Constant.SUBCATFUNC_UNIT_PEASANT,
+        ) >= 1,
+        15: _count_contained(
+            towns,
+            {
+                Constant.ID_BUILDING_WINDMILL_1,
+                Constant.ID_BUILDING_WINDMILL_2,
+                Constant.ID_BUILDING_WINDMILL_3,
+                Constant.ID_BUILDING_WINDMILL_4,
+            },
+            Constant.SUBCATFUNC_UNIT_PEASANT,
+        ) >= 2,
+        20: _count_items(towns, ids=sheep_ranches) >= 1,
+        22: _count_contained(
+            towns, sheep_ranches, Constant.SUBCATFUNC_UNIT_SHEEP
+        ) >= 1,
+        24: _count_items(towns, subcat=Constant.SUBCATFUNC_BUILDING_FARM) >= 5,
+        26: _count_items(towns, subcat=Constant.SUBCATFUNC_BUILDING_HOUSE) >= 8,
+        27: _count_items(towns, ids=gold_mines) >= 1,
+        28: _count_contained(
+            towns, gold_mines, Constant.SUBCATFUNC_UNIT_PEASANT
+        ) >= 1,
+        29: _count_items(towns, ids=archery) >= 1,
+        32: _count_items(towns, subcat=Constant.SUBCATFUNC_BUILDING_DECO) >= 5,
+        36: _count_items(towns, subcat=Constant.SUBCATFUNC_BUILDING_TOWER) >= 3,
+        37: _count_items(towns, ids={Constant.ID_BUILDING_WALL_1}) >= 20,
+        39: _count_items(towns, subcat=Constant.SUBCATFUNC_BUILDING_STABLE) >= 1,
+        45: _count_contained(
+            towns, lumber_mills, Constant.SUBCATFUNC_UNIT_PEASANT
+        ) >= 1,
+        47: _count_contained(
+            towns, lumber_mills, Constant.SUBCATFUNC_UNIT_PEASANT
+        ) >= 2,
+        48: _count_items(towns, ids=cow_ranches) >= 1,
+        49: _count_contained(
+            towns, cow_ranches, Constant.SUBCATFUNC_UNIT_COW
+        ) >= 1,
+        50: _count_items(
+            towns, subcat=Constant.SUBCATFUNC_BUILDING_MARKET
+        ) >= 1,
+        # Open Market is independent of the earlier "spend cash" goal. The
+        # client can miss its one-shot open event, especially after upgrading.
+        53: any(_town_has_operational_market(town) for town in towns),
+        58: _count_items(
+            towns, ids={Constant.ID_BUILDING_MINE_STONE_1}
+        ) >= 1,
+        69: _count_items(towns, ids={Constant.ID_BUILDING_HOUSE_2}) >= 1,
+    }
+    changed = False
+    for mission_id, fulfilled in observable.items():
+        if fulfilled and mission_id not in completed_ids:
+            completed.append(mission_id)
+            completed_ids.add(mission_id)
+            changed = True
+    return changed
+
+
 def _random_wild_resource_position(town, occupied, excluded):
     """Choose an empty tile from the same wild regions as MapInitializer.
 
@@ -172,7 +401,8 @@ def _random_wild_resource_position(town, occupied, excluded):
     try:
         owned = {int(value) for value in town.get("expansions", [])}
     except (TypeError, ValueError):
-        owned = {13}
+        owned = set()
+    owned.add(13)
     big_tiles = [value for value in range(1, 26) if value not in owned]
     if not big_tiles:
         return None
@@ -202,21 +432,141 @@ def _random_wild_resource_position(town, occupied, excluded):
     return None
 
 
+def _wild_cluster_positions(town, occupied, count):
+    """Return up to ``count`` nearby empty wild tiles.
+
+    MapInitializer represents one visible deposit as a cluster of individual
+    ten-resource nodes. Keep that original representation while repairing old
+    under-populated saves; do not scatter every repaired node in isolation.
+    """
+    if count <= 0:
+        return []
+    anchor = _random_wild_resource_position(town, occupied, None)
+    if anchor is None:
+        return []
+    candidates = []
+    for radius in range(0, 7):
+        ring = []
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                if max(abs(dx), abs(dy)) != radius:
+                    continue
+                ring.append((anchor[0] + dx, anchor[1] + dy))
+        random.shuffle(ring)
+        candidates.extend(ring)
+    result = []
+    for position in candidates:
+        if (
+            position not in occupied
+            and _position_is_wild(town, position)
+        ):
+            result.append(position)
+            occupied.add(position)
+            if len(result) >= count:
+                break
+    while len(result) < count:
+        position = _random_wild_resource_position(town, occupied, None)
+        if position is None:
+            break
+        result.append(position)
+        occupied.add(position)
+    return result
+
+
 # Absolute per-family ceiling for gold/stone respawns. Well above any stock
-# population (~24 per family); reaching it means the save is corrupt, not full.
+# population (15-21 per family); reaching it means the save is corrupt.
 _MINERAL_FAMILY_HARD_CAP = 60
+_NATURAL_RESOURCE_POPULATION_REPAIR_VERSION = 1
+
+
+def _repair_natural_resource_population(save, now):
+    """One-time repair for saves depleted by older non-persistent respawns.
+
+    Stock maps start with 160-300 trees and three 5-7 node clusters (15-21
+    nodes) for each mineral. Count pending cooldowns as population so an
+    ordinary harvest never receives a free replacement. Only legacy maps below
+    the stock minimum are topped up, once, on empty wild land.
+    """
+    changed = False
+    families = {
+        "tree": (
+            {
+                Constant.ID_BUILDING_TREE_1,
+                Constant.ID_BUILDING_TREE_2,
+                Constant.ID_BUILDING_TREE_3,
+            },
+            160,
+        ),
+        "gold": (set(_MINERAL_RESPAWN_IDS["gold"]), 15),
+        "stone": (set(_MINERAL_RESPAWN_IDS["stone"]), 15),
+    }
+    for town in save.get("maps", []):
+        try:
+            version = int(
+                town.get("naturalResourcePopulationRepairVersion", 0) or 0
+            )
+        except (TypeError, ValueError):
+            version = 0
+        if version >= _NATURAL_RESOURCE_POPULATION_REPAIR_VERSION:
+            continue
+        items = town.setdefault("items", [])
+        occupied = _occupied_map_tiles(town)
+        pending_trees = town.get("pendingTreeRespawns", [])
+        pending_minerals = town.get("pendingMineralRespawns", [])
+        for family, (ids, minimum) in families.items():
+            visible = sum(
+                1 for item in items if item and int(item[0]) in ids
+            )
+            if family == "tree":
+                pending = sum(
+                    1 for entry in pending_trees
+                    if isinstance(entry, dict)
+                    and _safe_int(entry.get("id", -1), -1) in ids
+                )
+            else:
+                pending = sum(
+                    1 for entry in pending_minerals
+                    if isinstance(entry, dict)
+                    and str(entry.get("family")) == family
+                )
+            missing = max(0, minimum - visible - pending)
+            while missing > 0:
+                # Original mineral clusters contain 5-7 nodes. Trees use
+                # larger clusters, but seven keeps the repair compact without
+                # producing an unnatural solid block.
+                cluster_size = min(7, missing)
+                positions = _wild_cluster_positions(
+                    town, occupied, cluster_size
+                )
+                if not positions:
+                    break
+                family_ids = tuple(sorted(ids))
+                for index, position in enumerate(positions):
+                    resource_id = family_ids[
+                        (visible + index) % len(family_ids)
+                    ]
+                    items.append([
+                        resource_id, position[0], position[1],
+                        0, int(now), 0,
+                    ])
+                visible += len(positions)
+                missing -= len(positions)
+                changed = True
+        town["naturalResourcesInitialized"] = 1
+        town["naturalResourcePopulationRepairVersion"] = (
+            _NATURAL_RESOURCE_POPULATION_REPAIR_VERSION
+        )
+        changed = True
+    return changed
 
 
 def _respawn_mature_minerals(save, now):
-    """Restore depleted gold/stone at their ORIGINAL harvested tile.
+    """Restore depleted gold/stone without rerolling them on reload.
 
     Each harvested node owns one persisted three-hour timer carrying the tile
-    it was mined from. When the timer elapses the deposit reappears on that
-    exact tile (mirroring the tree cooldown), so a reload never relocates it.
-    If the player has since built on the tile the pending entry is consumed.
-    The timer is removed only when the deposit is restored, skipped (tile
-    taken), or its family is already at the stock hard cap, so reloads cannot
-    accelerate or duplicate respawns.
+    it was mined from. Once mature, its replacement receives one new random
+    empty wild tile, matching tree regrowth. The chosen node is then persisted:
+    a reload by itself never relocates it or advances the timer.
     """
     changed = False
     for town in save.get("maps", []):
@@ -224,6 +574,7 @@ def _respawn_mature_minerals(save, now):
         if not isinstance(pending, list) or not pending:
             continue
         items = town.setdefault("items", [])
+        occupied_tiles = _occupied_map_tiles(town)
         family_counts = {
             family: sum(
                 1 for item in items
@@ -256,11 +607,10 @@ def _respawn_mature_minerals(save, now):
                 # simply stopped coming back.
                 changed = True
                 continue
-            occupied = any(
-                item and int(item[1]) == x and int(item[2]) == y
-                for item in items
+            position = _random_wild_resource_position(
+                town, occupied_tiles, (x, y)
             )
-            if not occupied:
+            if position is not None:
                 # Prefer the original deposit id if it was recorded; otherwise
                 # any member of the family reads identically to the client.
                 try:
@@ -269,10 +619,17 @@ def _respawn_mature_minerals(save, now):
                     resource_id = 0
                 if resource_id not in _MINERAL_RESPAWN_IDS[family]:
                     resource_id = _MINERAL_RESPAWN_IDS[family][0]
-                items.append([resource_id, x, y, 0, int(now), 0])
+                items.append([
+                    resource_id, position[0], position[1],
+                    0, int(now), 0,
+                ])
+                occupied_tiles.add(position)
                 family_counts[family] += 1
-            # Whether restored or the tile was claimed, the timer is consumed.
-            changed = True
+                changed = True
+            else:
+                # A temporarily full wild map must not permanently lose the
+                # node. Retry the matured timer on a later load.
+                remaining.append(entry)
         if remaining != pending:
             town["pendingMineralRespawns"] = remaining
     return changed
@@ -354,9 +711,13 @@ def get_player_info(USERID, map_number=None):
     # unfilled Market, Stone Mine, or other staffed building.
     social_state_changed = _repair_social_building_state(save)
     natural_state_changed = _repair_natural_resource_state(save)
-    _refresh_daily_animal_budget(save, ts_now)
+    animal_budget_changed = _refresh_daily_animal_budget(save, ts_now)
     trees_changed = _respawn_mature_trees(save, ts_now)
     minerals_changed = _respawn_mature_minerals(save, ts_now)
+    natural_population_changed = _repair_natural_resource_population(
+        save, ts_now
+    )
+    mission_progress_changed = _repair_persisted_mission_progress(save)
     save["playerInfo"]["last_logged_in"] = ts_now
     # dartsHasFree means "free game claimed (darts_new_free) but not yet
     # thrown". The client reads it at login and, on a new local day, claims a
@@ -480,7 +841,9 @@ def get_player_info(USERID, map_number=None):
     # player
     map_idx = _clamp_map(save, map_number)
     _sync_natural_resource_reload_marker(save, map_idx)
-    refresh_enemy_camp_timer(save["maps"][map_idx], ts_now)
+    camp_timer_changed = refresh_enemy_camp_timer(
+        save["maps"][map_idx], ts_now
+    )
     response_pstate = copy.deepcopy(pState)
     # The old Flash JSON reader treats a bare false as a truthy object. Keep
     # Python/save state boolean, but emit this protocol flag as numeric 0/1.
@@ -499,6 +862,10 @@ def get_player_info(USERID, map_number=None):
         or minerals_changed
         or social_state_changed
         or natural_state_changed
+        or natural_population_changed
+        or animal_budget_changed
+        or mission_progress_changed
+        or camp_timer_changed
     ):
         save_session(USERID)
     return player_info
@@ -581,14 +948,32 @@ def _strip_pvp_camp(town):
     if not isinstance(town, dict) or str(town.get("race", "h")) != "h":
         return town
     items = town.get("items") or []
-    if not any(_is_pvp_camp_entity(item) for item in items):
+    tracked = {
+        (int(entry[0]), int(entry[1]), int(entry[2]))
+        for entry in town.get("enemyCampRoster", [])
+        if isinstance(entry, list) and len(entry) >= 3
+    }
+
+    def belongs_to_camp(item):
+        if not item:
+            return False
+        key = (int(item[0]), int(item[1]), int(item[2]))
+        if tracked:
+            return key in tracked or int(item[0]) in _ENEMY_CAMP_MARKER_IDS
+        # Legacy saves predate the exact roster. Use the old race-based
+        # fallback only for them; once a roster exists, an untracked troll can
+        # be a legitimate defending unit and must remain in the PvP village.
+        return _is_pvp_camp_entity(item)
+
+    if not any(belongs_to_camp(item) for item in items):
         return town
     clone = copy.deepcopy(town)
     clone["items"] = [
         item for item in clone.get("items", [])
-        if not _is_pvp_camp_entity(item)
+        if not belongs_to_camp(item)
     ]
     clone["enemyCampActive"] = 0
+    clone["enemyCampRoster"] = []
     return clone
 
 

@@ -224,8 +224,7 @@ def test_other_saves_are_pvp_opponents_not_automatic_neighbors():
     assert r.status_code == 200
     body = r.get_json()
     ids = {str(entry["user_id"]) for entry in body["continent"]}
-    assert OTHER in ids and UID not in ids, \
-        "PvP matchmaking omitted the rival or included the current player"
+    assert OTHER in ids, "PvP matchmaking omitted the rival"
     assert all(
         entry.get("name") and entry.get("race") and entry.get("level")
         and entry.get("nivel") == rival_level
@@ -237,6 +236,21 @@ def test_other_saves_are_pvp_opponents_not_automatic_neighbors():
     ).get_json()["continent"]
     assert not any(str(entry["user_id"]) == OTHER for entry in other_island), \
         "the same opponent was replicated on an unrelated PvP island"
+    own_level = min(50, sessions.save_info(UID)["level"])
+    home = c.get(
+        API + "/get_continent_ranking.php",
+        query_string={
+            "USERID": UID, "user_key": "k", "level_id": str(own_level),
+        },
+    ).get_json()["continent"]
+    assert any(str(entry["user_id"]) == UID for entry in home), \
+        "home PvP continent omitted the client's required own slot"
+    empty = c.get(
+        API + "/get_continent_ranking.php",
+        query_string={"USERID": UID, "user_key": "k", "level_id": "50"},
+    ).get_json()
+    assert empty["level_id"] == 50, \
+        "empty PvP continent omitted the level needed by the client fallback"
 
 
 def test_friends_page_links_and_unlinks_real_players_reciprocally():

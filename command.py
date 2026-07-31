@@ -380,12 +380,12 @@ _STONE_DEPOSIT_IDS = frozenset({
 
 
 def _queue_mineral_regrow(town, family, x, y, deposit_id=None):
-    """Queue an IN-PLACE gold/stone regrow at (x, y) after the regen cooldown.
+    """Queue one gold/stone regrow after the natural-resource cooldown.
 
     Deduplicated by family + source tile so a single depletion regrows exactly
     once even if it arrives as both a harvest sell AND the client's same-tile
-    regen placeholder. _respawn_mature_minerals restores the deposit on that
-    same tile, so it grows back inside the player's own territory."""
+    regen placeholder. Once mature, the node receives one new random wild
+    position; that chosen replacement is then persisted across reloads."""
     pending = town.get("pendingMineralRespawns")
     if not isinstance(pending, list):
         pending = []
@@ -997,6 +997,20 @@ def command(USERID, data):
     publishActions = data["publishActions"]
     commands = data["commands"]
     initializing_resource_towns = set()
+    camp_spawn_towns = set()
+    for entry in commands:
+        args = entry.get("args", [])
+        try:
+            camp_spawn = (
+                entry.get("cmd") == Constant.CMD_BUY
+                and len(args) >= 6
+                and bool(args[5])
+                and is_enemy_camp_marker(args[0])
+            )
+            if camp_spawn:
+                camp_spawn_towns.add(int(args[4]))
+        except (TypeError, ValueError):
+            continue
     pending_upgrade_staff = None
     try:
         i = 0
@@ -1067,6 +1081,29 @@ def command(USERID, data):
                     )
                     upgrade_context = _staff_context(old_item)
                 accepted = do_command(USERID, cmd, args)
+                if (
+                    accepted is not False
+                    and cmd == Constant.CMD_BUY
+                    and len(args) >= 6
+                    and bool(args[5])
+                    and int(args[4]) in camp_spawn_towns
+                ):
+                    item_id = int(args[0])
+                    try:
+                        camp_entity = (
+                            is_enemy_camp_marker(item_id)
+                            or str(get_attribute_from_item_id(
+                                item_id, "race"
+                            )) == "t"
+                        )
+                    except (TypeError, ValueError):
+                        camp_entity = is_enemy_camp_marker(item_id)
+                    if camp_entity:
+                        town = session(USERID)["maps"][int(args[4])]
+                        roster = town.setdefault("enemyCampRoster", [])
+                        record = [item_id, int(args[1]), int(args[2])]
+                        if record not in roster:
+                            roster.append(record)
                 if (
                     accepted is not False
                     and cmd == Constant.CMD_SELL
@@ -1164,17 +1201,17 @@ def do_command(USERID, cmd, args):
             # The client marks a mined-out gold/stone tile by placing its
             # same-tile regeneration object (IDs 80/81). This - not a harvest
             # sell - is how minerals actually deplete, so rejecting it left them
-            # never regrowing. Queue an IN-PLACE regrow at this exact tile
-            # (dedup'd with the harvest path) so the deposit grows back where it
-            # was, inside the player's territory, after the cooldown. Do not
-            # persist the placeholder item; the server owns the single timer.
+            # never regrowing. Queue one server-owned timer, deduplicated with
+            # the harvest path; do not persist the placeholder item.
             family = (
                 "gold"
                 if int(id) == Constant.ID_BUILDING_REGEN_GOLD
                 else "stone"
             )
             _queue_mineral_regrow(map, family, x, y)
-            print(f"Mineral depleted at ({x},{y}); {family} regrows here in 3h.")
+            print(
+                f"Mineral depleted at ({x},{y}); {family} regrows in 3h."
+            )
             return True
         if is_natural_resource(id):
             if not _natural_resource_buy_allowed(map, id, x, y):
@@ -1792,8 +1829,34 @@ def do_command(USERID, cmd, args):
                     continue
                 _add_stored_item(home, item_id, count)
                 stored_total += count
+        # PopupSurvival reads privateState.survivalMaps[map].tp as the best
+        # survival time. The result command is the authoritative end-of-run
+        # signal; keep the longest valid time and never let a shorter replay
+        # erase it.
+        try:
+            survival_map = str(args[0])
+            survived = max(0, int(args[1]))
+        except (IndexError, TypeError, ValueError):
+            survival_map, survived = "", 0
+        survival_maps = save["privateState"].setdefault("survivalMaps", {})
+        if not isinstance(survival_maps, dict):
+            survival_maps = {}
+            save["privateState"]["survivalMaps"] = survival_maps
+        if survival_map:
+            state = survival_maps.setdefault(survival_map, {"ts": 0, "tp": 0})
+            if not isinstance(state, dict):
+                state = {"ts": 0, "tp": 0}
+                survival_maps[survival_map] = state
+            try:
+                previous = max(0, int(state.get("tp", 0) or 0))
+            except (TypeError, ValueError):
+                previous = 0
+            if survived > previous:
+                state["tp"] = survived
+                state["ts"] = timestamp_now()
         print(
             f"Survival ended (map {args[0] if args else '?'}): "
+            f"best {survival_maps.get(survival_map, {}).get('tp', 0)}s, "
             f"stored {stored_total} prize(s)."
         )
         return True
@@ -2093,9 +2156,31 @@ def do_command(USERID, cmd, args):
         toBeAdded = int(args[1])
         print("Added", toBeAdded, get_item_from_subcat_functional(subcatFunc)["name"])
 
-        # TODO
         oAnimals: dict = save["privateState"]["arrayAnimals"]
-        oAnimals[subcatFunc] = toBeAdded + (oAnimals[subcatFunc] if subcatFunc in oAnimals else 0)
+        try:
+            daily_cap = int(
+                get_game_config()["globals"].get("ANIMALS_PER_DAY", 20)
+            )
+        except (TypeError, ValueError):
+            daily_cap = 20
+        # A missing-animal batch is allowed once per category/day. The stock
+        # client otherwise sees animals moved into a ranch as "missing" and
+        # creates another batch on every browser reload until the numeric
+        # daily cap is exhausted.
+        oAnimals[subcatFunc] = max(
+            daily_cap,
+            toBeAdded + int(oAnimals.get(subcatFunc, 0) or 0),
+        )
+
+    elif cmd == Constant.CMD_SET_HELP_MAP:
+        help_key = str(args[0]) if args else ""
+        seen = save["privateState"].setdefault("helpMap", [])
+        if not isinstance(seen, list):
+            seen = []
+            save["privateState"]["helpMap"] = seen
+        if help_key and help_key not in [str(value) for value in seen]:
+            seen.append(help_key)
+        print(f"Help viewed: {help_key or '(empty)'}")
     
     elif cmd == Constant.CMD_GRAVEYARD_BUY_POTIONS:
         # no args
@@ -3057,7 +3142,43 @@ def do_command(USERID, cmd, args):
         # reload sees 0 and respawns the camp the player just cleared.
         map["enemyCampActive"] = 0
         map["timestampLastTreasure"] = timestamp_now()
+        # Camp rewards are collectible only after the encounter is finished.
+        # Remove any surviving hostile camp pieces at that point. Older
+        # versions left stragglers in the persisted village during the 4-hour
+        # cooldown, so they appeared as unrelated trolls after reload.
+        removed_camp_items = 0
+        human_town = str(map.get("race", "h")) == "h"
+        roster = map.get("enemyCampRoster", [])
+        roster_keys = {
+            (int(record[0]), int(record[1]), int(record[2]))
+            for record in roster
+            if isinstance(record, (list, tuple)) and len(record) >= 3
+        }
+        for item in list(map.get("items", [])):
+            if not item:
+                continue
+            item_id = int(item[0])
+            try:
+                hostile = (
+                    human_town
+                    and not roster_keys
+                    and str(get_attribute_from_item_id(item_id, "race")) == "t"
+                )
+            except (TypeError, ValueError):
+                hostile = False
+            tracked = (
+                len(item) >= 3
+                and (item_id, int(item[1]), int(item[2])) in roster_keys
+            )
+            if hostile or tracked or is_enemy_camp_marker(item_id):
+                map["items"].remove(item)
+                removed_camp_items += 1
+        map["enemyCampRoster"] = []
         print(f"Treasure collected: +{gold}g +{xp}xp +{food}f +{stone}s, next quest {quest_id}. Stamped {map['timestampLastTreasure']}.")
+        if removed_camp_items:
+            print(
+                f"Removed {removed_camp_items} completed enemy-camp items."
+            )
 
     elif cmd == Constant.CMD_BUY_UNIT_WITH_CASH:
         # [item_id, x, y, frame, town, sourceX?, sourceY?, sourceId?]: buy a

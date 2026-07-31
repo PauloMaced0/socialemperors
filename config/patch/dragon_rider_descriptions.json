@@ -1,0 +1,20 @@
+[
+  {
+    "op": "add",
+    "path": "/localization_strings/-",
+    "value": {
+      "id": 1288,
+      "name": "STORE_EDIFICIO_DRAGON_RIDER_TRAINING",
+      "text": "Train dragon riders who can be paired with compatible dragons."
+    }
+  },
+  {
+    "op": "add",
+    "path": "/localization_strings/-",
+    "value": {
+      "id": 1289,
+      "name": "STORE_EDIFICIO_DRAGON_TIMING",
+      "text": "Combine a trained rider with a compatible dragon to create a stronger mounted dragon."
+    }
+  }
+]

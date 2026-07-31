@@ -115,10 +115,14 @@ def mark_enemy_camp_active(town: dict, now: int = None) -> None:
     town["timestampLastTreasure"] = int(timestamp_now() if now is None else now)
 
 
-def refresh_enemy_camp_timer(town: dict, now: int) -> None:
+def refresh_enemy_camp_timer(town: dict, now: int) -> bool:
     """A live saved camp must not be replaced at a new random position."""
     if int(town.get("enemyCampActive", 0) or 0):
-        town["timestampLastTreasure"] = int(now)
+        now = int(now)
+        if int(town.get("timestampLastTreasure", 0) or 0) != now:
+            town["timestampLastTreasure"] = now
+            return True
+    return False
 
 
 def _repair_active_enemy_camps(save: dict) -> bool:
@@ -146,12 +150,9 @@ def _repair_natural_resource_state(save: dict) -> bool:
     new random wild-map position. Pending tree/mineral respawns still count as
     present, so reloading cannot reopen the client's initial population pass.
 
-    Older server versions permanently removed harvested nodes. Once a mature
-    town reached zero of a resource family, its original coordinates were no
-    longer recoverable. For that legacy case only, clear the initialized flag
-    once so the stock MapInitializer can repopulate the missing family using
-    its original cluster sizes and caps. Every later mineral harvest follows
-    the persisted random-respawn path.
+    Older server versions permanently removed harvested nodes. Population
+    repair is now server-owned in get_player_info so the Flash initializer
+    never rerolls every resource position during a reload.
     """
     changed = False
     for town in save.get("maps", []):
@@ -232,47 +233,10 @@ def _repair_natural_resource_state(save: dict) -> bool:
         recovery_version = int(
             town.get("naturalResourceRecoveryVersion", 0) or 0
         )
-        if (
-            not initialized
-            or recovery_version >= _NATURAL_RESOURCE_RECOVERY_VERSION
-        ):
+        if recovery_version >= _NATURAL_RESOURCE_RECOVERY_VERSION:
             continue
-
-        pending_trees = town.get("pendingTreeRespawns", [])
-        has_pending_tree = False
-        if isinstance(pending_trees, list):
-            for entry in pending_trees:
-                if not isinstance(entry, dict):
-                    continue
-                try:
-                    pending_id = int(entry.get("id", -1) or -1)
-                except (TypeError, ValueError):
-                    continue
-                if pending_id in _TREE_RESOURCE_IDS:
-                    has_pending_tree = True
-                    break
-        missing_family = (
-            (
-                not bool(item_ids & _GOLD_RESOURCE_IDS)
-                and "gold" not in pending_families
-            )
-            or (
-                not bool(item_ids & _STONE_RESOURCE_IDS)
-                and "stone" not in pending_families
-            )
-            or (
-                not bool(item_ids & _TREE_RESOURCE_IDS)
-                and not has_pending_tree
-            )
-        )
-        if missing_family:
-            # MapInitializer will fill only what is missing, based on the
-            # counts returned with player-info. This is not a recurring
-            # respawn switch: the migration version prevents another reset,
-            # and _sync_natural_resource_reload_marker re-locks the flag as
-            # soon as the resources are present again, so it cannot re-fire
-            # every reload and re-scatter existing trees/minerals.
-            town["naturalResourcesInitialized"] = 0
+        if not initialized:
+            town["naturalResourcesInitialized"] = 1
         town["naturalResourceRecoveryVersion"] = (
             _NATURAL_RESOURCE_RECOVERY_VERSION
         )

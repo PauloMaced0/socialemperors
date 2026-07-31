@@ -295,6 +295,17 @@ def test_kill_rewards_persist_for_units_and_towers(tmp):
     assert int(m["xp"]) == xp0 + 2, "tower kill xp not credited"
     assert not any(it[1:3] in ([70, 70], [71, 71]) for it in m["items"]), \
         "killed items not removed"
+    sessions.save_session(UID)
+    sessions.load_saved_villages()
+    reloaded = sessions.session(UID)["maps"][0]
+    assert int(reloaded["coins"]) == gold0 + 10, \
+        "unit/tower kill gold reverted after server/browser reload"
+    assert int(reloaded["xp"]) == xp0 + 2, \
+        "unit/tower kill XP reverted after server/browser reload"
+    assert not any(
+        it[1:3] in ([70, 70], [71, 71])
+        for it in reloaded["items"]
+    ), "killed camp entities returned after reload"
 
 
 def test_kill_reward_persists_when_enemy_moved(tmp):
@@ -434,9 +445,52 @@ def test_survival_end_stores_prizes(tmp):
     _do(Constant.CMD_END_SURVIVAL, ["100000035", 300, json.dumps({"535": 2, "531": 1})])
     assert m["store"].get("535") == 2, "survival prize (x2) not stored"
     assert m["store"].get("531") == 1, "survival prize (x1) not stored"
+    arena = save["privateState"]["survivalMaps"]["100000035"]
+    assert arena["tp"] == 300 and arena["ts"] == _local(14, 10), \
+        "Survival best time was not persisted"
+    # Best means longest survival. A shorter replay must not erase it.
+    _now(_local(14, 11))
+    _do(Constant.CMD_END_SURVIVAL, ["100000035", 125, "{}"])
+    assert arena["tp"] == 300 and arena["ts"] == _local(14, 10), \
+        "a shorter Survival replay replaced the best time"
+    _now(_local(14, 12))
+    _do(Constant.CMD_END_SURVIVAL, ["100000035", 425, "{}"])
+    assert arena["tp"] == 425 and arena["ts"] == _local(14, 12), \
+        "a new Survival record did not replace the old one"
+    sessions.save_session(UID)
+    sessions.load_saved_villages()
+    reloaded = sessions.session(UID)
+    assert reloaded["privateState"]["survivalMaps"][
+        "100000035"
+    ]["tp"] == 425, "Survival record disappeared after server reload"
     # A malformed / empty payload must not crash.
     _do(Constant.CMD_END_SURVIVAL, ["100000035", 0, ""])
-    assert m["store"].get("535") == 2, "empty survival payload mutated storage"
+    assert reloaded["maps"][0]["store"].get("535") == 2, \
+        "empty survival payload mutated storage"
+
+
+def test_help_popup_acknowledgement_persists(tmp):
+    save = sessions.session(UID)
+    save["privateState"]["helpMap"] = []
+    command.command(UID, {
+        "ts": 1,
+        "first_number": 1,
+        "accessToken": "x",
+        "tries": 0,
+        "publishActions": [],
+        "commands": [
+            {"cmd": Constant.CMD_SET_HELP_MAP,
+             "args": ["helpExplorationManager"]},
+            {"cmd": Constant.CMD_SET_HELP_MAP,
+             "args": ["helpExplorationManager"]},
+        ],
+    })
+    assert save["privateState"]["helpMap"] == ["helpExplorationManager"], \
+        "PvP help acknowledgement was missing or duplicated"
+    sessions.load_saved_villages()
+    assert sessions.session(UID)["privateState"]["helpMap"] == [
+        "helpExplorationManager"
+    ], "PvP help popup acknowledgement disappeared after restart"
 
 
 def test_collect_treasure_stamps_kill_time(tmp):
@@ -744,6 +798,7 @@ TESTS = [
     test_resurrect_consumes_from_graveyard,
     test_quest_reward_paid_once_per_difficulty,
     test_survival_end_stores_prizes,
+    test_help_popup_acknowledgement_persists,
 ]
 
 

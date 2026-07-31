@@ -607,8 +607,8 @@ def get_continent_ranking_response():
     # viewing the continent is not an opponent and must not occupy a slot.
     profiles = [
         profile for profile in profiles
-        if profile["user_id"] != str(USERID)
-        and int(profile.get("level", 1) or 1) == continent_level
+        if min(max(int(profile.get("level", 1) or 1), 1), 50)
+        == continent_level
     ]
     profiles.sort(key=lambda profile: profile["user_id"])
     profiles = profiles[:8]
@@ -616,10 +616,18 @@ def get_continent_ranking_response():
     for position, profile in enumerate(profiles):
         entry = dict(profile)
         entry["posicion"] = position
-        entry["nivel"] = int(profile.get("level", continent_level))
+        entry["nivel"] = continent_level
         continent.append(entry)
 
-    response = {"world_id": 0, "continent": continent}
+    # The Flash world screen expects the player's own slot on their home
+    # continent (it has explicit ownPlayer rendering) and used to dereference
+    # continent[0] even when no rivals existed. Include self at the real level;
+    # empty non-home islands are handled by the client patch using level_id.
+    response = {
+        "world_id": 0,
+        "level_id": continent_level,
+        "continent": continent,
+    }
     return(response)
 
 ## TOURNAMENTS
