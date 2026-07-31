@@ -103,6 +103,35 @@ def test_sell_gift_and_stored_item(tmp):
     assert save["maps"][0]["coins"] == 24, f"5%% refunds wrong: {save['maps'][0]['coins']}"
 
 
+def test_storing_a_staffed_building_keeps_its_staffing(tmp):
+    # Storing a staffed building (Harbor/Allies) then placing it back must NOT
+    # re-demand its already-paid staffing. The opened/staffing state (attrs.si)
+    # is preserved across store -> place.
+    save = sessions.session(UID)
+    m = save["maps"][0]
+    summit = Constant.ID_BUILDING_SUMMIT
+    m["items"].append([summit, 60, 60, 0, 0, 0, [], {"si": None}])  # opened
+    _do(Constant.CMD_STORE_ITEM, [60, 60, 0, summit])  # [x, y, town, id]
+    assert not any(it[0] == summit for it in m["items"]), "building not stored"
+    assert m["store"].get(str(summit)) == 1, "stored count missing"
+    _do(Constant.CMD_PLACE_STORED_ITEM, [summit, 62, 62, 0, 0])
+    placed = next(it for it in m["items"] if it[0] == summit and it[1] == 62)
+    assert len(placed) > 7 and isinstance(placed[7], dict) and "si" in placed[7], \
+        "staffing attrs not restored on re-placement"
+    assert placed[7]["si"] is None, "opened Harbor came back unstaffed (would re-charge)"
+
+
+def test_storing_a_plain_item_keeps_no_phantom_staff(tmp):
+    # A non-staffed item round-trips with no attrs baggage.
+    save = sessions.session(UID)
+    m = save["maps"][0]
+    m["items"].append([RANGER, 70, 70, 0, 0, 0])
+    _do(Constant.CMD_STORE_ITEM, [70, 70, 0, RANGER])  # [x, y, town, id]
+    _do(Constant.CMD_PLACE_STORED_ITEM, [RANGER, 71, 71, 0, 0])
+    placed = next(it for it in m["items"] if it[0] == RANGER and it[1] == 71)
+    assert len(placed) == 6, "plain stored item gained phantom attrs"
+
+
 # --- resurrect payment -----------------------------------------------------
 
 def test_resurrect_with_potions(tmp):
@@ -760,6 +789,8 @@ TESTS = [
     test_place_gift_without_stock_rejected,
     test_place_gift_and_stored_item_consume_storage,
     test_sell_gift_and_stored_item,
+    test_storing_a_staffed_building_keeps_its_staffing,
+    test_storing_a_plain_item_keeps_no_phantom_staff,
     test_resurrect_with_potions,
     test_resurrect_potion_shortage_rejected,
     test_resurrect_graveyard_resource_price,
