@@ -395,6 +395,58 @@ def _repair_unit_warehouse_state(save: dict) -> bool:
     return changed
 
 
+def _repair_monster_nest_state(save: dict) -> bool:
+    """Unstick a Monsters Nest left permanently exhausted by the old typo.
+
+    ``desactivate_monster`` used to zero a misspelled ``MonsterNumber``, so the
+    real ``monsterNumber`` kept the count of every monster already bred. The
+    client compares it against its four nest slots and immediately deactivates
+    the nest again, which meant the reactivation popup came back after every
+    reload. Drop the junk field and reset an exhausted counter once.
+    """
+    state = save.get("privateState")
+    if not isinstance(state, dict):
+        return False
+    changed = False
+    if "MonsterNumber" in state:
+        del state["MonsterNumber"]
+        changed = True
+    try:
+        bred = int(state.get("monsterNumber", 0) or 0)
+    except (TypeError, ValueError):
+        bred = 0
+    # The client's nest holds four monsters (_monster1.._monster4).
+    if bred >= 4:
+        state["monsterNumber"] = 0
+        state["stepMonsterNumber"] = 0
+        changed = True
+    return changed
+
+
+def _repair_wounded_units(save: dict) -> bool:
+    """Heal units that an older build left damaged forever.
+
+    ``set_item_health`` used to persist ``attrs.hp`` for units as well as
+    buildings, but a unit has no way to heal at home, so any scratch taken from
+    a troll or an attacking player became permanent. Units now always return
+    from a fight at full health; drop the values already written to disk.
+    """
+    from get_game_config import get_attribute_from_item_id
+
+    changed = False
+    for town in save.get("maps", []):
+        for item in town.get("items", []):
+            if not item or len(item) < 8 or not isinstance(item[7], dict):
+                continue
+            if "hp" not in item[7]:
+                continue
+            if str(get_attribute_from_item_id(item[0], "type")) != "u":
+                continue
+            del item[7]["hp"]
+            changed = True
+    return changed
+
+
 def _repair_quest_progress(save: dict) -> bool:
     """Repair the old quest-id/index mix-up without unlocking every island.
 
@@ -503,6 +555,10 @@ def load_saved_villages():
         if _repair_unit_warehouse_state(save):
             modified = True
         if _repair_quest_progress(save):
+            modified = True
+        if _repair_wounded_units(save):
+            modified = True
+        if _repair_monster_nest_state(save):
             modified = True
         if modified:
             save_session(USERID)

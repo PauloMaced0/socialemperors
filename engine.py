@@ -1,6 +1,36 @@
+import math
 import time
 
+from constants import Constant
 from get_game_config import get_attribute_from_item_id
+
+def apply_training_food_cost(map: dict, id: int, price_multiplier: int) -> int:
+    """Charge the extra food a trained unit costs on top of its `cost_type`.
+
+    IsoBuilding's training code pays twice: `cost` of the unit's own
+    `cost_type`, then `ceil(cost * Config.FOOD_PER_GOLD_INTRAINING)` food
+    (`Base.Player.adjustStatByType(-food, CostType.FOOD)`). Peasants
+    (`SUBCATFUNC_UNIT_PEASANT`) are exempt and cash purchases
+    (CMD_BUY_UNIT_WITH_CASH) skip it entirely. The client only deducts
+    locally, so without this every unit was effectively free of food after a
+    reload.
+    """
+    try:
+        subcat = int(get_attribute_from_item_id(id, "subcat_functional") or 0)
+    except (TypeError, ValueError):
+        subcat = 0
+    if subcat == Constant.SUBCATFUNC_UNIT_PEASANT:
+        return 0
+    gold_cost = math.ceil(
+        float(price_multiplier) * int(get_attribute_from_item_id(id, "cost") or 0)
+    )
+    food_cost = math.ceil(gold_cost * Constant.FOOD_PER_GOLD_INTRAINING)
+    if food_cost <= 0:
+        return 0
+    # Mirror apply_cost: clamp instead of rejecting, so a rounding difference
+    # cannot delete a unit the client already placed.
+    map["food"] = max(int(map["food"]) - food_cost, 0)
+    return food_cost
 
 def apply_cost(playerInfo: dict, map: dict, id: int, price_multiplier: int) -> None:
     cost = int(price_multiplier * int(get_attribute_from_item_id(id, "cost")))

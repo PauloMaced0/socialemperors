@@ -11,7 +11,13 @@ from sessions import (
 )
 from get_game_config import get_game_config, get_level_from_xp, get_name_from_item_id, get_attribute_from_mission_id, get_xp_from_level, get_attribute_from_item_id, get_item_from_subcat_functional
 from constants import Constant
-from engine import apply_cost, apply_collect, apply_collect_xp, timestamp_now
+from engine import (
+    apply_cost,
+    apply_collect,
+    apply_collect_xp,
+    apply_training_food_cost,
+    timestamp_now,
+)
 from bundle import SAVES_DIR
 
 
@@ -1263,6 +1269,10 @@ def do_command(USERID, cmd, args):
         orientation = 0
         if not bool_dont_modify_resources:
             apply_cost(save["playerInfo"], map, id, price_multiplier)
+            if str(type) == "u":
+                food = apply_training_food_cost(map, id, price_multiplier)
+                if food:
+                    print(f"Training food charged: -{food}f.")
             xp = int(get_attribute_from_item_id(id, "xp"))
             map["xp"] = map["xp"] + xp
         placed = [id, x, y, orientation, collected_at_timestamp, level]
@@ -2110,22 +2120,40 @@ def do_command(USERID, cmd, args):
         save["privateState"]["timeStampTakeCareMonster"] = -1 # remove timer
     
     elif cmd == Constant.CMD_ACTIVATE_MONSTER:
+        # PopupInactiveNest.goBuy reads its price straight out of
+        # globals.ACTIVATE_MONSTER_NEST_GOLD / _CASH, so honour the same values
+        # instead of the old hardcoded 100000/50 - a config patch that makes
+        # breeding free must not still be charged here.
+        # goBuy also resets monsterNumber/stepMonsterNumber locally and never
+        # sends them, so the server has to do it too. Without that, a nest that
+        # had bred all four monsters read as exhausted again after every reload
+        # and asked to be paid for over and over.
         currency = args[0]
+        globals_config = get_game_config()["globals"]
         print("Monster nest activated.")
         if currency == 'c':
-            save["playerInfo"]["cash"] = max(int(save["playerInfo"]["cash"] - 50), 0)
+            price = int(globals_config.get("ACTIVATE_MONSTER_NEST_CASH", 0) or 0)
+            save["playerInfo"]["cash"] = max(
+                int(save["playerInfo"]["cash"]) - price, 0
+            )
         elif currency == 'g':
+            price = int(globals_config.get("ACTIVATE_MONSTER_NEST_GOLD", 0) or 0)
             map = save["maps"]
-            map[0]["coins"] = max(int(map[0]["coins"] - 100000), 0)
-        save["privateState"]["monsterNestActive"] = 1
-        save["privateState"]["timeStampTakeCareMonster"] = -1 # remove timer if any
-    
+            map[0]["coins"] = max(int(map[0]["coins"]) - price, 0)
+        pState = save["privateState"]
+        pState["monsterNestActive"] = 1
+        pState["monsterNumber"] = 0
+        pState["stepMonsterNumber"] = 0
+        pState["timeStampTakeCareMonster"] = -1 # remove timer if any
+
     elif cmd == Constant.CMD_DESACTIVATE_MONSTER: # cmd called too late
         print("Monster nest deactivated.")
         pState = save["privateState"]
         pState["monsterNestActive"] = 0
         pState["stepMonsterNumber"] = 0
-        pState["MonsterNumber"] = 0
+        # Was written as "MonsterNumber": the real field never reset, so the
+        # nest stayed permanently exhausted.
+        pState["monsterNumber"] = 0
         pState["timeStampTakeCareMonster"] = -1 # remove timer if any
 
 
@@ -2646,6 +2674,17 @@ def do_command(USERID, cmd, args):
         maximum = max(1, int(config.get("life", 1) or 1))
         health = min(max(0, health), maximum)
         attrs = _item_attrs(item)
+        if str(config.get("type")) == "u":
+            # Units always come out of a fight at full strength. Nothing heals a
+            # wounded unit at home - no repair cursor, and the Healer only works
+            # inside a battle - so persisting combat damage made it permanent.
+            # Buildings keep partial hp because they can be repaired.
+            attrs.pop("hp", None)
+            print(
+                f"Ignored {get_name_from_item_id(item_id)} combat damage "
+                f"({health}/{maximum}) - units heal to full."
+            )
+            return True
         if health >= maximum:
             attrs.pop("hp", None)
         else:
