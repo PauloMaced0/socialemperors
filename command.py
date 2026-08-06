@@ -773,6 +773,32 @@ def _initialize_unit_warehouse(town):
     return capacity, units
 
 
+def _grant_monster_nest_first_cycle(save):
+    """Open the Monsters Nest free of charge the first time it is owned.
+
+    A freshly built nest is inactive, so the client shows PopupInactiveNest and
+    charges globals.ACTIVATE_MONSTER_NEST_GOLD/_CASH before the very first egg.
+    That price belongs to *starting again* once all four monsters have been
+    bred, not to opening a nest you just paid 6000 gold for - the Dragon Nest is
+    likewise pre-activated rather than sold twice.
+
+    The grant is remembered in ``monsterNestFirstCycleGranted`` so it happens
+    once per player: without it, selling and rebuying the 6000-gold nest (or
+    simply reloading after the nest emptied) would hand out unlimited free
+    restarts.
+    """
+    state = save["privateState"]
+    if state.get("monsterNestFirstCycleGranted"):
+        return False
+    state["monsterNestFirstCycleGranted"] = 1
+    state["monsterNestActive"] = 1
+    state["monsterNumber"] = 0
+    state["stepMonsterNumber"] = 0
+    state["timeStampTakeCareMonster"] = -1
+    print("Monsters Nest opened - first breeding cycle is free.")
+    return True
+
+
 def _add_gifts(save, item_id, count=1):
     """Add item counts to the client's sparse, id-indexed *gift* array."""
     item_id = int(item_id)
@@ -1284,6 +1310,8 @@ def do_command(USERID, cmd, args):
         map["items"].append(placed)
         if int(id) == Constant.ID_BUILDING_UNIT_WAREHOUSE:
             _initialize_unit_warehouse(map)
+        if int(id) == Constant.ID_BUILDING_MONSTERS_NEST:
+            _grant_monster_nest_first_cycle(save)
         if bool_dont_modify_resources and is_enemy_camp_marker(id):
             mark_enemy_camp_active(map, collected_at_timestamp)
         return True
@@ -2145,6 +2173,8 @@ def do_command(USERID, cmd, args):
         pState["monsterNumber"] = 0
         pState["stepMonsterNumber"] = 0
         pState["timeStampTakeCareMonster"] = -1 # remove timer if any
+        # A paid restart also settles the one free cycle.
+        pState["monsterNestFirstCycleGranted"] = 1
 
     elif cmd == Constant.CMD_DESACTIVATE_MONSTER: # cmd called too late
         print("Monster nest deactivated.")
@@ -2155,6 +2185,8 @@ def do_command(USERID, cmd, args):
         # nest stayed permanently exhausted.
         pState["monsterNumber"] = 0
         pState["timeStampTakeCareMonster"] = -1 # remove timer if any
+        # An emptied nest must not be handed a second free cycle on reload.
+        pState["monsterNestFirstCycleGranted"] = 1
 
 
     elif cmd == Constant.CMD_NEXT_MONSTER_STEP:

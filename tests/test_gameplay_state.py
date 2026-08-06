@@ -1485,13 +1485,42 @@ def test_building_damage_and_repair_survive_reload(tmp):
         "fully repaired building remained marked as damaged"
 
 
-def test_monster_nest_restart_is_free_and_resets_progress(tmp):
+def test_building_the_monster_nest_opens_its_first_cycle_free(tmp):
+    save = sessions.session(UID)
+    town = save["maps"][0]
+    town["coins"] = 500000
+    _set_now(_local(12, 10))
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_BUY,
+         "args": [Constant.ID_BUILDING_MONSTERS_NEST, 66, 66, 0, 0, 0, 1, "b"]},
+    ]))
+    state = save["privateState"]
+    assert town["coins"] == 494000, \
+        f"nest should cost only its 6000 gold build price: {500000 - town['coins']}"
+    assert state["monsterNestActive"] == 1, \
+        "a freshly built nest still demands the restart price for its first egg"
+    assert state["monsterNumber"] == 0 and state["stepMonsterNumber"] == 0
+
+    # Selling and rebuying the 6000-gold nest must not hand out a second free
+    # cycle - that would undercut the 100k/50 restart.
+    state["monsterNestActive"] = 0
+    state["monsterNumber"] = 4
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_BUY,
+         "args": [Constant.ID_BUILDING_MONSTERS_NEST, 68, 68, 0, 0, 0, 1, "b"]},
+    ]))
+    assert state["monsterNestActive"] == 0, \
+        "rebuying the nest granted another free breeding cycle"
+
+
+def test_restarting_an_emptied_monster_nest_still_costs(tmp):
     save = sessions.session(UID)
     state = save["privateState"]
     town = save["maps"][0]
     town["coins"] = 120000
     save["playerInfo"]["cash"] = 60
-    # A nest that has already bred all four of its monsters.
+    # All four monsters bred, so the client deactivated the nest.
+    state["monsterNestFirstCycleGranted"] = 1
     state["monsterNestActive"] = 0
     state["monsterNumber"] = 4
     state["stepMonsterNumber"] = 7
@@ -1499,38 +1528,54 @@ def test_monster_nest_restart_is_free_and_resets_progress(tmp):
     command.command(UID, _batch([
         {"cmd": Constant.CMD_ACTIVATE_MONSTER, "args": ["g"]},
     ]))
-    assert town["coins"] == 120000, \
-        f"restarting the monster nest still charged gold: {120000 - town['coins']}"
-    assert save["playerInfo"]["cash"] == 60, "restarting the nest charged cash"
+    assert town["coins"] == 20000, \
+        f"restart should charge the configured 100000 gold: {120000 - town['coins']}"
     assert state["monsterNestActive"] == 1, "monster nest did not reactivate"
     assert state["monsterNumber"] == 0 and state["stepMonsterNumber"] == 0, \
         "reactivated nest kept its exhausted breeding progress"
 
-    # The cash button must be free as well.
     state["monsterNestActive"] = 0
     state["monsterNumber"] = 4
     command.command(UID, _batch([
         {"cmd": Constant.CMD_ACTIVATE_MONSTER, "args": ["c"]},
     ]))
-    assert save["playerInfo"]["cash"] == 60, \
-        "the cash restart button still charged cash"
+    assert save["playerInfo"]["cash"] == 10, \
+        f"restart should charge the configured 50 cash: {60 - save['playerInfo']['cash']}"
     assert state["monsterNumber"] == 0, "cash restart kept the exhausted counter"
 
 
-def test_exhausted_monster_nest_is_repaired_on_load(tmp):
-    state = sessions.session(UID)["privateState"]
-    # What the old misspelled reset left behind.
-    state["monsterNestActive"] = 1
-    state["monsterNumber"] = 4
-    state["stepMonsterNumber"] = 3
-    state["MonsterNumber"] = 0
+def test_monster_nest_built_before_the_free_cycle_is_opened_on_load(tmp):
+    save = sessions.session(UID)
+    save["maps"][0]["items"].append(
+        [Constant.ID_BUILDING_MONSTERS_NEST, 66, 66, 0, 0, 0]
+    )
+    state = save["privateState"]
+    state["monsterNestActive"] = 0
+    state["monsterNumber"] = 0
+    state["MonsterNumber"] = 0  # what the old misspelled reset left behind
     sessions.save_session(UID)
 
     reloaded = _reload()["privateState"]
     assert "MonsterNumber" not in reloaded, "junk MonsterNumber field survived"
-    assert reloaded["monsterNumber"] == 0, \
-        "nest stayed exhausted, so the reactivation popup keeps coming back"
-    assert reloaded["stepMonsterNumber"] == 0, "breeding step was not reset"
+    assert reloaded["monsterNestActive"] == 1, \
+        "an already-built nest was left waiting for the restart price"
+    assert reloaded["monsterNestFirstCycleGranted"] == 1
+
+
+def test_emptied_monster_nest_is_not_reopened_free_on_load(tmp):
+    save = sessions.session(UID)
+    save["maps"][0]["items"].append(
+        [Constant.ID_BUILDING_MONSTERS_NEST, 66, 66, 0, 0, 0]
+    )
+    state = save["privateState"]
+    state["monsterNestActive"] = 0
+    state["monsterNumber"] = 4  # every monster already bred
+    sessions.save_session(UID)
+
+    reloaded = _reload()["privateState"]
+    assert reloaded["monsterNestActive"] == 0, \
+        "an emptied nest was reopened for free instead of charging the restart"
+    assert reloaded["monsterNumber"] == 4, "bred-monster count was wiped"
 
 
 def test_deactivating_the_monster_nest_resets_the_real_counter(tmp):
@@ -1861,8 +1906,10 @@ TESTS = [
     test_weather_spell_and_mana_state_survive_reload,
     test_building_damage_and_repair_survive_reload,
     test_units_return_from_a_fight_at_full_health,
-    test_monster_nest_restart_is_free_and_resets_progress,
-    test_exhausted_monster_nest_is_repaired_on_load,
+    test_building_the_monster_nest_opens_its_first_cycle_free,
+    test_restarting_an_emptied_monster_nest_still_costs,
+    test_monster_nest_built_before_the_free_cycle_is_opened_on_load,
+    test_emptied_monster_nest_is_not_reopened_free_on_load,
     test_deactivating_the_monster_nest_resets_the_real_counter,
     test_stored_building_uses_owned_storage_not_gifts,
     test_quest_rewards_pay_once_and_progress_by_order_index,

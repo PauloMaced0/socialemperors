@@ -396,13 +396,19 @@ def _repair_unit_warehouse_state(save: dict) -> bool:
 
 
 def _repair_monster_nest_state(save: dict) -> bool:
-    """Unstick a Monsters Nest left permanently exhausted by the old typo.
+    """Settle Monsters Nest bookkeeping for saves written by older builds.
 
-    ``desactivate_monster`` used to zero a misspelled ``MonsterNumber``, so the
-    real ``monsterNumber`` kept the count of every monster already bred. The
-    client compares it against its four nest slots and immediately deactivates
-    the nest again, which meant the reactivation popup came back after every
-    reload. Drop the junk field and reset an exhausted counter once.
+    Two things are repaired, once per save:
+
+    * ``desactivate_monster`` used to zero a misspelled ``MonsterNumber``, so
+      the real ``monsterNumber`` kept the count of every monster already bred.
+      The client compares it against its four nest slots, deactivates the nest
+      again and reopens the reactivation popup - which asked to be paid after
+      every reload. Drop the junk field; the corrected command now resets the
+      real one.
+    * A nest built before the free first cycle existed is still sitting
+      inactive, waiting to be paid for. Open it, unless all four monsters were
+      already bred - that player owes the ordinary paid restart.
     """
     state = save.get("privateState")
     if not isinstance(state, dict):
@@ -411,16 +417,27 @@ def _repair_monster_nest_state(save: dict) -> bool:
     if "MonsterNumber" in state:
         del state["MonsterNumber"]
         changed = True
+    if state.get("monsterNestFirstCycleGranted"):
+        return changed
+    owns_nest = any(
+        item and int(item[0]) == Constant.ID_BUILDING_MONSTERS_NEST
+        for town in save.get("maps", [])
+        for item in town.get("items", [])
+    )
+    if not owns_nest:
+        return changed
     try:
         bred = int(state.get("monsterNumber", 0) or 0)
     except (TypeError, ValueError):
         bred = 0
+    # Mark the free cycle spent either way, so this never runs twice.
+    state["monsterNestFirstCycleGranted"] = 1
     # The client's nest holds four monsters (_monster1.._monster4).
-    if bred >= 4:
-        state["monsterNumber"] = 0
+    if bred < 4 and not int(state.get("monsterNestActive", 0) or 0):
+        state["monsterNestActive"] = 1
         state["stepMonsterNumber"] = 0
-        changed = True
-    return changed
+        state["timeStampTakeCareMonster"] = -1
+    return True
 
 
 def _repair_wounded_units(save: dict) -> bool:
