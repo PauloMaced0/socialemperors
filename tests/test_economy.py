@@ -143,6 +143,34 @@ def test_great_church_grants_population(tmp):
         "Great Church population boost not applied"
 
 
+def test_training_a_unit_also_charges_food(tmp):
+    # IsoBuilding pays the unit's `cost` in its own cost_type AND
+    # ceil(cost * Config.FOOD_PER_GOLD_INTRAINING) food. The server used to
+    # charge only the cost_type, so a reload gave the food straight back.
+    town = sessions.session(UID)["maps"][0]
+    town["coins"] = 1000
+    town["food"] = 1000
+    town["items"].append([38, 60, 60, 0, 0, 0])  # Barracks I, trains Spearman
+    _do(Constant.CMD_BUY, [509, 61, 61, 0, 0, 0, 1, "u", 60, 60, 38])
+
+    assert town["coins"] == 970, \
+        f"Spearman gold cost wrong: {1000 - town['coins']}"
+    assert town["food"] == 940, \
+        f"Spearman food cost should be 2x its 30 gold: {1000 - town['food']}"
+
+
+def test_training_a_peasant_charges_no_extra_food(tmp):
+    # SUBCATFUNC_UNIT_PEASANT is exempt from the food surcharge; a Villager
+    # costs exactly its configured 50 food.
+    town = sessions.session(UID)["maps"][0]
+    town["food"] = 1000
+    town["items"].append([26, 62, 62, 0, 0, 0])  # Town Hall, trains Villager
+    _do(Constant.CMD_BUY, [500, 63, 63, 0, 0, 0, 1, "u", 62, 62, 26])
+
+    assert town["food"] == 950, \
+        f"Villager should cost 50 food and nothing more: {1000 - town['food']}"
+
+
 def test_dragon_rider_buildings_have_store_descriptions(tmp):
     literals = {
         int(entry["id"]): entry["text"]
@@ -367,6 +395,8 @@ TESTS = [
     test_normal_sale_still_refunds_five_percent,
     test_resource_upgrade_chains_are_monotonic,
     test_great_church_grants_population,
+    test_training_a_unit_also_charges_food,
+    test_training_a_peasant_charges_no_extra_food,
     test_dragon_rider_buildings_have_store_descriptions,
     test_training_stables_has_a_real_production_cycle,
     test_upgraded_social_buildings_list_inherited_roles_first,

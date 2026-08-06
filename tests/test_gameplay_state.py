@@ -1485,7 +1485,68 @@ def test_building_damage_and_repair_survive_reload(tmp):
         "fully repaired building remained marked as damaged"
 
 
-def test_home_unit_damage_and_healing_survive_reload(tmp):
+def test_monster_nest_restart_is_free_and_resets_progress(tmp):
+    save = sessions.session(UID)
+    state = save["privateState"]
+    town = save["maps"][0]
+    town["coins"] = 120000
+    save["playerInfo"]["cash"] = 60
+    # A nest that has already bred all four of its monsters.
+    state["monsterNestActive"] = 0
+    state["monsterNumber"] = 4
+    state["stepMonsterNumber"] = 7
+
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_ACTIVATE_MONSTER, "args": ["g"]},
+    ]))
+    assert town["coins"] == 120000, \
+        f"restarting the monster nest still charged gold: {120000 - town['coins']}"
+    assert save["playerInfo"]["cash"] == 60, "restarting the nest charged cash"
+    assert state["monsterNestActive"] == 1, "monster nest did not reactivate"
+    assert state["monsterNumber"] == 0 and state["stepMonsterNumber"] == 0, \
+        "reactivated nest kept its exhausted breeding progress"
+
+    # The cash button must be free as well.
+    state["monsterNestActive"] = 0
+    state["monsterNumber"] = 4
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_ACTIVATE_MONSTER, "args": ["c"]},
+    ]))
+    assert save["playerInfo"]["cash"] == 60, \
+        "the cash restart button still charged cash"
+    assert state["monsterNumber"] == 0, "cash restart kept the exhausted counter"
+
+
+def test_exhausted_monster_nest_is_repaired_on_load(tmp):
+    state = sessions.session(UID)["privateState"]
+    # What the old misspelled reset left behind.
+    state["monsterNestActive"] = 1
+    state["monsterNumber"] = 4
+    state["stepMonsterNumber"] = 3
+    state["MonsterNumber"] = 0
+    sessions.save_session(UID)
+
+    reloaded = _reload()["privateState"]
+    assert "MonsterNumber" not in reloaded, "junk MonsterNumber field survived"
+    assert reloaded["monsterNumber"] == 0, \
+        "nest stayed exhausted, so the reactivation popup keeps coming back"
+    assert reloaded["stepMonsterNumber"] == 0, "breeding step was not reset"
+
+
+def test_deactivating_the_monster_nest_resets_the_real_counter(tmp):
+    state = sessions.session(UID)["privateState"]
+    state["monsterNumber"] = 2
+    state["stepMonsterNumber"] = 5
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_DESACTIVATE_MONSTER, "args": []},
+    ]))
+    assert state["monsterNumber"] == 0, \
+        "deactivate wrote the misspelled field again"
+    assert "MonsterNumber" not in state, "deactivate re-created the junk field"
+    assert state["monsterNestActive"] == 0 and state["stepMonsterNumber"] == 0
+
+
+def test_units_return_from_a_fight_at_full_health(tmp):
     item_id, x, y = 512, 76, 76  # Light Knight
     town = sessions.session(UID)["maps"][0]
     town["items"].append([item_id, x, y, 0, 0, 0, [], {}])
@@ -1494,14 +1555,14 @@ def test_home_unit_damage_and_healing_survive_reload(tmp):
     command.command(UID, _batch([
         {"cmd": "set_item_health", "args": [x, y, 0, item_id, damaged]},
     ]))
-    assert _item(_reload(), item_id, x, y)[7]["hp"] == damaged, \
-        "wounded home unit healed on browser/server reload"
-
-    command.command(UID, _batch([
-        {"cmd": "set_item_health", "args": [x, y, 0, item_id, maximum]},
-    ]))
     assert "hp" not in _item(_reload(), item_id, x, y)[7], \
-        "fully healed home unit remained marked as damaged"
+        "combat damage stuck to a unit that has no way to heal at home"
+
+    # Saves written by the older build carry the damage; loading heals it.
+    _item(sessions.session(UID), item_id, x, y)[7]["hp"] = damaged
+    sessions.save_session(UID)
+    assert "hp" not in _item(_reload(), item_id, x, y)[7], \
+        "unit wounded by an older build stayed damaged after the migration"
 
 
 def test_stored_building_uses_owned_storage_not_gifts(tmp):
@@ -1799,7 +1860,10 @@ TESTS = [
     test_producer_limit_applies_across_upgrade_family,
     test_weather_spell_and_mana_state_survive_reload,
     test_building_damage_and_repair_survive_reload,
-    test_home_unit_damage_and_healing_survive_reload,
+    test_units_return_from_a_fight_at_full_health,
+    test_monster_nest_restart_is_free_and_resets_progress,
+    test_exhausted_monster_nest_is_repaired_on_load,
+    test_deactivating_the_monster_nest_resets_the_real_counter,
     test_stored_building_uses_owned_storage_not_gifts,
     test_quest_rewards_pay_once_and_progress_by_order_index,
     test_invalid_quest_id_progress_is_repaired_on_load,

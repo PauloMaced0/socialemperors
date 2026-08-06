@@ -367,6 +367,10 @@ class Constant:
     ID_BUILDING_BAHAMUT_HEART = 1410
     ID_BUILDING_TIME_MACHINE = 1463
     ID_BUILDING_DRAGONCITY = 1527
+    # core.Config.FOOD_PER_GOLD_INTRAINING - the client charges this many food
+    # per unit of a trained unit's own `cost`, on top of that cost. Not part of
+    # the game config, so it has to be mirrored here.
+    FOOD_PER_GOLD_INTRAINING = 2
     SUBCATFUNC_UNIT_PEASANT = 71
     SUBCATFUNC_UNIT_CLERIC = 72
     SUBCATFUNC_UNIT_SETTLER = 73
