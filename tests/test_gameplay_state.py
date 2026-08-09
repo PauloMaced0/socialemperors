@@ -972,7 +972,18 @@ def test_live_enemy_camp_survives_reload_without_respawning(tmp):
     reloaded["items"].append([525, 80, 80, 0, _local(12, 10), 0])
 
     _set_now(_local(12, 13))
+    before = (town["coins"], town["xp"], town["timestampLastTreasure"])
     command.command(UID, _batch([
+        {"cmd": Constant.CMD_COLLECT_TREASURE,
+         "args": [100, 20, 1, 0, 0, 0]},
+    ]))
+    assert (town["coins"], town["xp"], town["timestampLastTreasure"]) == before, \
+        "camp reward was paid while a tracked enemy was alive"
+    assert town["enemyCampActive"] == 1
+
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_KILL,
+         "args": [71, 70, 525, 0, "u"]},
         {"cmd": Constant.CMD_COLLECT_TREASURE,
          "args": [100, 20, 1, 0, 0, 0]},
     ]))
@@ -1025,7 +1036,7 @@ def test_natural_resources_use_persisted_random_respawns(tmp):
     ])
     town["naturalResourcesInitialized"] = 1
     assert town["naturalResourcesInitialized"] == 1
-    town["naturalResourcePopulationRepairVersion"] = 1
+    town["naturalResourcePopulationRepairVersion"] = 2
 
     # A mature map reload may try to run MapInitializer's free population
     # buys again. The server rejects that batch instead of instantly replacing
@@ -1074,10 +1085,23 @@ def test_natural_resources_use_persisted_random_respawns(tmp):
     town = reloaded["maps"][0]
 
     # Trees and minerals share the same three-hour persistence rule.
+    wood_before, xp_before = town["wood"], town["xp"]
     command.command(UID, _batch([
+        {"cmd": Constant.CMD_COLLECT,
+         "args": [74, 74, 0, tree, 0, 1, 0]},
+        {"cmd": Constant.CMD_SELL,
+         "args": [74, 74, tree, 0, 0, Constant.SELL_REASON_HARVEST]},
+        # A retransmitted removal cannot pay twice because the item is gone.
         {"cmd": Constant.CMD_SELL,
          "args": [74, 74, tree, 0, 0, Constant.SELL_REASON_HARVEST]},
     ]))
+    assert town["wood"] == wood_before + 20, \
+        "tree harvest was lost or paid twice across COLLECT + HARV"
+    assert town["xp"] == xp_before + 1
+    reloaded = _reload()
+    town = reloaded["maps"][0]
+    assert town["wood"] == wood_before + 20, \
+        "harvested wood rolled back after reload"
     assert not any(item[0] == tree and item[1:3] == [74, 74]
                    for item in town["items"])
     _set_now(_local(12, 12))
@@ -1135,7 +1159,7 @@ def test_legacy_mineral_placeholders_migrate_without_resetting_timer(tmp):
     town = sessions.session(UID)["maps"][0]
     town["naturalResourcesInitialized"] = 1
     town["naturalResourceRecoveryVersion"] = 1
-    town["naturalResourcePopulationRepairVersion"] = 1
+    town["naturalResourcePopulationRepairVersion"] = 2
     town["items"].append([
         Constant.ID_BUILDING_REGEN_STONE,
         70, 71, 0, _local(12, 10), 0,
@@ -1195,7 +1219,7 @@ def test_mineral_moves_outside_owned_land_after_regen_placeholder(tmp):
     town["items"] = [it for it in town["items"] if not it or int(it[0]) not in stone_ids]
     town["items"].append([Constant.ID_BUILDING_STONE_1, 44, 44, 0, _local(12, 10), 0])
     town["pendingMineralRespawns"] = []
-    town["naturalResourcePopulationRepairVersion"] = 1
+    town["naturalResourcePopulationRepairVersion"] = 2
 
     # Client mines it out: removes the deposit, then places the regen object.
     command.command(UID, _batch([
@@ -1225,10 +1249,10 @@ def test_mineral_moves_outside_owned_land_after_regen_placeholder(tmp):
     ), "stone relocation was not on wild land"
 
 
-def test_mineral_respawn_works_above_legacy_21_cap(tmp):
-    # Stock has 15-21 nodes per family, but a legacy/corrupt map above that
-    # count must not discard a real 1:1 harvest timer. The separate hard cap is
-    # only a runaway guard.
+def test_legacy_over_cap_minerals_converge_without_deleting_items(tmp):
+    # Do not destructively prune an old over-cap save. Once one of its excess
+    # nodes is mined, however, its pending timer must not recreate population
+    # above the stock ceiling of 21.
     _set_now(_local(12, 10))
     town = sessions.session(UID)["maps"][0]
     stone_ids = (
@@ -1256,7 +1280,8 @@ def test_mineral_respawn_works_above_legacy_21_cap(tmp):
     assert sum(1 for item in town["items"] if item[0] in stone_ids) == 23
     assert len(town["pendingMineralRespawns"]) == 1
 
-    # Before 3h: still 23. After 3h: restored to 24 (not discarded by a cap).
+    # Before and after 3h it remains at 23; the mature excess timer stays
+    # queued until population naturally falls below the cap.
     _set_now(_local(12, 12))
     get_player_info.get_player_info(UID)
     assert sum(1 for item in town["items"] if item[0] in stone_ids) == 23, \
@@ -1264,20 +1289,112 @@ def test_mineral_respawn_works_above_legacy_21_cap(tmp):
 
     _set_now(_local(12, 13))
     get_player_info.get_player_info(UID)
-    assert sum(1 for item in town["items"] if item[0] in stone_ids) == 24, \
-        "gold/stone did not respawn because the family was above 21"
-    assert town["pendingMineralRespawns"] == []
-    respawn = next(
+    assert sum(1 for item in town["items"] if item[0] in stone_ids) == 23, \
+        "legacy excess mineral population was recreated above the cap"
+    assert len(town["pendingMineralRespawns"]) == 1
+
+
+def test_mature_mineral_deposit_respawns_as_one_cluster(tmp):
+    _set_now(_local(12, 10))
+    town = sessions.session(UID)["maps"][0]
+    stone_ids = {
+        Constant.ID_BUILDING_STONE_1,
+        Constant.ID_BUILDING_STONE_2,
+        Constant.ID_BUILDING_STONE_3,
+        Constant.ID_BUILDING_STONE_4,
+    }
+    town["items"] = [
         item for item in town["items"]
-        if item[0] in stone_ids and item[1:3] not in (
-            [index, 80] for index in range(24) if index != 5
+        if not item or int(item[0]) not in stone_ids
+    ]
+    town["naturalResourcePopulationRepairVersion"] = 2
+    sources = [(2 + index, 2) for index in range(6)]
+    town["items"].extend([
+        [Constant.ID_BUILDING_STONE_1, x, y, 0, _local(12, 10), 0]
+        for x, y in sources
+    ])
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_SELL,
+         "args": [x, y, Constant.ID_BUILDING_STONE_1, 0, 0,
+                  Constant.SELL_REASON_HARVEST]}
+        for x, y in sources
+    ]))
+
+    _set_now(_local(12, 13))
+    get_player_info.get_player_info(UID)
+    positions = [
+        tuple(item[1:3]) for item in town["items"]
+        if item and int(item[0]) in stone_ids
+    ]
+    assert len(positions) == 6
+    assert all(
+        any(
+            other != position
+            and max(abs(other[0] - position[0]), abs(other[1] - position[1])) <= 2
+            for other in positions
         )
-    )
-    assert respawn[1:3] != [5, 80], \
-        "mature mineral returned to its depleted source tile"
-    assert get_player_info._position_is_wild(
-        town, tuple(respawn[1:3])
-    ), "mature mineral did not respawn on wild land"
+        for position in positions
+    ), f"mineral respawn scattered six individual nodes: {positions}"
+    persisted = list(positions)
+    assert [
+        tuple(item[1:3]) for item in _reload()["maps"][0]["items"]
+        if item and int(item[0]) in stone_ids
+    ] == persisted, "reload rerolled a persisted mineral cluster"
+
+
+def test_scattered_legacy_minerals_are_reclustered_once(tmp):
+    town = sessions.session(UID)["maps"][0]
+    stone_ids = {
+        Constant.ID_BUILDING_STONE_1,
+        Constant.ID_BUILDING_STONE_2,
+        Constant.ID_BUILDING_STONE_3,
+        Constant.ID_BUILDING_STONE_4,
+    }
+    town["items"] = [
+        item for item in town["items"]
+        if not item or int(item[0]) not in stone_ids
+    ]
+    town["items"].extend([
+        [Constant.ID_BUILDING_STONE_1, 2 + index * 6, 2, 0, 0, 0]
+        for index in range(15)
+    ])
+    town["naturalResourcePopulationRepairVersion"] = 1
+    get_player_info.random.seed(321)
+
+    get_player_info.get_player_info(UID)
+    positions = {
+        tuple(item[1:3]) for item in town["items"]
+        if item and int(item[0]) in stone_ids
+    }
+    assert len(positions) == 15
+    components = []
+    remaining = set(positions)
+    while remaining:
+        seed = remaining.pop()
+        component = {seed}
+        frontier = [seed]
+        while frontier:
+            current = frontier.pop()
+            neighbors = {
+                position for position in remaining
+                if max(
+                    abs(position[0] - current[0]),
+                    abs(position[1] - current[1]),
+                ) <= 2
+            }
+            remaining -= neighbors
+            component |= neighbors
+            frontier.extend(neighbors)
+        components.append(component)
+    assert sorted(len(value) for value in components) == [5, 5, 5], \
+        f"legacy stone nodes were not repaired into deposits: {components}"
+
+    persisted = positions
+    get_player_info.get_player_info(UID)
+    assert {
+        tuple(item[1:3]) for item in town["items"]
+        if item and int(item[0]) in stone_ids
+    } == persisted, "second reload moved the repaired deposits again"
 
 
 def test_legacy_empty_map_gets_one_server_owned_resource_repair(tmp):
@@ -1310,7 +1427,7 @@ def test_legacy_empty_map_gets_one_server_owned_resource_repair(tmp):
     get_player_info.get_player_info(UID, 0)
     marker = str(Constant.SUBCATFUNC_RESOURCE_REGEN)
     assert town["naturalResourcesInitialized"] == 1
-    assert town["naturalResourcePopulationRepairVersion"] == 1
+    assert town["naturalResourcePopulationRepairVersion"] == 2
     tree_ids = {
         Constant.ID_BUILDING_TREE_1,
         Constant.ID_BUILDING_TREE_2,
@@ -1591,7 +1708,7 @@ def test_deactivating_the_monster_nest_resets_the_real_counter(tmp):
     assert state["monsterNestActive"] == 0 and state["stepMonsterNumber"] == 0
 
 
-def test_units_return_from_a_fight_at_full_health(tmp):
+def test_home_unit_damage_and_healing_survive_reload(tmp):
     item_id, x, y = 512, 76, 76  # Light Knight
     town = sessions.session(UID)["maps"][0]
     town["items"].append([item_id, x, y, 0, 0, 0, [], {}])
@@ -1600,14 +1717,49 @@ def test_units_return_from_a_fight_at_full_health(tmp):
     command.command(UID, _batch([
         {"cmd": "set_item_health", "args": [x, y, 0, item_id, damaged]},
     ]))
-    assert "hp" not in _item(_reload(), item_id, x, y)[7], \
-        "combat damage stuck to a unit that has no way to heal at home"
+    assert _item(_reload(), item_id, x, y)[7]["hp"] == damaged, \
+        "home-unit combat damage was healed merely by reloading"
 
-    # Saves written by the older build carry the damage; loading heals it.
-    _item(sessions.session(UID), item_id, x, y)[7]["hp"] = damaged
-    sessions.save_session(UID)
+    command.command(UID, _batch([
+        {"cmd": "set_item_health", "args": [x, y, 0, item_id, maximum]},
+    ]))
     assert "hp" not in _item(_reload(), item_id, x, y)[7], \
-        "unit wounded by an older build stayed damaged after the migration"
+        "a fully healed unit retained stale partial-health state"
+
+
+def test_pvp_survivor_health_returns_to_the_home_village(tmp):
+    item_id, x, y = 512, 77, 77  # Light Knight, 60 maximum life
+    town = sessions.session(UID)["maps"][0]
+    town["items"] = [
+        item for item in town["items"]
+        if not item or int(item[0]) != item_id
+    ]
+    town["items"].append([item_id, x, y, 0, 0, 0, [], {}])
+    payload = {
+        "attacker": {"user_id": UID, "map": 0},
+        "victim": {},
+        "resources": {"g": 0, "x": 0},
+        "resources_victim": {"g": 0},
+        "attacker_units": [[item_id, 1, 0, 0]],
+        "victim_units": [],
+        "attacker_health": [[item_id, 23]],
+        "victim_health": [],
+        "win": 1,
+        "duration": 20,
+        "voluntary_end": 0,
+    }
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_END_ATTACK, "args": [json.dumps(payload)]},
+    ]))
+    assert _item(_reload(), item_id, x, y)[7]["hp"] == 23, \
+        "surviving PvP unit returned at full health after reload"
+
+    # A forged/full result must not heal a wound which existed before battle.
+    payload["attacker_health"] = [[item_id, 60]]
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_END_ATTACK, "args": [json.dumps(payload)]},
+    ]))
+    assert _item(_reload(), item_id, x, y)[7]["hp"] == 23
 
 
 def test_stored_building_uses_owned_storage_not_gifts(tmp):
@@ -1898,14 +2050,17 @@ TESTS = [
     test_natural_resources_use_persisted_random_respawns,
     test_legacy_mineral_placeholders_migrate_without_resetting_timer,
     test_mineral_moves_outside_owned_land_after_regen_placeholder,
-    test_mineral_respawn_works_above_legacy_21_cap,
+    test_legacy_over_cap_minerals_converge_without_deleting_items,
+    test_mature_mineral_deposit_respawns_as_one_cluster,
+    test_scattered_legacy_minerals_are_reclustered_once,
     test_legacy_empty_map_gets_one_server_owned_resource_repair,
     test_reload_marker_relocks_so_trees_do_not_wander,
     test_ship_quest_requires_a_fully_staffed_harbour,
     test_producer_limit_applies_across_upgrade_family,
     test_weather_spell_and_mana_state_survive_reload,
     test_building_damage_and_repair_survive_reload,
-    test_units_return_from_a_fight_at_full_health,
+    test_home_unit_damage_and_healing_survive_reload,
+    test_pvp_survivor_health_returns_to_the_home_village,
     test_building_the_monster_nest_opens_its_first_cycle_free,
     test_restarting_an_emptied_monster_nest_still_costs,
     test_monster_nest_built_before_the_free_cycle_is_opened_on_load,

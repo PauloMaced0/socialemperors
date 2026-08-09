@@ -440,30 +440,6 @@ def _repair_monster_nest_state(save: dict) -> bool:
     return True
 
 
-def _repair_wounded_units(save: dict) -> bool:
-    """Heal units that an older build left damaged forever.
-
-    ``set_item_health`` used to persist ``attrs.hp`` for units as well as
-    buildings, but a unit has no way to heal at home, so any scratch taken from
-    a troll or an attacking player became permanent. Units now always return
-    from a fight at full health; drop the values already written to disk.
-    """
-    from get_game_config import get_attribute_from_item_id
-
-    changed = False
-    for town in save.get("maps", []):
-        for item in town.get("items", []):
-            if not item or len(item) < 8 or not isinstance(item[7], dict):
-                continue
-            if "hp" not in item[7]:
-                continue
-            if str(get_attribute_from_item_id(item[0], "type")) != "u":
-                continue
-            del item[7]["hp"]
-            changed = True
-    return changed
-
-
 def _repair_quest_progress(save: dict) -> bool:
     """Repair the old quest-id/index mix-up without unlocking every island.
 
@@ -572,8 +548,6 @@ def load_saved_villages():
         if _repair_unit_warehouse_state(save):
             modified = True
         if _repair_quest_progress(save):
-            modified = True
-        if _repair_wounded_units(save):
             modified = True
         if _repair_monster_nest_state(save):
             modified = True

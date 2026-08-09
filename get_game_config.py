@@ -198,6 +198,38 @@ def fix_social_upgrade_roles() -> None:
 fix_social_upgrade_roles()
 
 
+def fix_tournament_economy() -> None:
+    """Apply the local tournament cash rebalance requested for the arena.
+
+    Advanced (type 2) is deliberately the reference tier and stays at its
+    original 15 cash entry / 30 cash prize.  The two other cash brackets were
+    prohibitively expensive on a small local server, so their entry and cash
+    prize are both halved.  Keeping the same 2:1 payout ratio avoids changing
+    the risk/reward balance while making those brackets usable.
+    """
+    tournaments = __game_config.get("tournament_type", {})
+    for type_id in ("4", "6"):
+        definition = tournaments.get(type_id)
+        if not definition:
+            continue
+        definition["cost"] = int(definition.get("cost", 0) or 0) // 2
+        for prize in definition.get("prize", []):
+            if "c" in prize:
+                prize["c"] = int(prize.get("c", 0) or 0) // 2
+
+    # A weekly bracket on this local server contains the player and the three
+    # configured arena bots.  Keeping the original top-ten reward table would
+    # award every entrant a rare dragon automatically.  Expose only the
+    # first-place prize; the service also requires all three matches and rank
+    # one before crediting it.
+    weekly = tournaments.get("8")
+    if weekly and weekly.get("prize"):
+        weekly["prize"] = weekly["prize"][:1]
+
+
+fix_tournament_economy()
+
+
 def get_game_config() -> dict:
     return __game_config
 

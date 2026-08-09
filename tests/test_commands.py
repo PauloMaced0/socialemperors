@@ -172,6 +172,31 @@ def test_resurrect_hero_gold_price(tmp):
     assert len(_items(save)) == n_items, "free resurrect leaked (no gold)"
 
 
+def test_resurrect_obeys_living_unit_limit_without_charging(tmp):
+    healer = 502  # configured units_limit=5
+    save = sessions.session(UID)
+    town = save["maps"][0]
+    town["items"].extend([
+        [healer, 20 + index, 20, 0, 0, 0]
+        for index in range(5)
+    ])
+    save["privateState"]["deadHeroes"] = {str(healer): 1}
+    save["privateState"]["potion"] = 100
+    before_items = len(town["items"])
+
+    accepted = command.do_command(
+        UID, Constant.CMD_RESURRECT_HERO,
+        [healer, 30, 30, 0, "1"],
+    )
+
+    assert accepted is False, "resurrection bypassed the healer unit cap"
+    assert len(town["items"]) == before_items
+    assert save["privateState"]["potion"] == 100, \
+        "rejected resurrection consumed potions"
+    assert save["privateState"]["deadHeroes"] == {str(healer): 1}, \
+        "rejected resurrection consumed the graveyard unit"
+
+
 # --- Monday + comeback bonuses ---------------------------------------------
 
 def test_monday_bonus_gold_once_per_monday(tmp):
@@ -795,6 +820,7 @@ TESTS = [
     test_resurrect_potion_shortage_rejected,
     test_resurrect_graveyard_resource_price,
     test_resurrect_hero_gold_price,
+    test_resurrect_obeys_living_unit_limit_without_charging,
     test_monday_bonus_gold_once_per_monday,
     test_monday_bonus_rejected_off_monday,
     test_monday_bonus_unit_whitelisted,

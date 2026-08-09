@@ -43,7 +43,14 @@ from engine import timestamp_now
 from version import version_name
 from constants import Constant
 from quests import get_quest_map
-from tournaments import get_tournament_info, join_tournament_full, tournament_ok
+from tournaments import (
+    clean_tournament,
+    finish_tournament_match,
+    get_tournament_info,
+    join_tournament,
+    leave_tournament,
+    start_tournament_match,
+)
 from bundle import ASSETS_DIR, STUB_DIR, TEMPLATES_DIR, BASE_DIR
 
 # host = address the server BINDS to (0.0.0.0 to accept LAN/Tailscale peers).
@@ -648,26 +655,56 @@ def tournament_request_data() -> dict:
 
 @app.route(TOURNAMENTS_BASE + "/get_tournament_info.php", methods=['POST'])
 def get_tournament_info_response():
-    print(f"get_tournament_info: USERID: {request.values.get('USERID')}.")
-    return {"data": get_tournament_info()}
+    user_id = str(request.values.get('USERID') or '')
+    print(f"get_tournament_info: USERID: {user_id}.")
+    return {"data": get_tournament_info(user_id)}
 
 @app.route(TOURNAMENTS_BASE + "/join_tournament.php", methods=['POST'])
 @app.route(TOURNAMENTS_BASE + "/create_tournament.php", methods=['POST'])
 def join_tournament_response():
-    # No multiplayer matchmaking: answer "room full" with a refund marker so
-    # the client restores the entry fee it already subtracted.
     data = tournament_request_data()
-    tournament_type_id = data.get("tournament_type_id", "")
-    print(f"join/create_tournament: USERID: {request.values.get('USERID')}, "
-          f"type: {tournament_type_id}. -> NOK (no matchmaking)")
-    return {"data": join_tournament_full(tournament_type_id)}
+    user_id = str(request.values.get('USERID') or '')
+    tournament_type_id = str(data.get("tournament_type_id", ""))
+    print(f"join/create_tournament: USERID: {user_id}, "
+          f"type: {tournament_type_id}.")
+    return {"data": join_tournament(
+        user_id, tournament_type_id, data.get("team")
+    )}
+
+@app.route(TOURNAMENTS_BASE + "/start_tournament_match.php", methods=['POST'])
+def start_tournament_match_response():
+    data = tournament_request_data()
+    user_id = str(request.values.get('USERID') or '')
+    return {"data": start_tournament_match(
+        user_id,
+        str(data.get("tournament_id", "")),
+        str(data.get("victim_id", "")),
+    )}
+
+@app.route(TOURNAMENTS_BASE + "/finish_tournament_match.php", methods=['POST'])
+def finish_tournament_match_response():
+    data = tournament_request_data()
+    user_id = str(request.values.get('USERID') or '')
+    return {"data": finish_tournament_match(
+        user_id,
+        str(data.get("tournament_id", "")),
+        str(data.get("victim_id", "")),
+        data.get("attacker_won", False),
+        data.get("attacker_points", 0),
+    )}
 
 @app.route(TOURNAMENTS_BASE + "/leave_tournament.php", methods=['POST'])
 @app.route(TOURNAMENTS_BASE + "/cancel_tournament.php", methods=['POST'])
-@app.route(TOURNAMENTS_BASE + "/clean_tournament.php", methods=['POST'])
 def leave_tournament_response():
-    print(f"leave/cancel/clean_tournament: USERID: {request.values.get('USERID')}.")
-    return {"data": tournament_ok()}
+    user_id = str(request.values.get('USERID') or '')
+    print(f"leave/cancel_tournament: USERID: {user_id}.")
+    return {"data": leave_tournament(user_id)}
+
+@app.route(TOURNAMENTS_BASE + "/clean_tournament.php", methods=['POST'])
+def clean_tournament_response():
+    user_id = str(request.values.get('USERID') or '')
+    print(f"clean_tournament: USERID: {user_id}.")
+    return {"data": clean_tournament(user_id)}
 
 
 ########

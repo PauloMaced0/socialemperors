@@ -125,6 +125,36 @@ def test_unit_health_and_training_stable_client_fixes_are_present():
     ) == 1, "quests return home before showing crossed-level unlock popups"
 
 
+def test_defender_towers_scan_every_in_range_attacker():
+    data = DEFAULT_SWF.read_bytes()
+    if data[:3] == b"CWS":
+        data = b"FWS" + data[3:8] + zlib.decompress(data[8:])
+    assert data.count(b"socialemperors-tower-targeting-v1") == 1, (
+        "PvP defender towers still depend on a stale/empty attacker bounding "
+        "box or discard targets at half their configured range"
+    )
+
+
+def test_pvp_result_reports_surviving_unit_health():
+    data = DEFAULT_SWF.read_bytes()
+    if data[:3] == b"CWS":
+        data = b"FWS" + data[3:8] + zlib.decompress(data[8:])
+    assert data.count(b"socialemperors-pvp-survivor-health-v1") == 1, (
+        "PvP still returns only casualty counts and silently full-heals every "
+        "surviving temporary-map unit"
+    )
+
+
+def test_gift_placement_is_flushed_before_a_browser_reload():
+    data = DEFAULT_SWF.read_bytes()
+    if data[:3] == b"CWS":
+        data = b"FWS" + data[3:8] + zlib.decompress(data[8:])
+    assert data.count(b"socialemperors-gift-placement-flush-v1") == 1, (
+        "place_gift still waits for the periodic command timer and can return "
+        "an already-placed troop to Gifts after an immediate reload"
+    )
+
+
 def test_attack_click_patch_is_idempotent():
     data = DEFAULT_SWF.read_bytes()
     result, changed = patch_swf_bytes(data)
@@ -141,6 +171,9 @@ TESTS = [
     test_remote_ui_fixes_survive_the_binary_merge,
     test_gameplay_ui_fixes_are_present,
     test_unit_health_and_training_stable_client_fixes_are_present,
+    test_defender_towers_scan_every_in_range_attacker,
+    test_pvp_result_reports_surviving_unit_health,
+    test_gift_placement_is_flushed_before_a_browser_reload,
     test_attack_click_patch_is_idempotent,
 ]
 

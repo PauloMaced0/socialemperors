@@ -108,6 +108,7 @@ def _respawn_mature_trees(save, now):
             if item and int(item[0]) in tree_ids
         )
         remaining = []
+        ready = []
         for entry in pending:
             try:
                 tree_id = int(entry["id"])
@@ -122,20 +123,34 @@ def _respawn_mature_trees(save, now):
             if int(now) < ready_at:
                 remaining.append(entry)
                 continue
-            position = _random_wild_resource_position(
-                town, occupied_tiles, (x, y)
-            )
-            if position is not None and tree_count < 300:
+            ready.append({
+                "entry": entry,
+                "id": tree_id,
+                "source_x": x,
+                "source_y": y,
+            })
+        available = max(0, 300 - tree_count)
+        spawnable, overflow = ready[:available], ready[available:]
+        remaining.extend(value["entry"] for value in overflow)
+        visible_positions = [
+            (int(item[1]), int(item[2]))
+            for item in items
+            if item and int(item[0]) in tree_ids and len(item) >= 3
+        ]
+        positions = _clustered_respawn_positions(
+            town, occupied_tiles, spawnable, visible_positions
+        )
+        for value, position in zip(spawnable, positions):
+            if position is not None:
                 items.append([
-                    tree_id, position[0], position[1], 0, int(now), 0
+                    value["id"], position[0], position[1], 0, int(now), 0
                 ])
-                occupied_tiles.add(position)
                 tree_count += 1
                 changed = True
             else:
                 # A full map is temporary: keep the matured timer and retry
                 # on a later load rather than losing this tree permanently.
-                remaining.append(entry)
+                remaining.append(value["entry"])
         if remaining != pending:
             town["pendingTreeRespawns"] = remaining
     return changed
@@ -473,18 +488,155 @@ def _wild_cluster_positions(town, occupied, count):
     return result
 
 
-# Absolute per-family ceiling for gold/stone respawns. Well above any stock
-# population (15-21 per family); reaching it means the save is corrupt.
-_MINERAL_FAMILY_HARD_CAP = 60
-_NATURAL_RESOURCE_POPULATION_REPAIR_VERSION = 1
+def _nearby_wild_cluster_positions(town, occupied, anchor, count):
+    """Fill empty wild tiles around an existing resource-cluster anchor."""
+    result = []
+    for radius in range(1, 7):
+        ring = [
+            (anchor[0] + dx, anchor[1] + dy)
+            for dx in range(-radius, radius + 1)
+            for dy in range(-radius, radius + 1)
+            if max(abs(dx), abs(dy)) == radius
+        ]
+        random.shuffle(ring)
+        for position in ring:
+            if position in occupied or not _position_is_wild(town, position):
+                continue
+            result.append(position)
+            occupied.add(position)
+            if len(result) >= count:
+                return result
+    return result
+
+
+def _clustered_respawn_positions(
+    town, occupied, entries, visible_positions, maximum_cluster=6
+):
+    """Choose persisted respawn tiles without scattering individual nodes.
+
+    Source tiles within three cells form one depleted deposit. A partially
+    harvested deposit grows beside its remaining nodes. If the whole deposit
+    is gone, all timers which mature together move to one new wild cluster.
+    This keeps mineral deposits at the stock 4-6-node shape and makes trees
+    return as forests instead of isolated dots.
+    """
+    if not entries:
+        return []
+    sources = [
+        (int(entry["source_x"]), int(entry["source_y"]))
+        for entry in entries
+    ]
+    ungrouped = set(range(len(entries)))
+    groups = []
+    while ungrouped:
+        seed = ungrouped.pop()
+        group = {seed}
+        frontier = [seed]
+        while frontier:
+            current = frontier.pop()
+            near = {
+                index for index in ungrouped
+                if max(
+                    abs(sources[index][0] - sources[current][0]),
+                    abs(sources[index][1] - sources[current][1]),
+                ) <= 3
+            }
+            ungrouped -= near
+            group |= near
+            frontier.extend(near)
+        groups.append(sorted(group))
+
+    planned = [None] * len(entries)
+    existing = list(visible_positions)
+    for group in groups:
+        for start in range(0, len(group), maximum_cluster):
+            chunk = group[start:start + maximum_cluster]
+            nearby = [
+                position for position in existing
+                if any(
+                    max(
+                        abs(position[0] - sources[index][0]),
+                        abs(position[1] - sources[index][1]),
+                    ) <= 4
+                    for index in chunk
+                )
+            ]
+            if nearby:
+                positions = _nearby_wild_cluster_positions(
+                    town, occupied, random.choice(nearby), len(chunk)
+                )
+            else:
+                positions = _wild_cluster_positions(
+                    town, occupied, len(chunk)
+                )
+            for index, position in zip(chunk, positions):
+                planned[index] = position
+                existing.append(position)
+    return planned
+
+
+# Stock MapInitializer creates three deposits of 4-6 nodes. The server owns
+# the durable population, with 21 retained as the legacy absolute maximum.
+_MINERAL_FAMILY_CAP = 21
+_NATURAL_RESOURCE_POPULATION_REPAIR_VERSION = 2
+
+
+def _cluster_sizes(count):
+    """Partition a population into 4-6-node groups where possible."""
+    count = max(0, int(count))
+    if count == 0:
+        return []
+    for parts in range((count + 5) // 6, count // 4 + 1):
+        base, extra = divmod(count, parts)
+        if 4 <= base <= 6 and base + (1 if extra else 0) <= 6:
+            return [base + 1] * extra + [base] * (parts - extra)
+    # One to three nodes can be the visible remainder of a deposit whose
+    # siblings are still on cooldown; future regrowth joins this remainder.
+    return [count]
+
+
+def _recluster_visible_resources(town, families):
+    """One-time migration from old independently scattered spawn layouts."""
+    changed = False
+    for ids, _minimum in families.values():
+        resources = [
+            item for item in town.get("items", [])
+            if item and int(item[0]) in ids
+        ]
+        if not resources:
+            continue
+        town["items"] = [
+            item for item in town.get("items", [])
+            if not item or int(item[0]) not in ids
+        ]
+        occupied = _occupied_map_tiles(town)
+        placed = 0
+        for size in _cluster_sizes(len(resources)):
+            positions = _wild_cluster_positions(town, occupied, size)
+            for item, position in zip(
+                resources[placed:placed + size], positions
+            ):
+                if len(item) >= 3:
+                    if [int(item[1]), int(item[2])] != [position[0], position[1]]:
+                        changed = True
+                    item[1], item[2] = position
+                town["items"].append(item)
+                placed += 1
+            if len(positions) < size:
+                break
+        # A completely full wild map must not lose anything that could not be
+        # placed. Preserve those entries at their previous persisted tiles.
+        town["items"].extend(resources[placed:])
+    return changed
 
 
 def _repair_natural_resource_population(save, now):
     """One-time repair for saves depleted by older non-persistent respawns.
 
-    Stock maps start with 160-300 trees and three 5-7 node clusters (15-21
-    nodes) for each mineral. Count pending cooldowns as population so an
-    ordinary harvest never receives a free replacement. Only legacy maps below
+    Stock maps start with 160-300 trees and three 4-6-node clusters for each
+    mineral, with 21 retained as the legacy ceiling. Count pending cooldowns
+    as population so an ordinary harvest never receives a free replacement.
+    Only legacy maps below
     the stock minimum are topped up, once, on empty wild land.
     """
     changed = False
@@ -509,6 +661,8 @@ def _repair_natural_resource_population(save, now):
             version = 0
         if version >= _NATURAL_RESOURCE_POPULATION_REPAIR_VERSION:
             continue
+        if _recluster_visible_resources(town, families):
+            changed = True
         items = town.setdefault("items", [])
         occupied = _occupied_map_tiles(town)
         pending_trees = town.get("pendingTreeRespawns", [])
@@ -530,11 +684,10 @@ def _repair_natural_resource_population(save, now):
                     and str(entry.get("family")) == family
                 )
             missing = max(0, minimum - visible - pending)
-            while missing > 0:
-                # Original mineral clusters contain 5-7 nodes. Trees use
-                # larger clusters, but seven keeps the repair compact without
+            for cluster_size in _cluster_sizes(missing):
+                # Original mineral clusters contain 4-6 nodes. Trees use
+                # larger clusters, but six keeps the repair compact without
                 # producing an unnatural solid block.
-                cluster_size = min(7, missing)
                 positions = _wild_cluster_positions(
                     town, occupied, cluster_size
                 )
@@ -550,7 +703,6 @@ def _repair_natural_resource_population(save, now):
                         0, int(now), 0,
                     ])
                 visible += len(positions)
-                missing -= len(positions)
                 changed = True
         town["naturalResourcesInitialized"] = 1
         town["naturalResourcePopulationRepairVersion"] = (
@@ -583,6 +735,7 @@ def _respawn_mature_minerals(save, now):
             for family, family_ids in _MINERAL_RESPAWN_IDS.items()
         }
         remaining = []
+        ready_by_family = {family: [] for family in _MINERAL_RESPAWN_IDS}
         for entry in pending:
             try:
                 family = str(entry["family"])
@@ -597,22 +750,32 @@ def _respawn_mature_minerals(save, now):
             if int(now) < ready_at:
                 remaining.append(entry)
                 continue
-            if family_counts[family] >= _MINERAL_FAMILY_HARD_CAP:
-                # Runaway guard only. Each pending timer maps 1:1 to a real
-                # prior harvest removal, so restoring it can never push the
-                # family past its original population - only genuine corruption
-                # reaches this ceiling. The old cap of 21 wrongly discarded
-                # respawns on maps that legitimately seed more than 21 gold/
-                # stone nodes (the stock village spawns ~24), so gold/stone
-                # simply stopped coming back.
-                changed = True
-                continue
-            position = _random_wild_resource_position(
-                town, occupied_tiles, (x, y)
+            ready_by_family[family].append({
+                "entry": entry,
+                "source_x": x,
+                "source_y": y,
+            })
+        for family, ready in ready_by_family.items():
+            available = max(0, _MINERAL_FAMILY_CAP - family_counts[family])
+            spawnable, overflow = ready[:available], ready[available:]
+            # Grandfather a legacy over-cap map without deleting nodes. Its
+            # population naturally converges to 21 as those extras are mined;
+            # their excess timers remain pending rather than multiplying it.
+            remaining.extend(value["entry"] for value in overflow)
+            visible_positions = [
+                (int(item[1]), int(item[2]))
+                for item in items
+                if item and int(item[0]) in _MINERAL_RESPAWN_IDS[family]
+                and len(item) >= 3
+            ]
+            positions = _clustered_respawn_positions(
+                town, occupied_tiles, spawnable, visible_positions
             )
-            if position is not None:
-                # Prefer the original deposit id if it was recorded; otherwise
-                # any member of the family reads identically to the client.
+            for value, position in zip(spawnable, positions):
+                if position is None:
+                    remaining.append(value["entry"])
+                    continue
+                entry = value["entry"]
                 try:
                     resource_id = int(entry.get("id", 0)) or 0
                 except (TypeError, ValueError):
@@ -623,13 +786,8 @@ def _respawn_mature_minerals(save, now):
                     resource_id, position[0], position[1],
                     0, int(now), 0,
                 ])
-                occupied_tiles.add(position)
                 family_counts[family] += 1
                 changed = True
-            else:
-                # A temporarily full wild map must not permanently lose the
-                # node. Retry the matured timer on a later load.
-                remaining.append(entry)
         if remaining != pending:
             town["pendingMineralRespawns"] = remaining
     return changed

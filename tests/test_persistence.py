@@ -257,6 +257,112 @@ def test_darts_flow_persists(tmp):
     assert gifts[176] == 2 and gifts[180] == 1, f"prizes not stored: 176={gifts[176]}, 180={gifts[180]}"
 
 
+def test_darts_prize_packet_is_one_time_across_reload(tmp):
+    """A retried darts packet must not put its troop back into Gifts.
+
+    CommandManager retries an in-flight HTTP packet when the response is lost.
+    The persisted balloon index is the authoritative idempotency key.
+    """
+    unit_id = 725  # Black Draggy
+    save = sessions.session(UID)
+    save["playerInfo"]["cash"] = 100
+    ps = save["privateState"]
+    ps["gifts"] = []
+    ps["dartsBalloonsShot"] = []
+    ps["dartsHasFree"] = True
+    packet = _batch([
+        {"cmd": Constant.CMD_STORE_ADD_ITEMS,
+         "args": [json.dumps([unit_id])]},
+        {"cmd": Constant.CMD_DARTS_SHOOT_BALLOON,
+         "args": [4, 0, 0]},
+    ])
+    command.command(UID, packet)
+    disk = json.load(open(os.path.join(tmp, f"{UID}.save.json")))
+    assert disk["privateState"]["gifts"][unit_id] == 1
+    assert disk["privateState"]["dartsBalloonsShot"] == [4]
+
+    # Simulate a browser/server reload, consume the gift, then replay the old
+    # darts request.  The unit must stay deployed rather than returning.
+    sessions.load_saved_villages()
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_PLACE_GIFT,
+         "args": [unit_id, 44, 45, 0, 0]},
+    ]))
+    sessions.load_saved_villages()
+    command.command(UID, packet)
+    sessions.load_saved_villages()
+    reloaded = sessions.session(UID)
+    gifts = reloaded["privateState"]["gifts"]
+    assert len(gifts) <= unit_id or gifts[unit_id] == 0, \
+        "a retried darts reward put the deployed troop back into Gifts"
+    deployed = [
+        item for item in reloaded["maps"][0]["items"]
+        if item[0] == unit_id and item[1] == 44 and item[2] == 45
+    ]
+    assert len(deployed) == 1, "gift placement was lost or duplicated"
+    assert reloaded["privateState"]["dartsBalloonsShot"] == [4]
+    assert reloaded["playerInfo"]["cash"] == 100, \
+        "duplicate free throw was incorrectly converted into a paid throw"
+
+
+def test_darts_final_prize_group_is_atomic_and_one_time(tmp):
+    """The 25th balloon stores its normal and bonus units exactly once."""
+    normal, bonus = 725, 771
+    save = sessions.session(UID)
+    save["playerInfo"]["cash"] = 100
+    ps = save["privateState"]
+    ps["gifts"] = []
+    ps["dartsBalloonsShot"] = list(range(24))
+    ps["dartsHasFree"] = True
+    ps["dartsGotExtra"] = False
+    packet = _batch([
+        {"cmd": Constant.CMD_STORE_ADD_ITEMS,
+         "args": [json.dumps([normal])]},
+        {"cmd": Constant.CMD_STORE_ADD_ITEMS,
+         "args": [json.dumps([bonus])]},
+        {"cmd": Constant.CMD_DARTS_SHOOT_BALLOON,
+         "args": [24, 0, 1]},
+    ])
+    command.command(UID, packet)
+    command.command(UID, packet)
+    disk = json.load(open(os.path.join(tmp, f"{UID}.save.json")))
+    gifts = disk["privateState"]["gifts"]
+    assert gifts[normal] == 1 and gifts[bonus] == 1, \
+        "final balloon prize group was partly lost or duplicated"
+    assert disk["privateState"]["dartsBalloonsShot"] == list(range(25))
+    assert disk["privateState"]["dartsGotExtra"] is True
+
+
+def test_sacrifice_altar_collection_resets_and_persists(tmp):
+    """pop_sell consumes the altar unit and cannot reward it twice."""
+    altar_id, unit_id = Constant.ID_BUILDING_SACRIFICE, 515
+    save = sessions.session(UID)
+    town = save["maps"][0]
+    town["coins"] = 0
+    town["items"].append([
+        altar_id, 68, 77, 0, OLD_TS, 0, [unit_id], {}
+    ])
+    packet = _batch([
+        {"cmd": Constant.CMD_POP_SELL,
+         "args": [68, 77, 0, altar_id, unit_id]},
+    ])
+    command.command(UID, packet)
+    sessions.load_saved_villages()
+    reloaded = sessions.session(UID)
+    altar = next(
+        item for item in reloaded["maps"][0]["items"]
+        if item[0] == altar_id and item[1] == 68 and item[2] == 77
+    )
+    assert altar[6] == [], "sacrificed unit returned to the altar after reload"
+    assert altar[4] == 0, "completed altar timer was not reset"
+    # Medium Archer Knight costs 300 gold; the client awards floor(300/20).
+    assert reloaded["maps"][0]["coins"] == 15, \
+        "altar's visible gold reward did not persist"
+    command.command(UID, packet)
+    assert sessions.session(UID)["maps"][0]["coins"] == 15, \
+        "replaying pop_sell rewarded the same sacrifice twice"
+
+
 def test_darts_new_free_stamps_claim(tmp):
     """Claiming the daily free stamps timeStampDartsNewFree so it can't be reclaimed."""
     command.command(UID, _batch([{"cmd": Constant.CMD_DARTS_NEW_FREE, "args": []}]))
@@ -298,6 +404,9 @@ TESTS = [
     test_unit_collection_completed_grants_cash_once,
     test_apply_rewards_ranking_grants_cash_and_items,
     test_darts_flow_persists,
+    test_darts_prize_packet_is_one_time_across_reload,
+    test_darts_final_prize_group_is_atomic_and_one_time,
+    test_sacrifice_altar_collection_resets_and_persists,
     test_darts_new_free_stamps_claim,
     test_store_item_frombug_moves_item_to_storage,
     test_end_quest_win_saves_star_rank,

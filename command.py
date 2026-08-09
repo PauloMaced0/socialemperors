@@ -343,6 +343,38 @@ def _building_limit_reached(town, item_id):
     return count >= limit
 
 
+def _camp_combatant(item_id):
+    """Whether a tracked camp item must die before treasure is unlocked."""
+    config = _item_config(item_id)
+    if config is None:
+        return False
+    try:
+        attack = int(float(config.get("attack", 0) or 0))
+    except (TypeError, ValueError):
+        attack = 0
+    return str(config.get("type", "")) == "u" or attack > 0
+
+
+def _live_camp_combatants(town):
+    """Return exact, persisted camp enemies which are still alive.
+
+    The roster deliberately uses id plus tile rather than race: players can
+    own troll-race units themselves and those must not block or be deleted by
+    a neutral-camp reward.
+    """
+    live_positions = {
+        (int(item[0]), int(item[1]), int(item[2]))
+        for item in town.get("items", [])
+        if item and len(item) >= 3
+    }
+    return [
+        record for record in town.get("enemyCampRoster", [])
+        if isinstance(record, (list, tuple)) and len(record) >= 3
+        and _camp_combatant(record[0])
+        and (int(record[0]), int(record[1]), int(record[2])) in live_positions
+    ]
+
+
 def _social_upgrade_locked(town, item_id, x, y):
     """An unfinished staffed building cannot escape through an upgrade.
 
@@ -1007,6 +1039,56 @@ def _reconcile_battle_units(town, counted_units, graveyard_save=None):
     return {"removed": removed, "added": added}
 
 
+def _apply_battle_survivor_health(town, health_rows):
+    """Persist the remaining HP reported for surviving temporary-map units.
+
+    PvP battles clone the home army onto a temporary map. The stock result
+    protocol returned only casualties, so every survivor silently became full
+    health when the home map reloaded. Rows are [unit id, remaining health].
+    Same-id units are matched deterministically in persisted map order; dead
+    units have already been removed by ``_reconcile_battle_units``.
+    """
+    if not isinstance(health_rows, list):
+        return 0
+    reported = {}
+    for row in health_rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            continue
+        try:
+            unit_id, health = int(row[0]), int(row[1])
+        except (TypeError, ValueError):
+            continue
+        config = _item_config(unit_id)
+        if config is None or str(config.get("type")) != "u":
+            continue
+        maximum = max(1, int(config.get("life", 1) or 1))
+        if health <= 0:
+            continue
+        reported.setdefault(unit_id, []).append(min(health, maximum))
+
+    updated = 0
+    for unit_id, health_values in reported.items():
+        candidates = [
+            item for item in town.get("items", [])
+            if item and int(item[0]) == unit_id
+        ]
+        maximum = max(1, int(_item_config(unit_id).get("life", 1) or 1))
+        for item, health in zip(candidates, health_values):
+            attrs = _item_attrs(item)
+            # Entering a temporary battle must never heal an already wounded
+            # home unit. It may keep that wound or make it worse.
+            previous = min(
+                maximum, max(0, int(attrs.get("hp", maximum) or maximum))
+            )
+            health = min(previous, health)
+            if health >= maximum:
+                attrs.pop("hp", None)
+            else:
+                attrs["hp"] = health
+            updated += 1
+    return updated
+
+
 def _pvp_state(save):
     """Repair and return the persistent PvP fields consumed by the client."""
     state = save["privateState"]
@@ -1115,21 +1197,42 @@ def command(USERID, data):
                     continue
                 initializing_resource_towns.add(town_id)
 
-            # PopupDarts queues a prize immediately before the shot which
-            # earned it. Validate the shot first so a rejected paid throw
-            # cannot still place its unit in storage.
-            if (cmd == Constant.CMD_STORE_ADD_ITEMS and i + 1 < len(commands)
-                    and commands[i + 1]["cmd"] == Constant.CMD_DARTS_SHOOT_BALLOON):
-                shot = commands[i + 1]
+            # PopupDarts queues the won unit immediately before the shot which
+            # earned it.  Completing the board queues TWO store_add_items
+            # commands (the balloon prize plus the collection bonus) before
+            # darts_shoot_balloon, so validate the shot first and commit the
+            # whole group atomically.  This also makes a retried packet
+            # idempotent: the duplicate balloon is rejected below and none of
+            # its units can reappear in Gifts after a reload.
+            if cmd == Constant.CMD_STORE_ADD_ITEMS:
+                darts_index = i
+                while (
+                    darts_index < len(commands)
+                    and commands[darts_index].get("cmd")
+                    == Constant.CMD_STORE_ADD_ITEMS
+                ):
+                    darts_index += 1
+                shot = (
+                    commands[darts_index]
+                    if darts_index < len(commands)
+                    and commands[darts_index].get("cmd")
+                    == Constant.CMD_DARTS_SHOOT_BALLOON
+                    else None
+                )
+            else:
+                shot = None
+            if shot is not None:
                 try:
                     accepted = do_command(USERID, shot["cmd"], shot["args"])
                     if accepted:
-                        do_command(USERID, cmd, args)
+                        for prize_index in range(i, darts_index):
+                            prize = commands[prize_index]
+                            do_command(USERID, prize["cmd"], prize["args"])
                     else:
-                        print("Darts: prize rejected with its invalid throw.")
+                        print("Darts: prize group rejected with its invalid throw.")
                 except Exception as e:
                     print(f" [!] Darts prize/shot pair failed: {type(e).__name__}: {e}. Skipping.")
-                i += 2
+                i = darts_index + 1
                 continue
             try:
                 upgrade_context = None
@@ -1340,6 +1443,18 @@ def do_command(USERID, cmd, args):
                 item[1] = newx
                 item[2] = newy
                 break
+        # Camp enemies wander. Keep the authoritative roster on their current
+        # tile so a later kill can remove the exact camp member and the reward
+        # gate cannot be bypassed by movement.
+        for record in map.get("enemyCampRoster", []):
+            if (
+                isinstance(record, list) and len(record) >= 3
+                and int(record[0]) == int(id)
+                and int(record[1]) == int(ix)
+                and int(record[2]) == int(iy)
+            ):
+                record[1], record[2] = int(newx), int(newy)
+                break
     
     elif cmd == Constant.CMD_COLLECT:
         x = args[0]
@@ -1354,6 +1469,17 @@ def do_command(USERID, cmd, args):
             current for current in map["items"]
             if current[0] == id and current[1] == x and current[2] == y
         ), None)
+        # Wild resources are consumed by a separate HARV sell command. Make
+        # that removal the one authoritative reward point: some client builds
+        # omit COLLECT, while others send both COLLECT and HARV. Paying here
+        # made the former lose wood after reload and paying in both would let
+        # the latter collect twice.
+        if int(id) in (
+            _TREE_IDS | _MATURE_GOLD_DEPOSIT_IDS
+            | _MATURE_STONE_DEPOSIT_IDS
+        ):
+            print("Natural-resource collect deferred to persisted harvest.")
+            return True
         # A socially-gated producer (e.g. Stone Mine: Geologist + Miner) does
         # not produce until it is fully staffed and opened (attrs.si == None).
         # The client marks an open building with si=None; a missing key or a
@@ -1447,6 +1573,7 @@ def do_command(USERID, cmd, args):
             and reason == Constant.SELL_REASON_HARVEST
             and int(id) in _TREE_IDS
         ):
+            apply_collect(save["playerInfo"], map, id, 1)
             pending = map.setdefault("pendingTreeRespawns", [])
             pending[:] = [
                 entry for entry in pending
@@ -1471,6 +1598,7 @@ def do_command(USERID, cmd, args):
                 _MATURE_GOLD_DEPOSIT_IDS | _MATURE_STONE_DEPOSIT_IDS
             )
         ):
+            apply_collect(save["playerInfo"], map, id, 1)
             family = (
                 "gold"
                 if int(id) in _MATURE_GOLD_DEPOSIT_IDS
@@ -1543,6 +1671,24 @@ def do_command(USERID, cmd, args):
             victim = next((item for item in map["items"] if item[0] == id), None)
         if victim is not None:
             map["items"].remove(victim)
+        # Remove exactly one defeated camp enemy from its persisted roster.
+        # The exact tile is preferred; the id-only fallback handles an older
+        # save whose roster predates movement tracking.
+        roster = map.get("enemyCampRoster", [])
+        roster_victim = next((
+            record for record in roster
+            if isinstance(record, list) and len(record) >= 3
+            and int(record[0]) == int(id)
+            and int(record[1]) == int(x) and int(record[2]) == int(y)
+        ), None)
+        if roster_victim is None:
+            roster_victim = next((
+                record for record in roster
+                if isinstance(record, list) and len(record) >= 1
+                and int(record[0]) == int(id) and _camp_combatant(record[0])
+            ), None)
+        if roster_victim is not None:
+            roster.remove(roster_victim)
     
     elif cmd == Constant.CMD_COMPLETE_MISSION:
         mission_id = int(args[0])
@@ -1636,6 +1782,54 @@ def do_command(USERID, cmd, args):
             level = 0 # TODO 
             orientation = 0
             map["items"] += [[unit_id, unit_x, unit_y, orientation, collected_at_timestamp, level]]
+
+    elif cmd == Constant.CMD_POP_SELL:
+        # Sacrifice Altar collection is represented only by pop_sell:
+        # [building_x, building_y, town, building_id, sacrificed_unit_id].
+        # The old backend dropped this command, leaving the unit inside item
+        # 225.  On every reload the client reconstructed that contained unit
+        # with an already-complete timer and offered Collect forever.
+        b_x, b_y = args[0], args[1]
+        town_id, building_id, unit_id = (
+            int(args[2]), int(args[3]), int(args[4])
+        )
+        town = save["maps"][town_id]
+        altar = _find_map_item(town, building_id, b_x, b_y)
+        contained_index = next((
+            index for index, value in enumerate(altar[6])
+            if int(value) == unit_id
+        ), None) if (
+            altar is not None
+            and len(altar) >= 7
+            and isinstance(altar[6], list)
+        ) else None
+        if (
+            altar is None
+            or building_id != Constant.ID_BUILDING_SACRIFICE
+            or len(altar) < 7
+            or not isinstance(altar[6], list)
+            or contained_index is None
+        ):
+            print("Sacrifice rejected - altar or contained unit not found.")
+            return False
+        altar[6].pop(contained_index)
+        altar[4] = 0
+        attrs = _item_attrs(altar)
+        attrs.pop("productionLabor", None)
+
+        # IsoElement.collect creates exactly this gold token for ordinary
+        # server-backed gold units: floor(unit.cost / Config.DIVISOR_SELL),
+        # where DIVISOR_SELL is 20 in the stock client.  Persist the same
+        # amount so collecting the token is not undone by a reload.
+        reward = 0
+        if str(get_attribute_from_item_id(unit_id, "cost_type")) == "g":
+            reward = int(float(get_attribute_from_item_id(unit_id, "cost") or 0)) // 20
+            town["coins"] = int(town.get("coins", 0) or 0) + reward
+        print(
+            f"Sacrificed {get_name_from_item_id(unit_id)}; "
+            f"altar reset, +{reward} gold."
+        )
+        return True
     
     elif cmd == Constant.CMD_RT_LEVEL_UP:
         new_level = int(args[0])
@@ -1727,11 +1921,10 @@ def do_command(USERID, cmd, args):
 
     elif cmd == Constant.CMD_TOURNAMENT_SUBSTRACT_RESOURCES or cmd == Constant.CMD_TOURNAMENT_REFUND_RESOURCES:
         # Tournament entry fee bookkeeping. The client subtracts the fee when
-        # joining/creating and refunds it when the service answers NOK (this
-        # server always does: no matchmaking). Mirror both so the save stays
-        # in sync with what the client shows. Coins live per town; the
-        # commands carry no town id, so main town stands in for the pair -
-        # subtract and refund are symmetric, the net effect is zero.
+        # joining/creating and refunds it when the service rejects a closed or
+        # already-used slot. Mirror both so the save stays in sync with what
+        # the client shows. Coins live per town; the commands carry no town
+        # id, so the main town is the tournament wallet.
         resource_type = args[0]  # "g" gold/coins, "c" cash
         amount = int(float(args[1]))
         if cmd == Constant.CMD_TOURNAMENT_SUBSTRACT_RESOURCES:
@@ -1967,6 +2160,7 @@ def do_command(USERID, cmd, args):
         pState["timeStampDartsNewFree"] = now
         pState["dartsBalloonsShot"] = []
         pState["dartsRandomSeed"] = int(args[0]) if args else 0
+        pState["dartsGotExtra"] = False
         pState["dartsHasFree"] = True
         return True
 
@@ -1979,6 +2173,16 @@ def do_command(USERID, cmd, args):
         # cash drops below the price, the client's own canAfford() check
         # blocks the board, so the daily limit holds.
         pState = save["privateState"]
+        balloon_index = int(args[0])
+        if not isinstance(pState.get("dartsBalloonsShot"), list):
+            pState["dartsBalloonsShot"] = []
+        shot_balloons = pState["dartsBalloonsShot"]
+        if balloon_index < 0 or balloon_index >= 25:
+            print(f"Darts: invalid balloon {balloon_index} - rejected.")
+            return False
+        if balloon_index in [int(value) for value in shot_balloons]:
+            print(f"Darts: balloon {balloon_index} was already shot - duplicate rejected.")
+            return False
         now = timestamp_now()
         if pState.get("dartsHasFree"):
             pState["dartsHasFree"] = False
@@ -1993,11 +2197,10 @@ def do_command(USERID, cmd, args):
             save["playerInfo"]["cash"] = cash - price
             pState["timeStampLastDart"] = now
             print(f"Darts: extra throw billed {price} cash ({cash} -> {cash - price}).")
-        balloon_index = int(args[0])
         print("Darts: shoot balloon", balloon_index)
-        if not isinstance(pState.get("dartsBalloonsShot"), list):
-            pState["dartsBalloonsShot"] = []
-        pState["dartsBalloonsShot"].append(balloon_index)
+        shot_balloons.append(balloon_index)
+        if len(args) > 2 and bool(int(args[2])) and len(set(shot_balloons)) == 25:
+            pState["dartsGotExtra"] = True
         return True
 
     elif cmd == Constant.CMD_PLACE_GIFT or cmd == Constant.CMD_PLACE_STORED_ITEM:
@@ -2314,6 +2517,15 @@ def do_command(USERID, cmd, args):
         town_id = int(args[3])
         map = save["maps"][town_id]
         print("Resurrect", str(get_name_from_item_id(unit_id)), "from graveyard")
+        # Resurrection is another acquisition path and must obey the same
+        # configured living-unit cap as buying. Check before charging anything
+        # or consuming the graveyard entry.
+        if _building_limit_reached(map, unit_id):
+            print(
+                f"Resurrect rejected - {get_name_from_item_id(unit_id)} "
+                "living-unit limit reached."
+            )
+            return False
         if len(args) > 4:
             if str(args[4]) == '1':
                 needed = int(get_attribute_from_item_id(unit_id, "potion") or 1)
@@ -2706,17 +2918,6 @@ def do_command(USERID, cmd, args):
         maximum = max(1, int(config.get("life", 1) or 1))
         health = min(max(0, health), maximum)
         attrs = _item_attrs(item)
-        if str(config.get("type")) == "u":
-            # Units always come out of a fight at full strength. Nothing heals a
-            # wounded unit at home - no repair cursor, and the Healer only works
-            # inside a battle - so persisting combat damage made it permanent.
-            # Buildings keep partial hp because they can be repaired.
-            attrs.pop("hp", None)
-            print(
-                f"Ignored {get_name_from_item_id(item_id)} combat damage "
-                f"({health}/{maximum}) - units heal to full."
-            )
-            return True
         if health >= maximum:
             attrs.pop("hp", None)
         else:
@@ -2778,6 +2979,9 @@ def do_command(USERID, cmd, args):
         casualties = _reconcile_battle_units(
             map, data.get("attacker_units") or [], save
         )
+        _apply_battle_survivor_health(
+            map, data.get("attacker_health") or []
+        )
         if not victim_id:
             # Older clients and the enemy-camp return flow reuse end_attack
             # without a player opponent. Apply the reported battle result, but
@@ -2831,6 +3035,10 @@ def do_command(USERID, cmd, args):
                 defender["maps"][defender_map_id],
                 data.get("victim_units") or [],
                 defender,
+            )
+            _apply_battle_survivor_health(
+                defender["maps"][defender_map_id],
+                data.get("victim_health") or [],
             )
             save_session(victim_id)
 
@@ -3245,6 +3453,14 @@ def do_command(USERID, cmd, args):
         stone = max(0, min(int(float(args[4] or 0)), 1500))
         town_id = int(args[5]) if len(args) > 5 else 0
         map = save["maps"][town_id]
+        if int(map.get("enemyCampActive", 0) or 0):
+            living = _live_camp_combatants(map)
+            if living:
+                print(
+                    "Enemy-camp treasure rejected - "
+                    f"{len(living)} tracked enemies still alive."
+                )
+                return False
         map["coins"] = int(map["coins"]) + gold
         map["food"] = int(map["food"]) + food
         map["stone"] = int(map["stone"]) + stone
