@@ -18,6 +18,10 @@ from tools.patch_attack_click_swf import (
     merged_ui_fixes_present,
     patch_swf_bytes,
 )
+from tools.patch_hidden_stats_performance_swf import (
+    MARKER as HIDDEN_STATS_MARKER,
+    patched as hidden_stats_patched,
+)
 
 
 def test_enemy_click_dispatches_an_attack_instead_of_a_ground_move():
@@ -129,10 +133,13 @@ def test_defender_towers_scan_every_in_range_attacker():
     data = DEFAULT_SWF.read_bytes()
     if data[:3] == b"CWS":
         data = b"FWS" + data[3:8] + zlib.decompress(data[8:])
-    assert data.count(b"socialemperors-tower-targeting-v1") == 1, (
+    assert data.count(b"socialemperors-tower-targeting-v2") == 1, (
         "PvP defender towers still depend on a stale/empty attacker bounding "
-        "box or discard targets at half their configured range"
+        "box, discard targets at half range, or acquire with a distance rule "
+        "different from the one used to fire"
     )
+    assert data.count(b"acquireTowerTarget") >= 1, \
+        "compiled SWF is missing the footprint-aware tower target scanner"
 
 
 def test_pvp_result_reports_surviving_unit_health():
@@ -155,6 +162,30 @@ def test_gift_placement_is_flushed_before_a_browser_reload():
     )
 
 
+def test_experimental_lifecycle_rewrite_is_not_bundled():
+    data = DEFAULT_SWF.read_bytes()
+    if data[:3] == b"CWS":
+        data = b"FWS" + data[3:8] + zlib.decompress(data[8:])
+    assert b"socialemperors-performance-" not in data, (
+        "the experimental lifecycle rewrite makes populated villages take "
+        "many seconds per frame under Ruffle"
+    )
+    assert b"clearLegacyProjectiles" not in data, \
+        "the regressing map-teardown rewrite was bundled again"
+
+
+def test_hidden_debug_stats_do_not_accumulate_across_maps():
+    data = DEFAULT_SWF.read_bytes()
+    assert hidden_stats_patched(data), (
+        "each map load can still leave another hidden core.Stats instance "
+        "running BitmapData and memory-graph work on every frame"
+    )
+    if data[:3] == b"CWS":
+        data = b"FWS" + data[3:8] + zlib.decompress(data[8:])
+    assert data.count(HIDDEN_STATS_MARKER) == 1, \
+        "the narrow hidden-Stats lifecycle fix is missing or duplicated"
+
+
 def test_attack_click_patch_is_idempotent():
     data = DEFAULT_SWF.read_bytes()
     result, changed = patch_swf_bytes(data)
@@ -174,6 +205,8 @@ TESTS = [
     test_defender_towers_scan_every_in_range_attacker,
     test_pvp_result_reports_surviving_unit_health,
     test_gift_placement_is_flushed_before_a_browser_reload,
+    test_experimental_lifecycle_rewrite_is_not_bundled,
+    test_hidden_debug_stats_do_not_accumulate_across_maps,
     test_attack_click_patch_is_idempotent,
 ]
 

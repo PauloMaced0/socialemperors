@@ -486,6 +486,82 @@ def test_pvp_history_limits_and_casualties_persist(tmp):
     assert "viewPending" not in defender_state["attacksReceived"][-1]
 
 
+def test_destroyed_pvp_defense_building_never_enters_graveyard(tmp):
+    """PvP victim_units mixes troops and armed buildings in one array."""
+    defender_id = "test-gameplay-building-defender"
+    castle_id = 181  # Wizard's Castle: armed building, protect=0
+    defender = _template_save()
+    defender["playerInfo"]["pid"] = defender_id
+    defender["playerInfo"]["map_names"] = ["Castle Defender"]
+    defender["maps"][0]["items"].append([
+        castle_id, 61, 61, 0, 0, 0, [], {},
+    ])
+    json.dump(
+        defender,
+        open(os.path.join(tmp, f"{defender_id}.save.json"), "w"),
+        indent=4,
+    )
+    sessions.load_saved_villages()
+    _set_now(_local(12, 15))
+
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_ATTACK_PLAYER, "args": [defender_id]},
+        {"cmd": Constant.CMD_END_ATTACK, "args": [json.dumps({
+            "attacker": {"user_id": UID, "name": "My Empire", "map": 0},
+            "victim": {
+                "user_id": defender_id,
+                "name": "Castle Defender",
+                "map": 0,
+                "posicion": 3,
+            },
+            "resources": {"g": 0, "x": 0},
+            "resources_victim": {"g": 0},
+            "attacker_units": [],
+            # Destroyed and not among the defender's recovered 95%.
+            "victim_units": [[castle_id, 1, 1, 0]],
+            "win": 1,
+            "voluntary_end": 1,
+            "honor": 0,
+        })]},
+    ]))
+
+    defender = sessions.session(defender_id)
+    assert not any(
+        item[0] == castle_id and item[1:3] == [61, 61]
+        for item in defender["maps"][0]["items"]
+    ), "an unrecovered defensive building did not remain destroyed"
+    assert str(castle_id) not in defender["privateState"].get(
+        "deadHeroes", {}
+    ), "a destroyed Wizard's Castle was classified as a graveyard troop"
+
+    sessions.load_saved_villages()
+    assert str(castle_id) not in sessions.session(defender_id)[
+        "privateState"
+    ].get("deadHeroes", {}), "building graveyard corruption returned on reload"
+
+
+def test_legacy_building_graveyard_entries_are_removed_on_load(tmp):
+    castle_id, ranger_id = 181, 535
+    polluted = _template_save()
+    polluted["privateState"]["deadHeroes"] = {
+        str(castle_id): 1,
+        str(ranger_id): 2,
+    }
+    json.dump(
+        polluted,
+        open(os.path.join(tmp, f"{UID}.save.json"), "w"),
+        indent=4,
+    )
+
+    sessions.load_saved_villages()
+    grave = sessions.session(UID)["privateState"]["deadHeroes"]
+    assert grave == {str(ranger_id): 2}, \
+        f"legacy Graveyard repair removed a troop or kept a building: {grave}"
+    persisted = json.load(open(os.path.join(tmp, f"{UID}.save.json")))
+    assert persisted["privateState"]["deadHeroes"] == grave, \
+        "legacy Graveyard repair was not saved"
+
+
 def test_market_staffing_trade_and_allies_choice_persist(tmp):
     save = sessions.session(UID)
     save["privateState"]["completedMissions"] = list(range(1, 53))
@@ -2033,6 +2109,8 @@ TESTS = [
     test_invalid_market_values_and_xp_level_are_repaired_on_load,
     test_quest_casualties_and_rescued_units_persist,
     test_pvp_history_limits_and_casualties_persist,
+    test_destroyed_pvp_defense_building_never_enters_graveyard,
+    test_legacy_building_graveyard_entries_are_removed_on_load,
     test_market_staffing_trade_and_allies_choice_persist,
     test_observable_building_goals_recover_without_chain_order,
     test_zero_staff_social_building_stays_locked_on_browser_reload,

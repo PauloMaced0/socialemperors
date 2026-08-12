@@ -973,7 +973,18 @@ def _add_to_graveyard(save, unit_id, count=1):
     - the client tracks deaths only locally and nothing persisted them.
     """
     unit_id, count = int(unit_id), int(count)
-    if count <= 0 or unit_id in _GRAVEYARD_EXCLUDED_IDS:
+    config = _item_config(unit_id)
+    # Assault.victim_units contains both defending troops and attacking
+    # buildings.  The Graveyard client assumes every deadHeroes entry is a
+    # unit, so accepting a building here made destroyed towers/castles appear
+    # as resurrectable troops.  Keep this helper as the final type boundary in
+    # case any other battle/death command supplies a non-unit id.
+    if (
+        count <= 0
+        or unit_id in _GRAVEYARD_EXCLUDED_IDS
+        or config is None
+        or str(config.get("type", "")) != "u"
+    ):
         return
     grave = save["privateState"].get("deadHeroes")
     if not isinstance(grave, dict):
@@ -996,7 +1007,9 @@ def _remove_from_graveyard(save, unit_id):
         del grave[key]
 
 
-def _reconcile_battle_units(town, counted_units, graveyard_save=None):
+def _reconcile_battle_units(
+    town, counted_units, graveyard_save=None, allow_defensive_buildings=False
+):
     """Persist casualties and explicit rescued/free units from a battle.
 
     The Flash counted array is [id, initial, killed, recovered]. Units already
@@ -1004,8 +1017,11 @@ def _reconcile_battle_units(town, counted_units, graveyard_save=None):
     only ``killed - recovered`` must be removed. A row with recovery greater
     than its killed count represents newly rescued/free units and is added.
 
-    ``graveyard_save`` (the save that owns ``town``) receives every permanent
-    casualty so the Graveyard keeps troops that died vs trolls or players.
+    ``graveyard_save`` (the save that owns ``town``) receives permanent *unit*
+    casualties so the Graveyard keeps troops that died vs trolls or players.
+    The defender's PvP array also contains combat buildings; those may be
+    removed when the client reports them as unrecovered, but can never enter
+    the troop Graveyard or be created as rescued-unit bonuses.
     """
     if not isinstance(counted_units, list):
         return {"removed": 0, "added": 0}
@@ -1015,11 +1031,19 @@ def _reconcile_battle_units(town, counted_units, graveyard_save=None):
         if values is None:
             continue
         unit_id, _initial, killed, recovered = values
+        config = _item_config(unit_id)
+        item_type = str(config.get("type", "")) if config else ""
+        if item_type != "u" and not (
+            allow_defensive_buildings and item_type == "b"
+        ):
+            continue
         losses = max(0, killed - recovered)
-        bonuses = max(0, recovered - killed)
+        bonuses = max(0, recovered - killed) if item_type == "u" else 0
         # Every permanent death goes to the graveyard (matching the client's
         # local deadUnits tally), whether or not a home-map item still backs it.
-        if graveyard_save is not None and losses > 0:
+        # Buildings share the defender result array but are never graveyard
+        # units.
+        if graveyard_save is not None and item_type == "u" and losses > 0:
             _add_to_graveyard(graveyard_save, unit_id, losses)
         for _ in range(losses):
             victim = next((
@@ -2512,6 +2536,13 @@ def do_command(USERID, cmd, args):
         # The client only deducts locally, so the server must charge the same
         # or resurrection is free after a reload.
         unit_id = int(args[0])
+        unit_config = _item_config(unit_id)
+        if unit_config is None or str(unit_config.get("type", "")) != "u":
+            print(
+                f"Resurrect rejected - item {unit_id} is not a unit and "
+                "cannot belong to the Graveyard."
+            )
+            return False
         x = args[1]
         y = args[2]
         town_id = int(args[3])
@@ -3035,6 +3066,7 @@ def do_command(USERID, cmd, args):
                 defender["maps"][defender_map_id],
                 data.get("victim_units") or [],
                 defender,
+                allow_defensive_buildings=True,
             )
             _apply_battle_survivor_health(
                 defender["maps"][defender_map_id],

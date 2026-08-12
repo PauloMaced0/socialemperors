@@ -444,6 +444,24 @@ def test_resurrect_consumes_from_graveyard(tmp):
         "resurrect did not consume the unit from the graveyard"
 
 
+def test_resurrect_rejects_a_building_id(tmp):
+    castle_id = 181
+    save = sessions.session(UID)
+    save["privateState"]["deadHeroes"] = {str(castle_id): 1}
+    save["maps"][0]["coins"] = 100000
+    before_items = list(save["maps"][0]["items"])
+
+    accepted = command.do_command(
+        UID, Constant.CMD_RESURRECT_HERO, [castle_id, 5, 5, 0]
+    )
+
+    assert accepted is False
+    assert save["maps"][0]["items"] == before_items, \
+        "Graveyard resurrected a defensive building as a troop"
+    assert save["maps"][0]["coins"] == 100000, \
+        "invalid building resurrection charged the player"
+
+
 def _end_quest(quest_id, difficulty, gold, xp, win=True, town=0):
     payload = {
         "map": town,
@@ -853,6 +871,7 @@ TESTS = [
     test_battle_deaths_are_kept_in_the_graveyard,
     test_pvp_attacker_casualties_go_to_graveyard,
     test_resurrect_consumes_from_graveyard,
+    test_resurrect_rejects_a_building_id,
     test_quest_reward_paid_once_per_difficulty,
     test_survival_end_stores_prizes,
     test_help_popup_acknowledgement_persists,

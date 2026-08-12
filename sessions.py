@@ -472,6 +472,51 @@ def _repair_quest_progress(save: dict) -> bool:
     state["unlockedQuestIndex"] = repaired
     return True
 
+
+def _repair_graveyard_state(save: dict) -> bool:
+    """Remove legacy non-unit entries from the troop Graveyard.
+
+    PvP's ``victim_units`` array contains defensive buildings as well as
+    troops. Older server builds copied every unrecovered entry into
+    ``deadHeroes``, which made a destroyed tower or Wizard's Castle appear in
+    the Graveyard. Its original map position/state is not present in that
+    record, so the faithful repair is to discard the invalid graveyard entry;
+    the battle's normal defender-recovery result remains authoritative.
+    """
+    from get_game_config import get_attribute_from_item_id
+
+    state = save.setdefault("privateState", {})
+    grave = state.get("deadHeroes")
+    if not isinstance(grave, dict):
+        if grave is None:
+            return False
+        state["deadHeroes"] = {}
+        return True
+
+    excluded = {
+        Constant.ID_UNIT_PEASANT_MALE,
+        Constant.ID_UNIT_PEASANT_FEMALE,
+        Constant.ID_UNIT_BLUE_PHOENIX,
+    }
+    repaired = {}
+    for raw_id, raw_count in grave.items():
+        try:
+            item_id, count = int(raw_id), int(raw_count)
+        except (TypeError, ValueError):
+            continue
+        if (
+            count > 0
+            and item_id not in excluded
+            and get_attribute_from_item_id(item_id, "type") == "u"
+        ):
+            repaired[str(item_id)] = (
+                int(repaired.get(str(item_id), 0)) + count
+            )
+    if repaired == grave:
+        return False
+    state["deadHeroes"] = repaired
+    return True
+
 # Load saved villages
 
 def load_saved_villages():
@@ -550,6 +595,8 @@ def load_saved_villages():
         if _repair_quest_progress(save):
             modified = True
         if _repair_monster_nest_state(save):
+            modified = True
+        if _repair_graveyard_state(save):
             modified = True
         if modified:
             save_session(USERID)
