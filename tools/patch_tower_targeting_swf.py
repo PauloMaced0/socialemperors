@@ -7,11 +7,16 @@ axis) produces a zero-width/height Flash Rectangle, whose ``intersects`` call
 is always false. The box is also refreshed only once every 85 frames, so it
 can remain behind a moving siege weapon.
 
-Target acquisition is already range-bounded. This patch removes only that
-lossy precondition and lets the existing scan decide whether a target is in
-range. It also keeps an acquired target for the tower's configured full range;
-the original used half range for retention and full range for reacquisition,
-causing needless target churn.
+Version 1 removed that lossy precondition and kept an acquired target for the
+tower's configured full range. The original used half range for retention and
+full range for reacquisition, causing needless target churn.
+
+Version 2 fixes a second range mismatch. ``getNearestEnemy`` uses Euclidean
+anchor-to-anchor distance to acquire a target, while both unit firing and the
+tower's retention check use ``Base.Iso.distance`` (footprint-aware Chebyshev
+tile distance). A cannon could consequently fire diagonally from its range 11
+while a Tower V with range 12 never acquired it. Towers now scan the fighting-
+element list with the same distance function they use to retain/fire.
 
 Requires JPEXS FFDec. Example:
 
@@ -32,41 +37,127 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SWF = ROOT / "assets" / "flash" / "SocialEmpires0926bsec.swf"
 CLASS = "core.isoengine.IsoBuilding"
 SCRIPT = Path("core/isoengine/IsoBuilding.as")
-MARKER = b"socialemperors-tower-targeting-v1"
+OLD_MARKER = b"socialemperors-tower-targeting-v1"
+MARKER = b"socialemperors-tower-targeting-v2"
 
+TARGET_HELPER = """      private function acquireTowerTarget(param1:int, param2:Boolean = false) : void
+      {
+         var _loc3_:Array = null;
+         var _loc4_:IsoFightingElement = null;
+         var _loc5_:IsoFightingElement = null;
+         var _loc6_:int = 0;
+         var _loc7_:int = 0;
+         var _loc8_:int = 2147483647;
+         if(this.PlayerID == Constants.PLAYER_SELF)
+         {
+            _loc3_ = Base.Iso.arEnemyIsoFightingElements;
+            _loc6_ = int(Constants.PLAYER_ENEMY);
+         }
+         else
+         {
+            _loc3_ = Base.Iso.arPlayerIsoFightingElements;
+            _loc6_ = int(Constants.PLAYER_SELF);
+         }
+         for each(_loc4_ in _loc3_)
+         {
+            if(_loc4_ != null && _loc4_.buildingReference != null && Base.Iso.fCheckNearestTarget(_loc4_,_loc6_) && (!param2 || !(_loc4_ is IsoUnit) || !IsoUnit(_loc4_).Incapacitated))
+            {
+               _loc7_ = int(Base.Iso.distance(this,_loc4_)[0]);
+               if(_loc7_ <= param1 && _loc7_ < _loc8_)
+               {
+                  _loc5_ = _loc4_;
+                  _loc8_ = _loc7_;
+               }
+            }
+         }
+         this.TargetElement = _loc5_;
+      }
 
-def replace_once(path: Path, old: str, new: str) -> None:
-    source = path.read_text()
-    count = source.count(old)
-    if count != 1:
-        raise RuntimeError(
-            f"{path.name}: expected one source signature, found {count}"
-        )
-    path.write_text(source.replace(old, new, 1))
+"""
+
+V1_ACQUISITION = """               if((this.TargetElement == null || TargetElement.bDead) && !this.isSorroundedByTowers())
+               {
+                  if(this.buildingReference.building.id == Constants.ID_BUILDING_TOWER_ICE)
+                  {
+                     acquireNewTargetNotIncapacitated(_loc3_,_loc4_,iAttackRange);
+                  }
+                  else
+                  {
+                     acquireNewTarget(_loc3_,_loc4_,this.iAttackRange);
+                  }
+               }
+"""
+
+STOCK_ACQUISITION = """               if((this.TargetElement == null || TargetElement.bDead) && !this.isSorroundedByTowers())
+               {
+                  if(PlayerID != Constants.PLAYER_ENEMY || Base.Iso.bboxPlayers.intersectsRange(this))
+                  {
+                     if(this.buildingReference.building.id == Constants.ID_BUILDING_TOWER_ICE)
+                     {
+                        acquireNewTargetNotIncapacitated(_loc3_,_loc4_,iAttackRange);
+                     }
+                     else
+                     {
+                        acquireNewTarget(_loc3_,_loc4_,this.iAttackRange);
+                     }
+                  }
+               }
+"""
+
+V2_ACQUISITION = """               if((this.TargetElement == null || TargetElement.bDead) && !this.isSorroundedByTowers())
+               {
+                  this.acquireTowerTarget(this.iAttackRange,this.buildingReference.building.id == Constants.ID_BUILDING_TOWER_ICE);
+               }
+"""
 
 
 def patch_source(path: Path) -> None:
-    replace_once(
-        path,
-        "   public class IsoBuilding extends IsoFightingElement\n   {\n",
-        """   public class IsoBuilding extends IsoFightingElement
+    source = path.read_text()
+    if MARKER.decode() in source:
+        return
+
+    if OLD_MARKER.decode() in source:
+        source = source.replace(OLD_MARKER.decode(), MARKER.decode(), 1)
+    else:
+        class_signature = (
+            "   public class IsoBuilding extends IsoFightingElement\n   {\n"
+        )
+        if source.count(class_signature) != 1:
+            raise RuntimeError("IsoBuilding.as: class signature not found")
+        source = source.replace(
+            class_signature,
+            """   public class IsoBuilding extends IsoFightingElement
    {
       
-      private static const TOWER_TARGETING_FIX:String = "socialemperors-tower-targeting-v1";
+      private static const TOWER_TARGETING_FIX:String = "socialemperors-tower-targeting-v2";
 """,
-    )
-    replace_once(
-        path,
-        "Base.Iso.distance(this,this.TargetElement)[0] > this.iAttackRange / 2",
-        "Base.Iso.distance(this,this.TargetElement)[0] > this.iAttackRange",
-    )
-    replace_once(
-        path,
-        "if(PlayerID != Constants.PLAYER_ENEMY || Base.Iso.bboxPlayers.intersectsRange(this))",
-        # acquireNewTarget() already scans only iAttackRange tiles. Avoid the
-        # stale/empty Rectangle precheck which can incorrectly reject the scan.
-        "if(true)",
-    )
+            1,
+        )
+        old_retention = (
+            "Base.Iso.distance(this,this.TargetElement)[0] > "
+            "this.iAttackRange / 2"
+        )
+        if source.count(old_retention) != 1:
+            raise RuntimeError("IsoBuilding.as: half-range signature not found")
+        source = source.replace(
+            old_retention,
+            "Base.Iso.distance(this,this.TargetElement)[0] > this.iAttackRange",
+            1,
+        )
+
+    update_signature = "      override public function Update(param1:uint) : void\n"
+    if source.count(update_signature) != 1:
+        raise RuntimeError("IsoBuilding.as: Update signature not found")
+    source = source.replace(update_signature, TARGET_HELPER + update_signature, 1)
+
+    if source.count(V1_ACQUISITION) == 1:
+        source = source.replace(V1_ACQUISITION, V2_ACQUISITION, 1)
+    elif source.count(STOCK_ACQUISITION) == 1:
+        source = source.replace(STOCK_ACQUISITION, V2_ACQUISITION, 1)
+    else:
+        raise RuntimeError("IsoBuilding.as: tower acquisition signature not found")
+
+    path.write_text(source)
 
 
 def run(args: argparse.Namespace) -> None:
