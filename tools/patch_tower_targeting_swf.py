@@ -11,12 +11,19 @@ Version 1 removed that lossy precondition and kept an acquired target for the
 tower's configured full range. The original used half range for retention and
 full range for reacquisition, causing needless target churn.
 
-Version 2 fixes a second range mismatch. ``getNearestEnemy`` uses Euclidean
+Version 2 fixed a second range mismatch. ``getNearestEnemy`` uses Euclidean
 anchor-to-anchor distance to acquire a target, while both unit firing and the
 tower's retention check use ``Base.Iso.distance`` (footprint-aware Chebyshev
 tile distance). A cannon could consequently fire diagonally from its range 11
 while a Tower V with range 12 never acquired it. Towers now scan the fighting-
 element list with the same distance function they use to retain/fire.
+
+Version 3 restores the stock nearest-target ordering. Version 2 selected the
+smallest footprint distance, which changed which enemy a tower visibly fired
+at when several targets were nearby. Version 3 keeps the original sorted
+target order and uses footprint distance only as the final in-range gate. The
+projectile/attack presentation therefore stays original while all siege
+weapons inside the configured tower range remain targetable.
 
 Requires JPEXS FFDec. Example:
 
@@ -37,10 +44,48 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SWF = ROOT / "assets" / "flash" / "SocialEmpires0926bsec.swf"
 CLASS = "core.isoengine.IsoBuilding"
 SCRIPT = Path("core/isoengine/IsoBuilding.as")
-OLD_MARKER = b"socialemperors-tower-targeting-v1"
-MARKER = b"socialemperors-tower-targeting-v2"
+V1_MARKER = b"socialemperors-tower-targeting-v1"
+V2_MARKER = b"socialemperors-tower-targeting-v2"
+MARKER = b"socialemperors-tower-targeting-v3"
 
 TARGET_HELPER = """      private function acquireTowerTarget(param1:int, param2:Boolean = false) : void
+      {
+         var _loc3_:Array = null;
+         var _loc4_:Array = null;
+         var _loc5_:IsoFightingElement = null;
+         var _loc6_:int = 0;
+         var _loc7_:int = 0;
+         var _loc8_:int = 0;
+         if(this.PlayerID == Constants.PLAYER_SELF)
+         {
+            _loc3_ = Base.Iso.arEnemyIsoFightingElements;
+            _loc6_ = int(Constants.PLAYER_ENEMY);
+         }
+         else
+         {
+            _loc3_ = Base.Iso.arPlayerIsoFightingElements;
+            _loc6_ = int(Constants.PLAYER_SELF);
+         }
+         _loc4_ = Base.Iso.bucleNearestUnits(this.buildingReference.tx,this.buildingReference.ty,_loc3_);
+         _loc4_.sortOn("sort",Array.NUMERIC);
+         _loc8_ = int(_loc4_.length);
+         _loc7_ = 0;
+         while(_loc7_ < _loc8_)
+         {
+            _loc5_ = _loc4_[_loc7_];
+            if(_loc5_ != null && _loc5_.buildingReference != null && Base.Iso.fCheckNearestTarget(_loc5_,_loc6_) && (!param2 || !(_loc5_ is IsoUnit) || !IsoUnit(_loc5_).Incapacitated) && Base.Iso.distance(this,_loc5_)[0] <= param1)
+            {
+               this.TargetElement = _loc5_;
+               return;
+            }
+            _loc7_++;
+         }
+         this.TargetElement = null;
+      }
+
+"""
+
+V2_TARGET_HELPER = """      private function acquireTowerTarget(param1:int, param2:Boolean = false) : void
       {
          var _loc3_:Array = null;
          var _loc4_:IsoFightingElement = null;
@@ -116,8 +161,23 @@ def patch_source(path: Path) -> None:
     if MARKER.decode() in source:
         return
 
-    if OLD_MARKER.decode() in source:
-        source = source.replace(OLD_MARKER.decode(), MARKER.decode(), 1)
+    if V2_MARKER.decode() in source:
+        source = source.replace(V2_MARKER.decode(), MARKER.decode(), 1)
+        helper_signature = (
+            "      private function acquireTowerTarget(param1:int, "
+            "param2:Boolean = false) : void\n"
+        )
+        update_signature = "      override public function Update(param1:uint) : void\n"
+        if source.count(helper_signature) != 1 or source.count(update_signature) != 1:
+            raise RuntimeError("IsoBuilding.as: v2 target helper not found")
+        helper_start = source.index(helper_signature)
+        update_start = source.index(update_signature, helper_start)
+        source = source[:helper_start] + TARGET_HELPER + source[update_start:]
+        path.write_text(source)
+        return
+
+    if V1_MARKER.decode() in source:
+        source = source.replace(V1_MARKER.decode(), MARKER.decode(), 1)
     else:
         class_signature = (
             "   public class IsoBuilding extends IsoFightingElement\n   {\n"
@@ -129,7 +189,7 @@ def patch_source(path: Path) -> None:
             """   public class IsoBuilding extends IsoFightingElement
    {
       
-      private static const TOWER_TARGETING_FIX:String = "socialemperors-tower-targeting-v2";
+      private static const TOWER_TARGETING_FIX:String = "socialemperors-tower-targeting-v3";
 """,
             1,
         )

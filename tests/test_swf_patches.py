@@ -22,6 +22,10 @@ from tools.patch_hidden_stats_performance_swf import (
     MARKER as HIDDEN_STATS_MARKER,
     patched as hidden_stats_patched,
 )
+from tools.patch_tracing_performance_swf import (
+    MARKER as BOUNDED_TRACING_MARKER,
+    patched as bounded_tracing_patched,
+)
 
 
 def test_enemy_click_dispatches_an_attack_instead_of_a_ground_move():
@@ -133,10 +137,11 @@ def test_defender_towers_scan_every_in_range_attacker():
     data = DEFAULT_SWF.read_bytes()
     if data[:3] == b"CWS":
         data = b"FWS" + data[3:8] + zlib.decompress(data[8:])
-    assert data.count(b"socialemperors-tower-targeting-v2") == 1, (
+    assert data.count(b"socialemperors-tower-targeting-v3") == 1, (
         "PvP defender towers still depend on a stale/empty attacker bounding "
         "box, discard targets at half range, or acquire with a distance rule "
-        "different from the one used to fire"
+        "different from the one used to fire; tower targeting must also keep "
+        "the stock nearest-target ordering"
     )
     assert data.count(b"acquireTowerTarget") >= 1, \
         "compiled SWF is missing the footprint-aware tower target scanner"
@@ -186,6 +191,20 @@ def test_hidden_debug_stats_do_not_accumulate_across_maps():
         "the narrow hidden-Stats lifecycle fix is missing or duplicated"
 
 
+def test_legacy_debug_trace_history_is_bounded():
+    data = DEFAULT_SWF.read_bytes()
+    assert bounded_tracing_patched(data), (
+        "the always-enabled legacy debug logger still retains an unbounded "
+        "history for the lifetime of the Ruffle session"
+    )
+    if data[:3] == b"CWS":
+        data = b"FWS" + data[3:8] + zlib.decompress(data[8:])
+    assert data.count(BOUNDED_TRACING_MARKER) == 1, \
+        "the bounded Tracing fix is missing or duplicated"
+    assert data.count(b"MAX_HISTORY") >= 1, \
+        "the Tracing patch marker exists without its history cap"
+
+
 def test_attack_click_patch_is_idempotent():
     data = DEFAULT_SWF.read_bytes()
     result, changed = patch_swf_bytes(data)
@@ -207,6 +226,7 @@ TESTS = [
     test_gift_placement_is_flushed_before_a_browser_reload,
     test_experimental_lifecycle_rewrite_is_not_bundled,
     test_hidden_debug_stats_do_not_accumulate_across_maps,
+    test_legacy_debug_trace_history_is_bounded,
     test_attack_click_patch_is_idempotent,
 ]
 
