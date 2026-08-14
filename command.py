@@ -8,6 +8,7 @@ from sessions import (
     session, save_session, fresh_town_map, neighbor_session, is_friend,
     is_enemy_camp_marker, mark_enemy_camp_active,
     is_natural_resource, is_depleted_resource_placeholder,
+    session_lock,
 )
 from get_game_config import get_game_config, get_level_from_xp, get_name_from_item_id, get_attribute_from_mission_id, get_xp_from_level, get_attribute_from_item_id, get_item_from_subcat_functional
 from constants import Constant
@@ -57,8 +58,8 @@ def _current_darts_set_start(now_ts: int):
 
 def _grant_resource(save, rtype, amount):
     """Add `amount` of a resource identified by its config type code
-    (s=stone, w=wood, f=food, g=gold/coins, c=cash) to the default map /
-    player. No-op for unknown types or non-positive amounts."""
+    (s=stone, w=wood, f=food, g=gold/coins, c=cash, m=mana) to the
+    default map / player. No-op for unknown types or non-positive amounts."""
     amount = int(amount)
     if amount <= 0 or not rtype:
         return
@@ -73,6 +74,9 @@ def _grant_resource(save, rtype, amount):
         m["coins"] = int(m.get("coins", 0)) + amount
     elif rtype == "c":
         save["playerInfo"]["cash"] = int(save["playerInfo"]["cash"]) + amount
+    elif rtype in ("m", "mana"):
+        state = save.setdefault("privateState", {})
+        state["mana"] = max(0, int(state.get("mana", 0) or 0)) + amount
 
 
 def _grant_assist_reward(save, count):
@@ -355,6 +359,39 @@ def _camp_combatant(item_id):
     return str(config.get("type", "")) == "u" or attack > 0
 
 
+def _infer_legacy_camp_roster(town):
+    """Recover hostile combatants for camps saved without an exact roster.
+
+    Early local-server builds persisted the camp marker and its troll pieces
+    in separate command packets.  Only the packet containing the marker was
+    recognised as a camp spawn, leaving ``enemyCampRoster`` absent.  Limit the
+    fallback to troll combatants near a persisted camp marker so a legitimate
+    player-owned troll elsewhere in the village cannot block the reward.
+    """
+    markers = [
+        (int(item[1]), int(item[2]))
+        for item in town.get("items", [])
+        if item and len(item) >= 3 and is_enemy_camp_marker(item[0])
+    ]
+    if not markers or str(town.get("race", "h")) != "h":
+        return []
+    roster = []
+    for item in town.get("items", []):
+        if not item or len(item) < 3 or not _camp_combatant(item[0]):
+            continue
+        try:
+            item_id, x, y = int(item[0]), int(item[1]), int(item[2])
+            troll = str(get_attribute_from_item_id(item_id, "race")) == "t"
+        except (TypeError, ValueError):
+            continue
+        if troll and any(
+            max(abs(x - marker_x), abs(y - marker_y)) <= 24
+            for marker_x, marker_y in markers
+        ):
+            roster.append([item_id, x, y])
+    return roster
+
+
 def _live_camp_combatants(town):
     """Return exact, persisted camp enemies which are still alive.
 
@@ -362,13 +399,19 @@ def _live_camp_combatants(town):
     own troll-race units themselves and those must not block or be deleted by
     a neutral-camp reward.
     """
+    roster = town.get("enemyCampRoster")
+    if not isinstance(roster, list):
+        roster = []
+    if int(town.get("enemyCampActive", 0) or 0) and not roster:
+        roster = _infer_legacy_camp_roster(town)
+        town["enemyCampRoster"] = roster
     live_positions = {
         (int(item[0]), int(item[1]), int(item[2]))
         for item in town.get("items", [])
         if item and len(item) >= 3
     }
     return [
-        record for record in town.get("enemyCampRoster", [])
+        record for record in roster
         if isinstance(record, (list, tuple)) and len(record) >= 3
         and _camp_combatant(record[0])
         and (int(record[0]), int(record[1]), int(record[2])) in live_positions
@@ -1160,6 +1203,28 @@ def get_strategy_type(id):
     return "Unknown Strategy"
 
 def command(USERID, data):
+    """Apply one client batch, serialising tournament state transitions.
+
+    The Flash client does not wait for its entry-fee command before posting the
+    tournament join request. Holding the same per-player lock used by the
+    tournament service makes the fee and admission one ordered transaction.
+    """
+    tournament_commands = {
+        Constant.CMD_SET_ATTACK_TEAM,
+        Constant.CMD_TOURNAMENT_SUBSTRACT_RESOURCES,
+        Constant.CMD_TOURNAMENT_REFUND_RESOURCES,
+    }
+    needs_tournament_lock = any(
+        entry.get("cmd") in tournament_commands
+        for entry in data.get("commands", [])
+    )
+    if needs_tournament_lock:
+        with session_lock(USERID):
+            return _command_unlocked(USERID, data)
+    return _command_unlocked(USERID, data)
+
+
+def _command_unlocked(USERID, data):
     timestamp = data["ts"]
     first_number = data["first_number"]
     accessToken = data["accessToken"]
@@ -1277,9 +1342,13 @@ def command(USERID, data):
                     and cmd == Constant.CMD_BUY
                     and len(args) >= 6
                     and bool(args[5])
-                    and int(args[4]) in camp_spawn_towns
                 ):
                     item_id = int(args[0])
+                    town = session(USERID)["maps"][int(args[4])]
+                    camp_context = (
+                        int(args[4]) in camp_spawn_towns
+                        or int(town.get("enemyCampActive", 0) or 0)
+                    )
                     try:
                         camp_entity = (
                             is_enemy_camp_marker(item_id)
@@ -1289,9 +1358,11 @@ def command(USERID, data):
                         )
                     except (TypeError, ValueError):
                         camp_entity = is_enemy_camp_marker(item_id)
-                    if camp_entity:
-                        town = session(USERID)["maps"][int(args[4])]
+                    if camp_context and camp_entity:
                         roster = town.setdefault("enemyCampRoster", [])
+                        if not isinstance(roster, list):
+                            roster = []
+                            town["enemyCampRoster"] = roster
                         record = [item_id, int(args[1]), int(args[2])]
                         if record not in roster:
                             roster.append(record)
@@ -1444,11 +1515,17 @@ def do_command(USERID, cmd, args):
         return True
     
     elif cmd == Constant.CMD_COMPLETE_TUTORIAL:
-        tutorial_step = args[0]
+        tutorial_step = int(args[0])
         print("Tutorial step", tutorial_step, "reached.")
+        # TutorialMain ends its mandatory starter sequence at step 15.  The
+        # old handler waited until the later mission-guidance step 31, so a
+        # reload restarted the starter tutorial after its trees/trolls had
+        # already been consumed.  The client itself treats any non-zero value
+        # as completed on load; persist that state at the actual end point.
+        if tutorial_step >= 15:
+            save["playerInfo"]["completed_tutorial"] = 1
         if tutorial_step >= 31: # 31 is Dragon choosing. After that, you have some freedom. There's at least until step 45.
             print("Tutorial COMPLETED!")
-            save["playerInfo"]["completed_tutorial"] = 1
             save["privateState"]["dragonNestActive"] = 1 
     
     elif cmd == Constant.CMD_MOVE:
@@ -1470,7 +1547,7 @@ def do_command(USERID, cmd, args):
         # Camp enemies wander. Keep the authoritative roster on their current
         # tile so a later kill can remove the exact camp member and the reward
         # gate cannot be bypassed by movement.
-        for record in map.get("enemyCampRoster", []):
+        for record in map.get("enemyCampRoster", []) or []:
             if (
                 isinstance(record, list) and len(record) >= 3
                 and int(record[0]) == int(id)
@@ -1886,6 +1963,20 @@ def do_command(USERID, cmd, args):
                 r = levels[idx]
                 _grant_resource(save, r.get("reward_type"), r.get("reward_amount", 0))
                 print(f"  level {lvl} reward: {r.get('reward_amount')} '{r.get('reward_type')}'")
+        # MagicManager.onLevelUp also awards mana client-side from level 36
+        # onward. Persist the same global-config amount for every crossed
+        # level; otherwise it appears immediately and vanishes on reload.
+        globals_cfg = get_game_config().get("globals", {})
+        mana_start = int(globals_cfg.get("START_LEVEL_MANA_REWARD", 0) or 0)
+        mana_per_level = int(globals_cfg.get("MANA_REWARD_PER_LEVEL", 0) or 0)
+        eligible_levels = sum(
+            1 for lvl in range(old_level + 1, new_level + 1)
+            if lvl >= mana_start
+        )
+        if mana_per_level > 0 and eligible_levels:
+            mana_reward = eligible_levels * mana_per_level
+            _grant_resource(save, "m", mana_reward)
+            print(f"  level-up mana reward: +{mana_reward}")
 
     elif cmd == Constant.CMD_RT_PUBLISH_SCORE:
         new_xp = int(args[0])
@@ -1942,6 +2033,22 @@ def do_command(USERID, cmd, args):
             + Constant.BANK_EXCHANGE_CASH_GAIN
         print(f"Bank exchange: -{Constant.BANK_EXCHANGE_GOLD_COST} gold -> "
               f"+{Constant.BANK_EXCHANGE_CASH_GAIN} cash.")
+
+    elif cmd == Constant.CMD_SET_ATTACK_TEAM:
+        # SelectionTeamWindow updates this client-side before joining, but the
+        # server must retain it so reopening/reloading the arena shows the same
+        # army instead of twenty empty slots.
+        try:
+            team_name = str(args[0])
+            team = json.loads(args[1]) if isinstance(args[1], str) else args[1]
+            if not isinstance(team, list) or len(team) != 20:
+                raise ValueError("team must contain exactly 20 slots")
+            team = [max(0, int(unit_id)) for unit_id in team]
+        except (IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            print(f"Tournament team rejected - {exc}.")
+            return False
+        save["privateState"].setdefault("teams", {})[team_name] = team
+        print(f"Saved '{team_name}' team ({sum(unit_id > 0 for unit_id in team)} units).")
 
     elif cmd == Constant.CMD_TOURNAMENT_SUBSTRACT_RESOURCES or cmd == Constant.CMD_TOURNAMENT_REFUND_RESOURCES:
         # Tournament entry fee bookkeeping. The client subtracts the fee when
@@ -3511,7 +3618,7 @@ def do_command(USERID, cmd, args):
         # cooldown, so they appeared as unrelated trolls after reload.
         removed_camp_items = 0
         human_town = str(map.get("race", "h")) == "h"
-        roster = map.get("enemyCampRoster", [])
+        roster = map.get("enemyCampRoster", []) or []
         roster_keys = {
             (int(record[0]), int(record[1]), int(record[2]))
             for record in roster

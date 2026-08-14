@@ -3,6 +3,7 @@ import os
 import copy
 import uuid
 import random
+import threading
 from flask import session
 # from flask_session import SqlAlchemySessionInterface, current_app
 
@@ -33,6 +34,24 @@ __saves = {}  # ALL saved villages
     "USERID_2": {...}
 }'''
 
+# A tournament entry is sent as two near-simultaneous HTTP requests (the
+# resource command followed by the room join). Keep those mutations ordered
+# per player without serialising unrelated villages. RLock is intentional:
+# tournament helpers call get/save helpers while already holding this lock.
+__session_locks = {}
+__session_locks_guard = threading.Lock()
+
+
+def session_lock(USERID: str):
+    """Return the process-local mutation lock for one saved village."""
+    key = str(USERID)
+    with __session_locks_guard:
+        lock = __session_locks.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            __session_locks[key] = lock
+        return lock
+
 __initial_village = json.load(open(os.path.join(VILLAGES_DIR, "initial.json")))
 
 # Enemy encounters are created by the Flash client and sent back as ordinary
@@ -49,6 +68,15 @@ _ENEMY_CAMP_MARKER_IDS = frozenset({
     Constant.ID_BUILDING_STATUE_GOLEM,
     Constant.ID_BUILDING_PRISONER_KIDNAPPED_UNITS,
     Constant.ID_BUILDING_TREASURE_TOTEM,
+    Constant.ID_BUILDING_TROLL_HUT,
+    Constant.ID_BUILDING_TROLL_CAVE,
+})
+
+# These are the encounter's collectible/rescuable objective. Troll huts and
+# caves are camp structures, but they do not populate Base.Iso.eTreasureChest;
+# keeping an encounter alive with only those structures leaves no way to
+# finish it and blocks the next spawn forever.
+_ENEMY_CAMP_OBJECTIVE_IDS = _ENEMY_CAMP_MARKER_IDS - frozenset({
     Constant.ID_BUILDING_TROLL_HUT,
     Constant.ID_BUILDING_TROLL_CAVE,
 })
@@ -101,6 +129,10 @@ def is_enemy_camp_marker(item_id: int) -> bool:
     return int(item_id) in _ENEMY_CAMP_MARKER_IDS
 
 
+def is_enemy_camp_objective(item_id: int) -> bool:
+    return int(item_id) in _ENEMY_CAMP_OBJECTIVE_IDS
+
+
 def is_natural_resource(item_id: int) -> bool:
     return int(item_id) in _NATURAL_RESOURCE_IDS
 
@@ -116,7 +148,16 @@ def mark_enemy_camp_active(town: dict, now: int = None) -> None:
 
 
 def refresh_enemy_camp_timer(town: dict, now: int) -> bool:
-    """A live saved camp must not be replaced at a new random position."""
+    """Keep the Flash client's live-camp respawn gate closed on reload.
+
+    MapInitializer treats a zero/expired timestamp as permission to clean and
+    rebuild the encounter, even when its saved objective still exists.  Keep
+    this timestamp fresh while the camp is active.  The bundled client patch
+    hides that implementation timestamp behind its existing ``enemies alive``
+    text and suppresses the timer's spawn callback while the objective exists.
+    The timestamp becomes the visible four-hour cooldown only after collection
+    clears ``enemyCampActive`` and the objective.
+    """
     if int(town.get("enemyCampActive", 0) or 0):
         now = int(now)
         if int(town.get("timestampLastTreasure", 0) or 0) != now:
@@ -126,17 +167,142 @@ def refresh_enemy_camp_timer(town: dict, now: int) -> bool:
 
 
 def _repair_active_enemy_camps(save: dict) -> bool:
-    """Infer active state for saves made before enemyCampActive existed."""
+    """Infer old camp state and release an unrecoverable orphaned camp.
+
+    An active encounter is only completable while its prisoner/treasure
+    marker exists.  Older interrupted spawn/cleanup sequences could leave the
+    active bit behind after every camp object had disappeared; refreshing its
+    timestamp forever then prevented another encounter.  Remove any exactly
+    tracked stragglers and expire that broken gate so the client can spawn a
+    complete replacement on this load.
+    """
     changed = False
     for town in save.get("maps", []):
-        if "enemyCampActive" in town:
-            continue
-        if any(is_enemy_camp_marker(item[0])
-               for item in town.get("items", []) if item):
+        markers = [
+            item for item in town.get("items", [])
+            if item and is_enemy_camp_objective(item[0])
+        ]
+        active = int(town.get("enemyCampActive", 0) or 0)
+        if markers and not active:
+            # The objective is stronger evidence than a stale/missing flag.
+            # Some old saves did persist enemyCampActive=0 while retaining the
+            # chest/prisoner, which otherwise lets the client replace it.
+            active = 1
             mark_enemy_camp_active(town)
             changed = True
-        else:
+        elif "enemyCampActive" not in town:
             town["enemyCampActive"] = 0
+            changed = True
+        if active and not markers:
+            roster = town.get("enemyCampRoster")
+            tracked = {
+                (int(entry[0]), int(entry[1]), int(entry[2]))
+                for entry in roster
+                if isinstance(entry, (list, tuple)) and len(entry) >= 3
+            } if isinstance(roster, list) else set()
+            if tracked:
+                items = town.get("items", [])
+                town["items"] = [
+                    item for item in items
+                    if not (
+                        item and len(item) >= 3
+                        and (int(item[0]), int(item[1]), int(item[2]))
+                        in tracked
+                    )
+                ]
+            town["enemyCampActive"] = 0
+            town["enemyCampRoster"] = []
+            town["timestampLastTreasure"] = 0
+            changed = True
+    return changed
+
+
+def _tutorial_is_incomplete(save: dict) -> bool:
+    try:
+        return int(save.get("playerInfo", {}).get(
+            "completed_tutorial", 0
+        ) or 0) == 0
+    except (TypeError, ValueError):
+        return True
+
+
+def _repair_tutorial_targets(save: dict) -> bool:
+    """Keep the fixed tree and troll targets required by TutorialMain.
+
+    Tutorial arrows use the original starter-map coordinates.  The generic
+    natural-resource migration used to move those trees before the first
+    frame; a reload after harvesting/killing a target then restarted the
+    tutorial with nothing under its arrow.  Reuse existing matching objects
+    where possible (so old migrated saves do not exceed resource caps) and
+    clear duplicate tree cooldowns for the restored tutorial tiles.
+    """
+    if not _tutorial_is_incomplete(save) or not save.get("maps"):
+        return False
+    town = save["maps"][0]
+    items = town.setdefault("items", [])
+    required = [
+        copy.deepcopy(item)
+        for item in __initial_village["maps"][0].get("items", [])
+        if item and (
+            int(item[0]) in _TREE_RESOURCE_IDS
+            or int(item[0]) == Constant.ID_UNIT_TROLL_1
+        )
+    ]
+    required_tiles = {
+        (int(item[0]), int(item[1]), int(item[2])) for item in required
+    }
+    changed = False
+    used = set()
+    for expected in required:
+        item_id, target_x, target_y = map(int, expected[:3])
+        exact = next((
+            item for item in items
+            if item and len(item) >= 3
+            and (int(item[0]), int(item[1]), int(item[2]))
+            == (item_id, target_x, target_y)
+        ), None)
+        if exact is not None:
+            used.add(id(exact))
+            continue
+        source = next((
+            item for item in items
+            if item and len(item) >= 3 and id(item) not in used
+            and int(item[0]) == item_id
+            and (item_id, int(item[1]), int(item[2])) not in required_tiles
+        ), None)
+        if source is None:
+            source = copy.deepcopy(expected)
+            items.append(source)
+        else:
+            # If the migration happened to put another natural resource on
+            # the tutorial tile, swap it to the source's old safe position.
+            occupant = next((
+                item for item in items
+                if item is not source and item and len(item) >= 3
+                and int(item[1]) == target_x and int(item[2]) == target_y
+                and is_natural_resource(item[0])
+            ), None)
+            if occupant is not None:
+                occupant[1], occupant[2] = source[1], source[2]
+            source[1], source[2] = target_x, target_y
+            if len(source) > 3:
+                source[3] = expected[3]
+        used.add(id(source))
+        changed = True
+    pending = town.get("pendingTreeRespawns")
+    if isinstance(pending, list):
+        tutorial_tree_tiles = {
+            (int(item[1]), int(item[2]))
+            for item in required if int(item[0]) in _TREE_RESOURCE_IDS
+        }
+        retained = [
+            entry for entry in pending
+            if not isinstance(entry, dict) or (
+                int(entry.get("x", -1)), int(entry.get("y", -1))
+            ) not in tutorial_tree_tiles
+        ]
+        if retained != pending:
+            town["pendingTreeRespawns"] = retained
             changed = True
     return changed
 
@@ -154,6 +320,8 @@ def _repair_natural_resource_state(save: dict) -> bool:
     repair is now server-owned in get_player_info so the Flash initializer
     never rerolls every resource position during a reload.
     """
+    if _tutorial_is_incomplete(save):
+        return False
     changed = False
     for town in save.get("maps", []):
         items = town.setdefault("items", [])
@@ -586,6 +754,8 @@ def load_saved_villages():
             modified = True
         if _repair_active_enemy_camps(save):
             modified = True
+        if _repair_tutorial_targets(save):
+            modified = True
         if _repair_natural_resource_state(save):
             modified = True
         if _repair_social_building_state(save):
@@ -1013,10 +1183,17 @@ def save_session(USERID: str):
     print(f" * Saving village at {file}... ", end='')
     village = session(USERID)
     # Atomic write: dump to a temp file in the same dir, then replace the target.
-    # A crash mid-write cannot corrupt an existing save.
+    # A crash mid-write cannot corrupt an existing save. The temp name must be
+    # unique: Flask can process two requests for the same village concurrently,
+    # and a shared ``.tmp`` path lets one request rename the other's file.
     target = os.path.join(SAVES_DIR, file)
-    tmp = target + ".tmp"
-    with open(tmp, 'w') as f:
-        json.dump(village, f, indent=4)
-    os.replace(tmp, target)
+    tmp = f"{target}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(tmp, 'w') as f:
+            json.dump(village, f, indent=4)
+        os.replace(tmp, target)
+    finally:
+        # json.dump/os.replace failures must not leave stale temp files behind.
+        if os.path.exists(tmp):
+            os.unlink(tmp)
     print("Done.")

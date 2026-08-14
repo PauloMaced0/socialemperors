@@ -11,6 +11,7 @@ import json
 import copy
 import shutil
 import tempfile
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -98,6 +99,40 @@ def test_atomic_save_leaves_no_tmp_file(tmp):
     leftovers = [f for f in os.listdir(tmp) if f.endswith(".tmp") or f.endswith(".part")]
     assert not leftovers, f"leftover temp files: {leftovers}"
     json.load(open(os.path.join(tmp, f"{UID}.save.json")))  # valid JSON
+
+
+def test_concurrent_saves_use_independent_temp_files(tmp):
+    """Two Flask requests saving one village cannot steal one .tmp file."""
+    original_dump = sessions.json.dump
+    both_dumped = threading.Barrier(2)
+    errors = []
+
+    def synchronized_dump(*args, **kwargs):
+        original_dump(*args, **kwargs)
+        both_dumped.wait(timeout=5)
+
+    def save_once():
+        try:
+            sessions.save_session(UID)
+        except Exception as exc:  # surfaced below with the original type/text
+            errors.append(exc)
+
+    sessions.json.dump = synchronized_dump
+    try:
+        threads = [threading.Thread(target=save_once) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        assert all(not thread.is_alive() for thread in threads), \
+            "concurrent village saves deadlocked"
+    finally:
+        sessions.json.dump = original_dump
+
+    assert not errors, [f"{type(exc).__name__}: {exc}" for exc in errors]
+    leftovers = [name for name in os.listdir(tmp) if name.endswith(".tmp")]
+    assert not leftovers, f"concurrent saves left temp files: {leftovers}"
+    json.load(open(os.path.join(tmp, f"{UID}.save.json")))
 
 
 def test_unhandled_command_is_logged(tmp):
@@ -415,6 +450,7 @@ TESTS = [
     test_collect_advances_item_timestamp,
     test_batch_persists_despite_failing_command,
     test_atomic_save_leaves_no_tmp_file,
+    test_concurrent_saves_use_independent_temp_files,
     test_unhandled_command_is_logged,
     test_activate_persists_working_state,
     test_activate_zero_stops_without_restamping,

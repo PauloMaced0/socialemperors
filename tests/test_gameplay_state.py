@@ -40,6 +40,9 @@ def _template_save():
     save = json.load(open(os.path.join("villages", "initial.json")))
     save["playerInfo"]["pid"] = UID
     save["playerInfo"]["cash"] = 100
+    # Gameplay-state tests model an established village unless a test
+    # explicitly switches back into tutorial bootstrap mode.
+    save["playerInfo"]["completed_tutorial"] = 1
     return save
 
 
@@ -98,12 +101,14 @@ def test_animal_spawn_budget_resets_on_next_local_day(tmp):
 
     _set_now(_local(12, 18))
     get_player_info.get_player_info(UID)
-    assert state["arrayAnimals"] == {"74": 20, "75": 4}, \
+    assert state["arrayAnimals"].get("74") == 20 \
+        and state["arrayAnimals"].get("75") == 4, \
         "same-day reload reset the daily animal allowance"
 
     _set_now(_local(13, 8))
     get_player_info.get_player_info(UID)
-    assert state["arrayAnimals"] == {}, \
+    assert "74" not in state["arrayAnimals"] \
+        and "75" not in state["arrayAnimals"], \
         "next local day did not reset the animal replenishment allowance"
     persisted = json.load(open(os.path.join(tmp, f"{UID}.save.json")))
     assert persisted["privateState"]["timestampAnimalsReset"] == _local(13, 8), \
@@ -1025,6 +1030,11 @@ def test_live_enemy_camp_survives_reload_without_respawning(tmp):
     assert town["enemyCampActive"] == 1
     assert town["timestampLastTreasure"] == _local(12, 10)
 
+    # A deployed save could retain the objective while carrying a stale false
+    # active flag. The objective is authoritative and must close the respawn
+    # gate again on load.
+    town["enemyCampActive"] = 0
+
     command.command(UID, _batch([
         {"cmd": Constant.CMD_END_ATTACK, "args": [json.dumps({
             "win": 0, "resources": {"g": 0, "x": 0},
@@ -1035,7 +1045,9 @@ def test_live_enemy_camp_survives_reload_without_respawning(tmp):
     # not let MapInitializer generate a replacement at a random position.
     _set_now(_local(12, 12))
     get_player_info.get_player_info(UID)
-    assert town["timestampLastTreasure"] == _local(12, 12)
+    assert town["enemyCampActive"] == 1
+    assert town["timestampLastTreasure"] == _local(12, 12), \
+        "living camp did not refresh the client-side respawn gate"
     assert any(item[0] == marker and item[1:3] == [70, 70]
                for item in town["items"])
     # The refreshed active-camp gate must survive a server restart too.
@@ -1076,6 +1088,176 @@ def test_live_enemy_camp_survives_reload_without_respawning(tmp):
     ), "camp cleanup deleted an untracked player-owned unit"
 
 
+def test_orphaned_enemy_camp_gate_recovers_and_can_spawn_again(tmp):
+    _set_now(_local(12, 10))
+    town = sessions.session(UID)["maps"][0]
+    marker = Constant.ID_BUILDING_TREASURE_CHEST
+    troll = Constant.ID_UNIT_TROLL_1
+    cave = Constant.ID_BUILDING_TROLL_CAVE
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_BUY,
+         "args": [marker, 70, 70, 0, 0, 1, 1, 0]},
+        {"cmd": Constant.CMD_BUY,
+         "args": [troll, 71, 70, 0, 0, 1, 1, "u"]},
+        {"cmd": Constant.CMD_BUY,
+         "args": [cave, 72, 70, 0, 0, 1, 1, "b"]},
+    ]))
+    assert town["enemyCampActive"] == 1
+
+    # Reproduce an interrupted cleanup/save: the encounter bit and roster
+    # survived but every visible camp object disappeared.
+    town["items"] = [
+        item for item in town["items"]
+        if item[0:3] not in ([marker, 70, 70], [troll, 71, 70])
+    ]
+    _set_now(_local(12, 12))
+    get_player_info.get_player_info(UID)
+    assert town["enemyCampActive"] == 0
+    assert town["enemyCampRoster"] == []
+    assert town["timestampLastTreasure"] == 0, \
+        "orphaned camp kept a permanent respawn gate"
+    assert not any(item[0:3] == [cave, 72, 70]
+                   for item in town["items"]), \
+        "orphan recovery left a tracked camp structure behind"
+
+    # The next client population packet must be accepted as a new complete
+    # encounter instead of vanishing behind the stale active flag.
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_BUY,
+         "args": [marker, 80, 80, 0, 0, 1, 1, 0]},
+        {"cmd": Constant.CMD_BUY,
+         "args": [troll, 81, 80, 0, 0, 1, 1, "u"]},
+    ]))
+    assert town["enemyCampActive"] == 1
+    assert [troll, 81, 80] in town["enemyCampRoster"]
+    get_player_info.get_player_info(UID)
+    assert town["timestampLastTreasure"] == _local(12, 12), \
+        "living replacement camp did not close the respawn gate"
+
+
+def test_split_and_legacy_enemy_camps_require_every_combatant(tmp):
+    marker = Constant.ID_BUILDING_PRISONER_KIDNAPPED_UNITS
+    tower = Constant.ID_BUILDING_TROLL_TOWER_3
+    town = sessions.session(UID)["maps"][0]
+
+    # The marker and combatants can arrive in separate HTTP command packets.
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_BUY,
+         "args": [marker, 80, 80, 0, 0, 1, 1, 0]},
+    ]))
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_BUY,
+         "args": [tower, 78, 78, 0, 0, 1, 1, "b"]},
+        {"cmd": Constant.CMD_BUY,
+         "args": [tower, 82, 78, 0, 0, 1, 1, "b"]},
+    ]))
+    assert [tower, 78, 78] in town["enemyCampRoster"]
+    assert [tower, 82, 78] in town["enemyCampRoster"]
+
+    # Simulate an already-deployed legacy save which lost the roster field.
+    town.pop("enemyCampRoster", None)
+    before = (town["coins"], town["xp"], town["timestampLastTreasure"])
+    accepted = command.do_command(
+        UID, Constant.CMD_COLLECT_TREASURE, [100, 20, 1, 0, 0, 0]
+    )
+    assert accepted is False
+    assert (town["coins"], town["xp"], town["timestampLastTreasure"]) == before
+    assert sorted(town["enemyCampRoster"]) == sorted([
+        [tower, 78, 78], [tower, 82, 78],
+    ]), f"legacy camp combatants were not reconstructed: {town['enemyCampRoster']}"
+
+    command.do_command(UID, Constant.CMD_KILL, [78, 78, tower, 0, "b"])
+    assert command.do_command(
+        UID, Constant.CMD_COLLECT_TREASURE, [100, 20, 1, 0, 0, 0]
+    ) is False, "camp cooldown started while one tower was still alive"
+
+    command.do_command(UID, Constant.CMD_KILL, [82, 78, tower, 0, "b"])
+    command.do_command(
+        UID, Constant.CMD_COLLECT_TREASURE, [100, 20, 1, 0, 0, 0]
+    )
+    assert town["enemyCampActive"] == 0
+    assert town["timestampLastTreasure"] == _local(12, 10)
+
+
+def test_tutorial_keeps_its_fixed_tree_and_enemy_targets(tmp):
+    starter = json.load(open(os.path.join("villages", "initial.json")))
+    save = sessions.session(UID)
+    save["playerInfo"]["completed_tutorial"] = 0
+    save["maps"][0] = starter["maps"][0]
+    save["privateState"]["arrayAnimals"] = {}
+    town = save["maps"][0]
+    tree_tiles = {
+        (50, 58), (45, 50), (45, 51), (45, 52),
+        (45, 53), (45, 54), (44, 54), (43, 54),
+    }
+    troll_tiles = {(40, 40), (39, 40)}
+
+    get_player_info.get_player_info(UID)
+    assert {
+        (int(item[1]), int(item[2])) for item in town["items"]
+        if int(item[0]) == Constant.ID_BUILDING_TREE_1
+    } == tree_tiles, "first load moved the trees out from under tutorial arrows"
+    assert {
+        (int(item[1]), int(item[2])) for item in town["items"]
+        if int(item[0]) == Constant.ID_UNIT_TROLL_1
+    } == troll_tiles, "first load removed the tutorial enemies"
+    assert not int(town.get("naturalResourcesInitialized", 0) or 0), \
+        "first tutorial load was closed before client resources could spawn"
+    assert "naturalResourcePopulationRepairVersion" not in town, \
+        "normal resource migration ran before the tutorial initialized"
+    command.command(UID, _batch([
+        {"cmd": Constant.CMD_BUY,
+         "args": [Constant.ID_BUILDING_GOLD_1, 2, 2, 0, 0, 1, 1, "b"]},
+        {"cmd": Constant.CMD_BUY,
+         "args": [Constant.ID_BUILDING_STONE_1, 3, 2, 0, 0, 1, 1, "b"]},
+    ]))
+    assert any(item[0:3] == [Constant.ID_BUILDING_GOLD_1, 2, 2]
+               for item in town["items"])
+    assert any(item[0:3] == [Constant.ID_BUILDING_STONE_1, 3, 2]
+               for item in town["items"])
+    assert town["naturalResourcesInitialized"] == 1, \
+        "accepted tutorial resource population was not locked for reload"
+
+    # Reproduce a browser reload after those tutorial targets were consumed.
+    town["items"] = [
+        item for item in town["items"]
+        if not (
+            int(item[0]) == Constant.ID_BUILDING_TREE_1
+            or int(item[0]) == Constant.ID_UNIT_TROLL_1
+        )
+    ]
+    town["items"].append([
+        Constant.ID_BUILDING_TREE_1, 10, 10, 0, 0, 0
+    ])
+    town["pendingTreeRespawns"] = [{
+        "id": Constant.ID_BUILDING_TREE_1,
+        "x": 45,
+        "y": 50,
+        "at": _local(12, 15),
+    }]
+    get_player_info.get_player_info(UID)
+    assert tree_tiles <= {
+        (int(item[1]), int(item[2])) for item in town["items"]
+        if int(item[0]) == Constant.ID_BUILDING_TREE_1
+    }, "reload did not restore all tutorial harvest targets"
+    assert troll_tiles <= {
+        (int(item[1]), int(item[2])) for item in town["items"]
+        if int(item[0]) == Constant.ID_UNIT_TROLL_1
+    }, "reload did not restore both tutorial enemies"
+    assert town["pendingTreeRespawns"] == [], \
+        "restored tutorial tree retained a duplicate cooldown"
+
+    command.do_command(UID, Constant.CMD_COMPLETE_TUTORIAL, [14])
+    assert save["playerInfo"]["completed_tutorial"] == 0
+    command.do_command(UID, Constant.CMD_COMPLETE_TUTORIAL, [15])
+    assert save["playerInfo"]["completed_tutorial"] == 1, \
+        "finished starter tutorial would restart after reload"
+    get_player_info.get_player_info(UID)
+    assert town["naturalResourcePopulationRepairVersion"] == (
+        get_player_info._NATURAL_RESOURCE_POPULATION_REPAIR_VERSION
+    ), "normal resource lifecycle did not begin after tutorial completion"
+
+
 def test_natural_resources_use_persisted_random_respawns(tmp):
     stone = Constant.ID_BUILDING_STONE_1
     gold = Constant.ID_BUILDING_GOLD_1
@@ -1112,7 +1294,9 @@ def test_natural_resources_use_persisted_random_respawns(tmp):
     ])
     town["naturalResourcesInitialized"] = 1
     assert town["naturalResourcesInitialized"] == 1
-    town["naturalResourcePopulationRepairVersion"] = 2
+    town["naturalResourcePopulationRepairVersion"] = (
+        get_player_info._NATURAL_RESOURCE_POPULATION_REPAIR_VERSION
+    )
 
     # A mature map reload may try to run MapInitializer's free population
     # buys again. The server rejects that batch instead of instantly replacing
@@ -1253,26 +1437,27 @@ def test_legacy_mineral_placeholders_migrate_without_resetting_timer(tmp):
         "source_y": 71,
         "at": _local(12, 13),
     }]
-    assert not any(
-        item[0] in {
-            Constant.ID_BUILDING_STONE_1,
-            Constant.ID_BUILDING_STONE_2,
-            Constant.ID_BUILDING_STONE_3,
-            Constant.ID_BUILDING_STONE_4,
-        }
-        for item in town["items"]
-    ), "legacy cooldown was completed early during migration"
+    stone_ids = {
+        Constant.ID_BUILDING_STONE_1,
+        Constant.ID_BUILDING_STONE_2,
+        Constant.ID_BUILDING_STONE_3,
+        Constant.ID_BUILDING_STONE_4,
+    }
+    visible_before_ready = [
+        item for item in town["items"] if item[0] in stone_ids
+    ]
+    assert len(visible_before_ready) == 14, \
+        "version-3 repair did not restore only the missing legacy population"
+    assert all(item[1:3] != [70, 71] for item in visible_before_ready), \
+        "the pending source node was recreated before its cooldown"
 
     _set_now(_local(12, 13))
     get_player_info.get_player_info(UID)
     replacement = next(
         item for item in town["items"]
-        if item[0] in {
-            Constant.ID_BUILDING_STONE_1,
-            Constant.ID_BUILDING_STONE_2,
-            Constant.ID_BUILDING_STONE_3,
-            Constant.ID_BUILDING_STONE_4,
-        }
+        if item[0] in stone_ids and item[1:3] not in [
+            value[1:3] for value in visible_before_ready
+        ]
     )
     assert replacement[1:3] != [70, 71]
     assert get_player_info._position_is_wild(
@@ -1295,7 +1480,9 @@ def test_mineral_moves_outside_owned_land_after_regen_placeholder(tmp):
     town["items"] = [it for it in town["items"] if not it or int(it[0]) not in stone_ids]
     town["items"].append([Constant.ID_BUILDING_STONE_1, 44, 44, 0, _local(12, 10), 0])
     town["pendingMineralRespawns"] = []
-    town["naturalResourcePopulationRepairVersion"] = 2
+    town["naturalResourcePopulationRepairVersion"] = (
+        get_player_info._NATURAL_RESOURCE_POPULATION_REPAIR_VERSION
+    )
 
     # Client mines it out: removes the deposit, then places the regen object.
     command.command(UID, _batch([
@@ -1383,7 +1570,9 @@ def test_mature_mineral_deposit_respawns_as_one_cluster(tmp):
         item for item in town["items"]
         if not item or int(item[0]) not in stone_ids
     ]
-    town["naturalResourcePopulationRepairVersion"] = 2
+    town["naturalResourcePopulationRepairVersion"] = (
+        get_player_info._NATURAL_RESOURCE_POPULATION_REPAIR_VERSION
+    )
     sources = [(2 + index, 2) for index in range(6)]
     town["items"].extend([
         [Constant.ID_BUILDING_STONE_1, x, y, 0, _local(12, 10), 0]
@@ -1503,7 +1692,9 @@ def test_legacy_empty_map_gets_one_server_owned_resource_repair(tmp):
     get_player_info.get_player_info(UID, 0)
     marker = str(Constant.SUBCATFUNC_RESOURCE_REGEN)
     assert town["naturalResourcesInitialized"] == 1
-    assert town["naturalResourcePopulationRepairVersion"] == 2
+    assert town["naturalResourcePopulationRepairVersion"] == (
+        get_player_info._NATURAL_RESOURCE_POPULATION_REPAIR_VERSION
+    )
     tree_ids = {
         Constant.ID_BUILDING_TREE_1,
         Constant.ID_BUILDING_TREE_2,
@@ -1555,6 +1746,56 @@ def test_legacy_empty_map_gets_one_server_owned_resource_repair(tmp):
                    and item[1:3] == [74, 74]
                    for item in sessions.session(UID)["maps"][0]["items"]), \
         "legacy recovery reopened the client population shortcut"
+
+
+def test_deployed_resource_marker_self_heals_missing_minerals(tmp):
+    town = sessions.session(UID)["maps"][0]
+    gold_ids = set(get_player_info._MINERAL_RESPAWN_IDS["gold"])
+    stone_ids = set(get_player_info._MINERAL_RESPAWN_IDS["stone"])
+    mineral_ids = gold_ids | stone_ids | {
+        Constant.ID_BUILDING_REGEN_GOLD,
+        Constant.ID_BUILDING_REGEN_STONE,
+    }
+    town["items"] = [
+        item for item in town["items"]
+        if not item or int(item[0]) not in mineral_ids
+    ]
+    town["pendingMineralRespawns"] = []
+    town["naturalResourcesInitialized"] = 1
+    town["naturalResourceRecoveryVersion"] = 1
+    town["naturalResourcePopulationRepairVersion"] = 2
+
+    get_player_info.get_player_info(UID, 0)
+    gold = {
+        (int(item[0]), int(item[1]), int(item[2]))
+        for item in town["items"] if item and int(item[0]) in gold_ids
+    }
+    stone = {
+        (int(item[0]), int(item[1]), int(item[2]))
+        for item in town["items"] if item and int(item[0]) in stone_ids
+    }
+    assert len(gold) == 15 and len(stone) == 15, \
+        "deployed repair marker left gold/stone absent forever"
+    assert all(
+        get_player_info._position_is_wild(town, position[1:])
+        for position in gold | stone
+    )
+
+    persisted = (gold, stone)
+    reloaded = _reload()
+    get_player_info.get_player_info(UID, 0)
+    again_gold = {
+        (int(item[0]), int(item[1]), int(item[2]))
+        for item in reloaded["maps"][0]["items"]
+        if item and int(item[0]) in gold_ids
+    }
+    again_stone = {
+        (int(item[0]), int(item[1]), int(item[2]))
+        for item in reloaded["maps"][0]["items"]
+        if item and int(item[0]) in stone_ids
+    }
+    assert (again_gold, again_stone) == persisted, \
+        "server restart moved the repaired mineral deposits"
 
 
 def test_reload_marker_relocks_so_trees_do_not_wander(tmp):
@@ -2125,6 +2366,9 @@ TESTS = [
     test_social_staff_requires_target_acceptance_and_persists,
     test_round_table_rejects_fake_players_and_persists_real_rewards,
     test_live_enemy_camp_survives_reload_without_respawning,
+    test_orphaned_enemy_camp_gate_recovers_and_can_spawn_again,
+    test_split_and_legacy_enemy_camps_require_every_combatant,
+    test_tutorial_keeps_its_fixed_tree_and_enemy_targets,
     test_natural_resources_use_persisted_random_respawns,
     test_legacy_mineral_placeholders_migrate_without_resetting_timer,
     test_mineral_moves_outside_owned_land_after_regen_placeholder,
@@ -2132,6 +2376,7 @@ TESTS = [
     test_mature_mineral_deposit_respawns_as_one_cluster,
     test_scattered_legacy_minerals_are_reclustered_once,
     test_legacy_empty_map_gets_one_server_owned_resource_repair,
+    test_deployed_resource_marker_self_heals_missing_minerals,
     test_reload_marker_relocks_so_trees_do_not_wander,
     test_ship_quest_requires_a_fully_staffed_harbour,
     test_producer_limit_applies_across_upgrade_family,

@@ -86,6 +86,28 @@ def test_levelup_single_step_grants_only_that_level(tmp):
     assert sessions.session(UID)["playerInfo"]["cash"] == 1, "level 5 should grant exactly 1 cash"
 
 
+def test_levelup_mana_reward_survives_reload(tmp):
+    save = sessions.session(UID)
+    save["maps"][0]["level"] = 35
+    save["privateState"]["mana"] = 7
+
+    _do(Constant.CMD_RT_LEVEL_UP, [36])
+    assert save["privateState"]["mana"] == 9, \
+        "level 36 did not persist the configured +2 mana"
+    sessions.save_session(UID)
+    sessions.load_saved_villages()
+    reloaded = sessions.session(UID)
+    assert reloaded["privateState"]["mana"] == 9, \
+        "level-up mana disappeared after reload"
+
+    _do(Constant.CMD_RT_LEVEL_UP, [36])
+    assert reloaded["privateState"]["mana"] == 9, \
+        "replayed level-up duplicated mana"
+    _do(Constant.CMD_RT_LEVEL_UP, [38])
+    assert reloaded["privateState"]["mana"] == 13, \
+        "multi-level jump did not grant mana for both crossed levels"
+
+
 # --- Building upgrades and resource progression --------------------------
 # The Flash client upgrades in a two-command batch:
 #   sell(old, reason="UPGR"), buy(next, multiplier=1)
@@ -391,6 +413,7 @@ TESTS = [
     test_levelup_grants_cash_at_level_5,
     test_levelup_is_idempotent,
     test_levelup_single_step_grants_only_that_level,
+    test_levelup_mana_reward_survives_reload,
     test_upgrade_charges_next_tier_less_resale_credit,
     test_normal_sale_still_refunds_five_percent,
     test_resource_upgrade_chains_are_monotonic,

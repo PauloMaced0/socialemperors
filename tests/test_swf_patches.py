@@ -26,6 +26,18 @@ from tools.patch_tracing_performance_swf import (
     MARKER as BOUNDED_TRACING_MARKER,
     patched as bounded_tracing_patched,
 )
+from tools.patch_neighbor_loading_swf import (
+    MARKER as NEIGHBOR_LOADING_MARKER,
+    patched as neighbor_loading_patched,
+)
+from tools.patch_tournament_entry_swf import (
+    MARKER as TOURNAMENT_ENTRY_MARKER,
+    patched as tournament_entry_patched,
+)
+from tools.patch_enemy_camp_timer_swf import (
+    MARKER as ENEMY_CAMP_TIMER_MARKER,
+    patched as enemy_camp_timer_patched,
+)
 
 
 def test_enemy_click_dispatches_an_attack_instead_of_a_ground_move():
@@ -205,6 +217,44 @@ def test_legacy_debug_trace_history_is_bounded():
         "the Tracing patch marker exists without its history cap"
 
 
+def test_one_invalid_neighbor_object_cannot_wedge_map_loading():
+    data = DEFAULT_SWF.read_bytes()
+    assert neighbor_loading_patched(data), (
+        "a legacy neighbor object can still throw on every ENTER_FRAME and "
+        "leave the village loading blocker active forever"
+    )
+    if data[:3] == b"CWS":
+        data = b"FWS" + data[3:8] + zlib.decompress(data[8:])
+    assert data.count(NEIGHBOR_LOADING_MARKER) == 1, \
+        "the progressive neighbor-loader recovery fix is missing or duplicated"
+    assert data.count(b"Skipping invalid map object while loading") == 1, \
+        "the neighbor-loading marker exists without its recovery path"
+
+
+def test_daily_tournament_bots_cannot_wedge_the_results_window():
+    data = DEFAULT_SWF.read_bytes()
+    assert tournament_entry_patched(data), (
+        "daily-tournament bots still read portraits from a null daily config "
+        "and can leave the results popup on an infinite loading screen"
+    )
+    if data[:3] == b"CWS":
+        data = b"FWS" + data[3:8] + zlib.decompress(data[8:])
+    assert data.count(TOURNAMENT_ENTRY_MARKER) == 1, \
+        "the tournament-entry recovery fix is missing or duplicated"
+
+
+def test_live_enemy_camp_shows_enemy_count_without_respawning():
+    data = DEFAULT_SWF.read_bytes()
+    assert enemy_camp_timer_patched(data), (
+        "a persisted active camp still shows a false cooldown or can invoke "
+        "MapInitializer.spawnInit when its implementation timer expires"
+    )
+    if data[:3] == b"CWS":
+        data = b"FWS" + data[3:8] + zlib.decompress(data[8:])
+    assert data.count(ENEMY_CAMP_TIMER_MARKER) == 1, \
+        "the active-camp timer patch is missing or duplicated"
+
+
 def test_attack_click_patch_is_idempotent():
     data = DEFAULT_SWF.read_bytes()
     result, changed = patch_swf_bytes(data)
@@ -227,6 +277,9 @@ TESTS = [
     test_experimental_lifecycle_rewrite_is_not_bundled,
     test_hidden_debug_stats_do_not_accumulate_across_maps,
     test_legacy_debug_trace_history_is_bounded,
+    test_one_invalid_neighbor_object_cannot_wedge_map_loading,
+    test_daily_tournament_bots_cannot_wedge_the_results_window,
+    test_live_enemy_camp_shows_enemy_count_without_respawning,
     test_attack_click_patch_is_idempotent,
 ]
 

@@ -371,7 +371,7 @@ def get_tournament_info(user_id: str | None = None,
     """Return exactly the state consumed by ``TournamentManager``."""
     current = _local_now(now)
     save = sessions.session(str(user_id)) if user_id is not None else None
-    with _LOCK:
+    with _LOCK, sessions.session_lock(str(user_id)):
         if save is not None and _refresh_tournament(save, str(user_id), current):
             sessions.save_session(str(user_id))
         payload = {
@@ -399,7 +399,7 @@ def join_tournament(user_id: str, tournament_type_id: str, team,
     user_id = str(user_id)
     type_id = str(tournament_type_id)
     current = _local_now(now)
-    with _LOCK:
+    with _LOCK, sessions.session_lock(user_id):
         save = sessions.session(user_id)
         definition = _tournament_types().get(type_id)
         if save is None or definition is None:
@@ -435,7 +435,7 @@ def start_tournament_match(user_id: str, tournament_id: str,
                            victim_id: str,
                            now: datetime.datetime | None = None) -> dict:
     user_id = str(user_id)
-    with _LOCK:
+    with _LOCK, sessions.session_lock(user_id):
         save = sessions.session(user_id)
         tournament = (save or {}).get("privateState", {}).get(_ACTIVE_KEY)
         if not isinstance(tournament, dict) or str(tournament.get("tournament_id")) != str(tournament_id):
@@ -457,7 +457,7 @@ def finish_tournament_match(user_id: str, tournament_id: str,
                             now: datetime.datetime | None = None) -> dict:
     user_id = str(user_id)
     current = _local_now(now)
-    with _LOCK:
+    with _LOCK, sessions.session_lock(user_id):
         save = sessions.session(user_id)
         tournament = (save or {}).get("privateState", {}).get(_ACTIVE_KEY)
         if not isinstance(tournament, dict) or str(tournament.get("tournament_id")) != str(tournament_id):
@@ -493,7 +493,7 @@ def finish_tournament_match(user_id: str, tournament_id: str,
 def leave_tournament(user_id: str) -> dict:
     """Leave a started room.  Its entry slot remains consumed, with no refund."""
     user_id = str(user_id)
-    with _LOCK:
+    with _LOCK, sessions.session_lock(user_id):
         save = sessions.session(user_id)
         if save is not None:
             save.setdefault("privateState", {}).pop(_ACTIVE_KEY, None)
@@ -504,7 +504,7 @@ def leave_tournament(user_id: str) -> dict:
 def clean_tournament(user_id: str) -> dict:
     """Dismiss a finished bracket after its server-credited reward is shown."""
     user_id = str(user_id)
-    with _LOCK:
+    with _LOCK, sessions.session_lock(user_id):
         save = sessions.session(user_id)
         tournament = (save or {}).get("privateState", {}).get(_ACTIVE_KEY)
         if isinstance(tournament, dict) and tournament.get("date_finished") is None:

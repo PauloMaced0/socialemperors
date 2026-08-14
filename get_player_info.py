@@ -5,7 +5,9 @@ import random
 from sessions import (
     session, save_session, neighbor_session, neighbors,
     refresh_enemy_camp_timer, _display_name, _repair_social_building_state,
-    _repair_natural_resource_state, _ENEMY_CAMP_MARKER_IDS,
+    _repair_natural_resource_state, _repair_active_enemy_camps,
+    _repair_tutorial_targets, _tutorial_is_incomplete,
+    _ENEMY_CAMP_MARKER_IDS,
 )
 from engine import timestamp_now
 from constants import Constant
@@ -578,7 +580,7 @@ def _clustered_respawn_positions(
 # Stock MapInitializer creates three deposits of 4-6 nodes. The server owns
 # the durable population, with 21 retained as the legacy absolute maximum.
 _MINERAL_FAMILY_CAP = 21
-_NATURAL_RESOURCE_POPULATION_REPAIR_VERSION = 2
+_NATURAL_RESOURCE_POPULATION_REPAIR_VERSION = 3
 
 
 def _cluster_sizes(count):
@@ -631,14 +633,19 @@ def _recluster_visible_resources(town, families):
 
 
 def _repair_natural_resource_population(save, now):
-    """One-time repair for saves depleted by older non-persistent respawns.
+    """Repair saves depleted by older non-persistent respawns.
 
     Stock maps start with 160-300 trees and three 4-6-node clusters for each
     mineral, with 21 retained as the legacy ceiling. Count pending cooldowns
     as population so an ordinary harvest never receives a free replacement.
-    Only legacy maps below
-    the stock minimum are topped up, once, on empty wild land.
+    The old scattered layout and population are migrated once per repair
+    version. Version 3 specifically heals deployed version-2 saves whose
+    marker was persisted even though one mineral family was absent. Counting
+    pending timers prevents that migration from bypassing legitimate harvest
+    cooldowns.
     """
+    if _tutorial_is_incomplete(save):
+        return False
     changed = False
     families = {
         "tree": (
@@ -837,7 +844,7 @@ def _sync_natural_resource_reload_marker(save, map_idx):
     # respawn), otherwise the flag stays 0, the marker is cleared on EVERY
     # reload, and the client repopulation pass re-randomizes - i.e. visibly
     # "wanders" - the existing trees/minerals each time.
-    if not initialized and _town_has_natural_resources(town):
+    if tutorial_done and not initialized and _town_has_natural_resources(town):
         town["naturalResourcesInitialized"] = 1
         initialized = 1
     if tutorial_done and initialized:
@@ -867,14 +874,21 @@ def get_player_info(USERID, map_number=None):
     # means open, while [] means "still needs every worker".  Normalize on
     # every player load so a browser refresh can never bypass an entirely
     # unfilled Market, Stone Mine, or other staffed building.
+    tutorial_targets_changed = _repair_tutorial_targets(save)
+    camp_state_changed = _repair_active_enemy_camps(save)
     social_state_changed = _repair_social_building_state(save)
     natural_state_changed = _repair_natural_resource_state(save)
     animal_budget_changed = _refresh_daily_animal_budget(save, ts_now)
-    trees_changed = _respawn_mature_trees(save, ts_now)
-    minerals_changed = _respawn_mature_minerals(save, ts_now)
-    natural_population_changed = _repair_natural_resource_population(
-        save, ts_now
-    )
+    if _tutorial_is_incomplete(save):
+        trees_changed = False
+        minerals_changed = False
+        natural_population_changed = False
+    else:
+        trees_changed = _respawn_mature_trees(save, ts_now)
+        minerals_changed = _respawn_mature_minerals(save, ts_now)
+        natural_population_changed = _repair_natural_resource_population(
+            save, ts_now
+        )
     mission_progress_changed = _repair_persisted_mission_progress(save)
     save["playerInfo"]["last_logged_in"] = ts_now
     # dartsHasFree means "free game claimed (darts_new_free) but not yet
@@ -1016,7 +1030,9 @@ def get_player_info(USERID, map_number=None):
         "neighbors": neighbors(USERID)
     }
     if (
-        trees_changed
+        tutorial_targets_changed
+        or camp_state_changed
+        or trees_changed
         or minerals_changed
         or social_state_changed
         or natural_state_changed

@@ -176,6 +176,33 @@ def test_join_creates_ready_four_player_room_and_survives_restart():
     assert len(restored["players"]) == 4
 
 
+def test_every_tournament_type_builds_and_reopens_its_bracket():
+    zone = datetime.datetime.now().astimezone().tzinfo
+    monday = datetime.datetime(2026, 8, 3, 12, tzinfo=zone)
+    cases = [
+        (str(index + 1), monday + datetime.timedelta(days=index))
+        for index in range(7)
+    ] + [("8", monday)]
+    for type_id, now in cases:
+        _reset_tournament_state()
+        joined = tournaments.join_tournament(UID, type_id, TEAM, now)
+        tournament = joined.get("tournament")
+        assert tournament is not None, f"type {type_id} did not open"
+        assert tournament["tournament_type_id"] == type_id
+        assert len(tournament["players"]) == 4
+        assert all(
+            len(player.get("team", [])) == 20
+            for player in tournament["players"]
+        )
+        tournament_id = tournament["tournament_id"]
+
+        sessions.load_saved_villages()
+        reopened = tournaments.get_tournament_info(UID, now)["tournament"]
+        assert reopened["tournament_id"] == tournament_id, \
+            f"type {type_id} did not survive reopen"
+        assert len(reopened["players"]) == 4
+
+
 def test_match_lifecycle_is_idempotent_and_credits_one_daily_prize():
     _reset_tournament_state()
     joined = _join()
@@ -277,6 +304,26 @@ def test_fee_and_refund_commands_cancel_out():
     assert village["playerInfo"]["cash"] == cash0
 
 
+def test_selected_tournament_team_survives_reload():
+    import command as game_command
+    _reset_tournament_state()
+    packet = {
+        "ts": 1,
+        "first_number": 1,
+        "accessToken": "x",
+        "tries": 0,
+        "publishActions": [],
+        "commands": [{
+            "cmd": "set_attack_team",
+            "args": ["tournament", json.dumps(TEAM)],
+        }],
+    }
+    game_command.command(UID, packet)
+    sessions.load_saved_villages()
+    assert sessions.session(UID)["privateState"]["teams"]["tournament"] \
+        == TEAM
+
+
 def test_bundled_client_has_daily_and_first_place_patch():
     assert patched(DEFAULT_SWF.read_bytes()), (
         "Tournament cards still expose every type every day, or Weekly Gold "
@@ -289,10 +336,12 @@ TESTS = [
     test_tournament_economy_rebalance_and_weekly_fairness_config,
     test_closed_daily_type_refunds_instead_of_creating_room,
     test_join_creates_ready_four_player_room_and_survives_restart,
+    test_every_tournament_type_builds_and_reopens_its_bracket,
     test_match_lifecycle_is_idempotent_and_credits_one_daily_prize,
     test_weekly_gold_requires_first_place_against_configured_bots,
     test_leave_and_clean_validate_lifecycle,
     test_fee_and_refund_commands_cancel_out,
+    test_selected_tournament_team_survives_reload,
     test_bundled_client_has_daily_and_first_place_patch,
 ]
 

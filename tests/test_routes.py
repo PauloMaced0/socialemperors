@@ -330,32 +330,35 @@ def test_player_cards_and_visits_use_the_saved_empire_name():
     assert card["name"] == "Rival Kingdom"
 
 
-def test_level_14_arthur_village_finishes_loading():
+def test_every_arthur_village_tier_finishes_loading():
     c = _client(logged_in_as=UID)
-    r = c.post(
-        API + "/get_player_info.php",
-        data={
-            "USERID": UID, "user": "100000031", "map": "0",
-            "user_key": "k", "language": "en", "client_id": "1",
-        },
-    )
-    assert r.status_code == 200, "Arthur's level 11-20 village failed to load"
-    body = r.get_json()
-    assert body["result"] == "ok"
-    assert body["playerInfo"]["name"] and isinstance(body["map"]["items"], list)
-    # A 200 alone did not prove the visit works: Arthur's bundled save omits the
-    # privateState/map fields the client reads on load, and their absence makes
-    # the loader silently loop 0->100 forever. The visit response must be seeded
-    # the same way a self-load is.
-    ps = body["privateState"]
-    assert isinstance(ps.get("collections"), list) and len(ps["collections"]) >= 24, \
-        "neighbor visit not seeded with collections -> client loading bar loops"
-    assert ps["collections"][0] == []
-    assert isinstance(ps.get("templeStep"), list)
-    assert isinstance(ps.get("attacksReceived"), list)
-    assert ps.get("dartsHasFree") in (0, 1), "dartsHasFree must be numeric 0/1"
-    m = body["map"]
-    assert "warehousedUnits" in m and "numTradesDone" in m
+    # The client picks one of three Arthur maps according to player level. The
+    # previous regression covered only the middle map, while high-level players
+    # actually visit the much larger 100000032 map.
+    for arthur_id in ("100000030", "100000031", "100000032"):
+        r = c.post(
+            API + "/get_player_info.php",
+            data={
+                "USERID": UID, "user": arthur_id, "map": "0",
+                "user_key": "k", "language": "en", "client_id": "1",
+            },
+        )
+        assert r.status_code == 200, f"Arthur village {arthur_id} failed to load"
+        body = r.get_json()
+        assert body["result"] == "ok"
+        assert body["playerInfo"]["name"] and isinstance(body["map"]["items"], list)
+        # A 200 alone does not prove the visit works: Arthur's bundled saves
+        # omit privateState/map fields the Flash loader reads. Their absence
+        # makes the loading bar loop forever, so every tier must be seeded.
+        ps = body["privateState"]
+        assert isinstance(ps.get("collections"), list) and len(ps["collections"]) >= 24, \
+            "neighbor visit not seeded with collections -> client loading bar loops"
+        assert ps["collections"][0] == []
+        assert isinstance(ps.get("templeStep"), list)
+        assert isinstance(ps.get("attacksReceived"), list)
+        assert ps.get("dartsHasFree") in (0, 1), "dartsHasFree must be numeric 0/1"
+        m = body["map"]
+        assert "warehousedUnits" in m and "numTradesDone" in m
 
 
 def test_ruffle_page_uses_current_origin_and_supported_autoplay():
@@ -561,7 +564,7 @@ TESTS = [
     test_friends_page_links_and_unlinks_real_players_reciprocally,
     test_pvp_continent_requires_login,
     test_player_cards_and_visits_use_the_saved_empire_name,
-    test_level_14_arthur_village_finishes_loading,
+    test_every_arthur_village_tier_finishes_loading,
     test_ruffle_page_uses_current_origin_and_supported_autoplay,
     test_nginx_forwarded_origin_needs_no_body_substitution,
     test_missing_asset_returns_404_not_500,
