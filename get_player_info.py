@@ -6,7 +6,8 @@ from sessions import (
     session, save_session, neighbor_session, neighbors,
     refresh_enemy_camp_timer, _display_name, _repair_social_building_state,
     _repair_natural_resource_state, _repair_active_enemy_camps,
-    _repair_tutorial_targets, _tutorial_is_incomplete,
+    _repair_tutorial_progress, _repair_tutorial_targets,
+    _tutorial_is_incomplete,
     _ENEMY_CAMP_MARKER_IDS,
 )
 from engine import timestamp_now
@@ -874,6 +875,7 @@ def get_player_info(USERID, map_number=None):
     # means open, while [] means "still needs every worker".  Normalize on
     # every player load so a browser refresh can never bypass an entirely
     # unfilled Market, Stone Mine, or other staffed building.
+    tutorial_progress_changed = _repair_tutorial_progress(save)
     tutorial_targets_changed = _repair_tutorial_targets(save)
     camp_state_changed = _repair_active_enemy_camps(save)
     social_state_changed = _repair_social_building_state(save)
@@ -1030,7 +1032,8 @@ def get_player_info(USERID, map_number=None):
         "neighbors": neighbors(USERID)
     }
     if (
-        tutorial_targets_changed
+        tutorial_progress_changed
+        or tutorial_targets_changed
         or camp_state_changed
         or trees_changed
         or minerals_changed

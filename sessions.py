@@ -40,6 +40,7 @@ __saves = {}  # ALL saved villages
 # tournament helpers call get/save helpers while already holding this lock.
 __session_locks = {}
 __session_locks_guard = threading.Lock()
+_KNOWN_UNIT_IDS = None
 
 
 def session_lock(USERID: str):
@@ -51,6 +52,136 @@ def session_lock(USERID: str):
             lock = threading.RLock()
             __session_locks[key] = lock
         return lock
+
+
+def _known_unit_ids() -> set[int]:
+    global _KNOWN_UNIT_IDS
+    if _KNOWN_UNIT_IDS is None:
+        from get_game_config import get_game_config
+        _KNOWN_UNIT_IDS = {
+            int(value["id"])
+            for value in get_game_config().get("items", [])
+            if str(value.get("type")) == "u"
+        }
+    return _KNOWN_UNIT_IDS
+
+
+def sync_discovered_units(save: dict) -> bool:
+    """Persist every player-owned unit type ever obtained.
+
+    The Flash collection book reads ``privateState.boughtUnits`` but only
+    updated its in-memory manager when a unit was created.  This rebuilds and
+    extends the durable discovery set from every authoritative ownership
+    location.  Discoveries are never removed when a unit dies, is sold, or is
+    deployed from storage.
+    """
+    state = save.setdefault("privateState", {})
+    known = _known_unit_ids()
+    discovered = set()
+    migrating_legacy = not bool(state.get("unitDiscoveryLedger"))
+    for raw_id in state.get("boughtUnits", []) or []:
+        try:
+            unit_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if unit_id in known:
+            discovered.add(unit_id)
+
+    # Old clients also remembered publishable achievements and previously
+    # selected teams. Use those only for one legacy migration: a team choice
+    # is not ownership evidence for subsequent server-authoritative updates.
+    if migrating_legacy:
+        for raw_id in state.get("achievedUnits", []) or []:
+            try:
+                unit_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if unit_id in known:
+                discovered.add(unit_id)
+        teams = state.get("teams", {})
+        if isinstance(teams, dict):
+            for team in teams.values():
+                if not isinstance(team, list):
+                    continue
+                for raw_id in team:
+                    try:
+                        unit_id = int(raw_id)
+                    except (TypeError, ValueError):
+                        continue
+                    if unit_id in known:
+                        discovered.add(unit_id)
+
+    gifts = state.get("gifts")
+    if isinstance(gifts, list):
+        for unit_id, raw_count in enumerate(gifts):
+            try:
+                count = int(raw_count or 0)
+            except (TypeError, ValueError):
+                continue
+            if unit_id in known and count > 0:
+                discovered.add(unit_id)
+    for key in ("deadHeroes",):
+        raw = state.get(key)
+        if isinstance(raw, dict):
+            for raw_id, raw_count in raw.items():
+                try:
+                    unit_id, count = int(raw_id), int(raw_count)
+                except (TypeError, ValueError):
+                    continue
+                if unit_id in known and count > 0:
+                    discovered.add(unit_id)
+
+    from get_game_config import get_attribute_from_item_id
+    for town in save.get("maps", []):
+        for key in ("store", "warehousedUnits"):
+            raw = town.get(key)
+            if isinstance(raw, dict):
+                values = raw.items()
+            elif isinstance(raw, list):
+                values = ((value, 1) for value in raw)
+            else:
+                values = ()
+            for raw_id, raw_count in values:
+                try:
+                    unit_id, count = int(raw_id), int(raw_count)
+                except (TypeError, ValueError):
+                    continue
+                if unit_id in known and count > 0:
+                    discovered.add(unit_id)
+
+        roster = {
+            (int(value[0]), int(value[1]), int(value[2]))
+            for value in town.get("enemyCampRoster", []) or []
+            if isinstance(value, list) and len(value) >= 3
+        }
+        human_town = str(town.get("race", "h")) == "h"
+        for item in town.get("items", []) or []:
+            if not isinstance(item, list) or len(item) < 3:
+                continue
+            try:
+                unit_id = int(item[0])
+                key = (unit_id, int(item[1]), int(item[2]))
+            except (TypeError, ValueError):
+                continue
+            if unit_id not in known or key in roster:
+                continue
+            # Human villages persist tutorial/camp trolls in the same item
+            # array. Config race 't' identifies those hostiles; recruitable
+            # friendly/good trolls use race 'h'. Troll towns legitimately own
+            # their race-'t' army, so only apply this exclusion to human maps.
+            if human_town and str(
+                get_attribute_from_item_id(unit_id, "race")
+            ) == "t":
+                continue
+            discovered.add(unit_id)
+
+    normalized = sorted(discovered)
+    old = state.get("boughtUnits")
+    state["unitDiscoveryLedger"] = 1
+    if old == normalized and not migrating_legacy:
+        return False
+    state["boughtUnits"] = normalized
+    return True
 
 __initial_village = json.load(open(os.path.join(VILLAGES_DIR, "initial.json")))
 
@@ -226,26 +357,156 @@ def _tutorial_is_incomplete(save: dict) -> bool:
         return True
 
 
+_TUTORIAL_FINAL_STEP = 15
+
+
+def tutorial_step(save: dict) -> int:
+    """Return the last durable starter-tutorial step (0..15)."""
+    state = save.setdefault("privateState", {})
+    try:
+        step = int(state.get("tutorialStep", 0) or 0)
+    except (TypeError, ValueError):
+        step = 0
+    return max(0, min(_TUTORIAL_FINAL_STEP, step))
+
+
+def advance_tutorial_step(save: dict, step: int) -> bool:
+    """Monotonically persist starter-tutorial progress.
+
+    ``completed_tutorial`` remains the stock boolean consumed by the client;
+    ``tutorialStep`` is the resumable checkpoint used by the patched client.
+    Keeping them separate avoids the stock behavior where any non-zero step
+    was incorrectly treated as a fully completed tutorial.
+    """
+    state = save.setdefault("privateState", {})
+    try:
+        requested = int(step)
+    except (TypeError, ValueError):
+        return False
+    requested = max(0, min(_TUTORIAL_FINAL_STEP, requested))
+    previous = tutorial_step(save)
+    changed = False
+    if requested > previous:
+        state["tutorialStep"] = requested
+        changed = True
+    elif "tutorialStep" not in state:
+        state["tutorialStep"] = previous
+        changed = True
+    if not state.get("tutorialProgressLedger"):
+        state["tutorialProgressLedger"] = 1
+        changed = True
+    if requested >= _TUTORIAL_FINAL_STEP and _tutorial_is_incomplete(save):
+        save.setdefault("playerInfo", {})["completed_tutorial"] = 1
+        changed = True
+    return changed
+
+
+def _repair_tutorial_progress(save: dict) -> bool:
+    """Migrate old partial tutorials and choose a safe reload checkpoint.
+
+    Previous server builds discarded every ``complete_tutorial`` command below
+    step 15.  Existing map mutations nevertheless survived, so infer the two
+    irreversible milestones which would otherwise make replay impossible:
+    placing the tutorial House and defeating a tutorial Troll.  The migration
+    runs once; new villages carry an explicit progress ledger from creation.
+    """
+    state = save.setdefault("privateState", {})
+    changed = False
+    if not _tutorial_is_incomplete(save):
+        if tutorial_step(save) < _TUTORIAL_FINAL_STEP:
+            state["tutorialStep"] = _TUTORIAL_FINAL_STEP
+            changed = True
+        if not state.get("tutorialProgressLedger"):
+            state["tutorialProgressLedger"] = 1
+            changed = True
+        return changed
+
+    if not state.get("tutorialProgressLedger"):
+        inferred = tutorial_step(save)
+        if save.get("maps"):
+            town = save["maps"][0]
+            items = town.get("items", []) or []
+            initial_items = __initial_village["maps"][0].get("items", [])
+            initial_trolls = sum(
+                1 for item in initial_items
+                if item and int(item[0]) == Constant.ID_UNIT_TROLL_1
+            )
+            current_trolls = sum(
+                1 for item in items
+                if item and int(item[0]) == Constant.ID_UNIT_TROLL_1
+            )
+            initial_houses = sum(
+                1 for item in initial_items
+                if item and int(item[0]) == Constant.ID_BUILDING_HOUSE_1
+            )
+            current_houses = sum(
+                1 for item in items
+                if item and int(item[0]) == Constant.ID_BUILDING_HOUSE_1
+            )
+            if current_trolls < initial_trolls:
+                inferred = max(inferred, 14)
+            elif current_houses > initial_houses:
+                inferred = max(inferred, 11)
+        state["tutorialStep"] = max(0, min(14, inferred))
+        state["tutorialProgressLedger"] = 1
+        changed = True
+
+    # Several steps depend on client-only selection/cursor state. Resume from
+    # the preceding stable instruction after a reload: reselect the Villager,
+    # reopen Build, or reselect the Knight. Irreversible map actions still win
+    # and jump forward to their post-action checkpoint.
+    step = tutorial_step(save)
+    if save.get("maps"):
+        items = save["maps"][0].get("items", []) or []
+        initial_houses = sum(
+            1 for item in __initial_village["maps"][0].get("items", [])
+            if item and int(item[0]) == Constant.ID_BUILDING_HOUSE_1
+        )
+        houses = sum(
+            1 for item in items
+            if item and int(item[0]) == Constant.ID_BUILDING_HOUSE_1
+        )
+        trolls = sum(
+            1 for item in items
+            if item and int(item[0]) == Constant.ID_UNIT_TROLL_1
+        )
+        resume = step
+        if 4 <= step <= 6:
+            resume = 3
+        elif 9 <= step <= 10:
+            resume = 11 if houses > initial_houses else 8
+        elif 12 <= step <= 13:
+            resume = 11 if trolls else 14
+        if resume != step:
+            state["tutorialStep"] = resume
+            changed = True
+    return changed
+
+
 def _repair_tutorial_targets(save: dict) -> bool:
-    """Keep the fixed tree and troll targets required by TutorialMain.
+    """Keep only the fixed targets still required by TutorialMain.
 
     Tutorial arrows use the original starter-map coordinates.  The generic
-    natural-resource migration used to move those trees before the first
-    frame; a reload after harvesting/killing a target then restarted the
-    tutorial with nothing under its arrow.  Reuse existing matching objects
-    where possible (so old migrated saves do not exceed resource caps) and
-    clear duplicate tree cooldowns for the restored tutorial tiles.
+    natural-resource migration could move those trees before their lesson.
+    Reuse existing matching objects where possible (so old migrated saves do
+    not exceed resource caps) and clear duplicate cooldowns for restored tree
+    tiles. Once the relevant step has passed, never recreate consumed trees or
+    Trolls merely because the browser reloaded.
     """
     if not _tutorial_is_incomplete(save) or not save.get("maps"):
         return False
     town = save["maps"][0]
     items = town.setdefault("items", [])
+    progress = tutorial_step(save)
     required = [
         copy.deepcopy(item)
         for item in __initial_village["maps"][0].get("items", [])
         if item and (
-            int(item[0]) in _TREE_RESOURCE_IDS
-            or int(item[0]) == Constant.ID_UNIT_TROLL_1
+            (int(item[0]) in _TREE_RESOURCE_IDS and progress <= 6)
+            or (
+                int(item[0]) == Constant.ID_UNIT_TROLL_1
+                and progress <= 13
+            )
         )
     ]
     required_tiles = {
@@ -750,6 +1011,8 @@ def load_saved_villages():
         save["privateState"].setdefault("neighbors", [])
         __saves[str(USERID)] = save
         modified = migrate_loaded_save(save) # check save version for migration
+        if _repair_tutorial_progress(save):
+            modified = True
         if _repair_broken_troll_towns(save):
             modified = True
         if _repair_active_enemy_camps(save):
@@ -767,6 +1030,8 @@ def load_saved_villages():
         if _repair_monster_nest_state(save):
             modified = True
         if _repair_graveyard_state(save):
+            modified = True
+        if sync_discovered_units(save):
             modified = True
         if modified:
             save_session(USERID)
@@ -1182,6 +1447,7 @@ def save_session(USERID: str):
     file = f"{USERID}.save.json"
     print(f" * Saving village at {file}... ", end='')
     village = session(USERID)
+    sync_discovered_units(village)
     # Atomic write: dump to a temp file in the same dir, then replace the target.
     # A crash mid-write cannot corrupt an existing save. The temp name must be
     # unique: Flask can process two requests for the same village concurrently,

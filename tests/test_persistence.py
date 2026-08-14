@@ -19,6 +19,7 @@ import sessions
 import command
 import engine
 from constants import Constant
+from get_game_config import get_game_config
 
 UID = "test-uid-0001"
 FARM_ID = 10          # "Farm Land", collect 15 food
@@ -408,9 +409,16 @@ def test_darts_new_free_stamps_claim(tmp):
 
 def test_unit_collection_completed_grants_cash_once(tmp):
     """Completing a unit collection marks it done and grants +1 cash, once."""
-    ps = sessions.session(UID)["privateState"]
+    save = sessions.session(UID)
+    ps = save["privateState"]
     ps["unitCollectionsCompleted"] = []
-    sessions.session(UID)["playerInfo"]["cash"] = 0
+    save["playerInfo"]["cash"] = 0
+    categories = get_game_config()["units_collections_categories"]
+    save["maps"][0]["store"] = {
+        str(unit_id): 1
+        for collection_id in (5, 6)
+        for unit_id in categories[str(collection_id)]["units"]
+    }
     command.command(UID, _batch([{"cmd": Constant.CMD_UNIT_COLLECTION_COMPLETED, "args": [5]}]))
     disk = json.load(open(os.path.join(tmp, f"{UID}.save.json")))
     assert 5 in disk["privateState"]["unitCollectionsCompleted"], "collection not marked done"
@@ -420,6 +428,59 @@ def test_unit_collection_completed_grants_cash_once(tmp):
     assert sessions.session(UID)["playerInfo"]["cash"] == 1, "cash double-granted"
     command.command(UID, _batch([{"cmd": Constant.CMD_UNIT_COLLECTION_COMPLETED, "args": [6]}]))
     assert sessions.session(UID)["playerInfo"]["cash"] == 2, "second collection cash missing"
+
+
+def test_unit_collection_uses_durable_discoveries_not_current_army(tmp):
+    save = sessions.session(UID)
+    required = [
+        int(value) for value in
+        get_game_config()["units_collections_categories"]["5"]["units"]
+    ]
+    save["maps"][0]["store"] = {str(value): 1 for value in required}
+    sessions.save_session(UID)
+    assert set(required).issubset(save["privateState"]["boughtUnits"])
+
+    # Once discovered, removing every physical copy must not erase the book.
+    save["maps"][0]["store"] = {}
+    sessions.save_session(UID)
+    sessions.load_saved_villages()
+    restored = sessions.session(UID)
+    assert set(required).issubset(restored["privateState"]["boughtUnits"])
+
+    restored["privateState"]["unitCollectionsCompleted"] = []
+    restored["playerInfo"]["cash"] = 0
+    command.command(UID, _batch([{
+        "cmd": Constant.CMD_UNIT_COLLECTION_COMPLETED,
+        "args": [5],
+    }]))
+    assert restored["playerInfo"]["cash"] == 1
+
+
+def test_hostile_tutorial_units_are_not_discovered(tmp):
+    save = sessions.session(UID)
+    save["privateState"]["boughtUnits"] = []
+    sessions.sync_discovered_units(save)
+    assert 512 in save["privateState"]["boughtUnits"]
+    assert 516 in save["privateState"]["boughtUnits"]
+    assert 525 not in save["privateState"]["boughtUnits"], \
+        "the tutorial Small Troll was mistaken for a player discovery"
+
+
+def test_collection_book_unit_purchase_persists_and_uses_config_price(tmp):
+    save = sessions.session(UID)
+    save["playerInfo"]["cash"] = 100
+    save["maps"][0]["store"] = {}
+    # Heavy Draggy is the first Draggies II item. A malformed legacy [null]
+    # override used to show/pay zero; the category's intended price is 15.
+    command.command(UID, _batch([{
+        "cmd": Constant.CMD_BUY_STORED_ITEM_CASH,
+        "args": [0, 768, 0],
+    }]))
+    sessions.load_saved_villages()
+    restored = sessions.session(UID)
+    assert restored["playerInfo"]["cash"] == 85
+    assert restored["maps"][0]["store"]["768"] == 1
+    assert 768 in restored["privateState"]["boughtUnits"]
 
 
 def test_apply_rewards_ranking_grants_cash_and_items(tmp):
@@ -437,6 +498,9 @@ def test_apply_rewards_ranking_grants_cash_and_items(tmp):
 
 TESTS = [
     test_unit_collection_completed_grants_cash_once,
+    test_unit_collection_uses_durable_discoveries_not_current_army,
+    test_hostile_tutorial_units_are_not_discovered,
+    test_collection_book_unit_purchase_persists_and_uses_config_price,
     test_apply_rewards_ranking_grants_cash_and_items,
     test_darts_flow_persists,
     test_darts_prize_packet_is_one_time_across_reload,

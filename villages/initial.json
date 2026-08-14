@@ -67,6 +67,8 @@
         }
     ],
     "privateState": {
+        "tutorialStep": 0,
+        "tutorialProgressLedger": 1,
         "gifts": [],
         "neighborAssists": {},
         "completedMissions": [],

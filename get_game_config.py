@@ -1,6 +1,7 @@
 import json
 import os
 import datetime
+import copy
 import jsonpatch
 from bundle import MODS_DIR, CONFIG_DIR, CONFIG_PATCH_DIR
 
@@ -208,6 +209,11 @@ def fix_tournament_economy() -> None:
     the risk/reward balance while making those brackets usable.
     """
     tournaments = __game_config.get("tournament_type", {})
+    for definition in tournaments.values():
+        # Shared local-server brackets have five real-player slots during the
+        # admission day.  Empty slots are filled by bots only when battles
+        # begin, so the client room must wait for the same five-player target.
+        definition["num_players"] = 5
     for type_id in ("4", "6"):
         definition = tournaments.get(type_id)
         if not definition:
@@ -217,14 +223,41 @@ def fix_tournament_economy() -> None:
             if "c" in prize:
                 prize["c"] = int(prize.get("c", 0) or 0) // 2
 
-    # A weekly bracket on this local server contains the player and the three
-    # configured arena bots.  Keeping the original top-ten reward table would
-    # award every entrant a rare dragon automatically.  Expose only the
-    # first-place prize; the service also requires all three matches and rank
-    # one before crediting it.
+    # The gold bracket can contain five real players, with configured bots
+    # filling only the empty admission slots. Keeping the original top-ten
+    # reward table would award every entrant a rare dragon automatically.
+    # Expose only the first-place prize; the service also requires all four
+    # matches and rank one before crediting it.
     weekly = tournaments.get("8")
     if weekly and weekly.get("prize"):
+        # Type 8 now joins the same non-overlapping two-day rotation as every
+        # other bracket, so it is no longer a simultaneously running weekly
+        # event. Keep the distinctive gold bracket without the misleading
+        # schedule name.
+        weekly["name"] = "GOLD TOURNAMENT"
         weekly["prize"] = weekly["prize"][:1]
+        opponents = weekly.setdefault("weekly_opponent", {})
+        if opponents and "10000004" not in opponents:
+            # The stock data contains three arena opponents. Five-player rooms
+            # need a fourth one when only one human enters before admission
+            # closes. Reuse the last configured army/art and give it a stable
+            # identity understood by the patched client.
+            template = copy.deepcopy(next(reversed(opponents.values())))
+            template["user_name"] = "Arena Champion"
+            opponents["10000004"] = template
+
+    # The stock help predates five-player rooms and says the player faces
+    # three opponents. Keep the tutorial copy consistent with the four-match
+    # bracket used by the server and client.
+    for literal in __game_config.get("localization_strings", []):
+        if (
+            isinstance(literal, dict)
+            and literal.get("name") == "TOURNAMENT_HELP_TEXT"
+        ):
+            literal["text"] = str(literal.get("text") or "").replace(
+                "Play against 3 players",
+                "Play against 4 opponents",
+            )
 
 
 fix_tournament_economy()

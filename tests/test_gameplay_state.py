@@ -1183,6 +1183,8 @@ def test_tutorial_keeps_its_fixed_tree_and_enemy_targets(tmp):
     starter = json.load(open(os.path.join("villages", "initial.json")))
     save = sessions.session(UID)
     save["playerInfo"]["completed_tutorial"] = 0
+    save["privateState"]["tutorialStep"] = 0
+    save["privateState"]["tutorialProgressLedger"] = 1
     save["maps"][0] = starter["maps"][0]
     save["privateState"]["arrayAnimals"] = {}
     town = save["maps"][0]
@@ -1218,7 +1220,8 @@ def test_tutorial_keeps_its_fixed_tree_and_enemy_targets(tmp):
     assert town["naturalResourcesInitialized"] == 1, \
         "accepted tutorial resource population was not locked for reload"
 
-    # Reproduce a browser reload after those tutorial targets were consumed.
+    # Before their lessons, moved/missing fixed targets are restored under the
+    # stock arrows.
     town["items"] = [
         item for item in town["items"]
         if not (
@@ -1247,8 +1250,21 @@ def test_tutorial_keeps_its_fixed_tree_and_enemy_targets(tmp):
     assert town["pendingTreeRespawns"] == [], \
         "restored tutorial tree retained a duplicate cooldown"
 
+    # Once combat has advanced, consumed targets must stay consumed. Re-adding
+    # them after reload leaves the attack lesson pointing at stale/reborn data.
+    save["privateState"]["tutorialStep"] = 14
+    town["items"] = [
+        item for item in town["items"]
+        if int(item[0]) != Constant.ID_UNIT_TROLL_1
+    ]
+    get_player_info.get_player_info(UID)
+    assert not any(
+        int(item[0]) == Constant.ID_UNIT_TROLL_1 for item in town["items"]
+    ), "completed tutorial combat targets respawned on reload"
+
     command.do_command(UID, Constant.CMD_COMPLETE_TUTORIAL, [14])
     assert save["playerInfo"]["completed_tutorial"] == 0
+    assert save["privateState"]["tutorialStep"] == 14
     command.do_command(UID, Constant.CMD_COMPLETE_TUTORIAL, [15])
     assert save["playerInfo"]["completed_tutorial"] == 1, \
         "finished starter tutorial would restart after reload"
@@ -1256,6 +1272,86 @@ def test_tutorial_keeps_its_fixed_tree_and_enemy_targets(tmp):
     assert town["naturalResourcePopulationRepairVersion"] == (
         get_player_info._NATURAL_RESOURCE_POPULATION_REPAIR_VERSION
     ), "normal resource lifecycle did not begin after tutorial completion"
+
+
+def test_partial_tutorial_progress_and_irreversible_actions_survive_reload(tmp):
+    starter = json.load(open(os.path.join("villages", "initial.json")))
+    save = sessions.session(UID)
+    save["playerInfo"]["completed_tutorial"] = 0
+    save["maps"][0] = starter["maps"][0]
+    save["privateState"]["tutorialStep"] = 0
+    save["privateState"]["tutorialProgressLedger"] = 1
+
+    command.do_command(UID, Constant.CMD_COMPLETE_TUTORIAL, [8])
+    assert save["privateState"]["tutorialStep"] == 8
+    sessions.save_session(UID)
+    restored = _reload()
+    payload = get_player_info.get_player_info(UID)
+    assert payload["privateState"]["tutorialStep"] == 8, \
+        "partial tutorial reloaded at step zero"
+
+    # A selected unit/build cursor is not serializable. Reload from stable
+    # checkpoints instead of returning to an action that needs lost UI state.
+    restored["privateState"]["tutorialStep"] = 5
+    get_player_info.get_player_info(UID)
+    assert restored["privateState"]["tutorialStep"] == 3
+    restored["privateState"]["tutorialStep"] = 12
+    get_player_info.get_player_info(UID)
+    assert restored["privateState"]["tutorialStep"] == 11
+    restored["privateState"]["tutorialStep"] = 8
+
+    # A placed House is a stronger checkpoint than an unflushed UI callback.
+    command.do_command(UID, Constant.CMD_BUY, [
+        Constant.ID_BUILDING_HOUSE_1, 60, 60, 0, 0, 0, 1, "b",
+    ])
+    assert restored["privateState"]["tutorialStep"] == 11
+    sessions.save_session(UID)
+    restored = _reload()
+    assert restored["privateState"]["tutorialStep"] == 11, \
+        "reload asked the player to place the persisted House again"
+
+    # Killing a starter Troll advances to congratulations even if the client
+    # attack overlay failed to enqueue complete_tutorial before reload.
+    command.do_command(UID, Constant.CMD_KILL, [
+        40, 40, Constant.ID_UNIT_TROLL_1, 0, "u",
+    ])
+    assert restored["privateState"]["tutorialStep"] == 14
+    sessions.save_session(UID)
+    restored = _reload()
+    payload = get_player_info.get_player_info(UID)
+    assert payload["privateState"]["tutorialStep"] == 14
+    assert not any(
+        item[0:3] == [Constant.ID_UNIT_TROLL_1, 40, 40]
+        for item in restored["maps"][0]["items"]
+    ), "defeated tutorial Troll returned after reload"
+
+
+def test_legacy_partial_tutorial_recovers_from_persisted_map_actions(tmp):
+    starter = json.load(open(os.path.join("villages", "initial.json")))
+    save = sessions.session(UID)
+    save["playerInfo"]["completed_tutorial"] = 0
+    save["maps"][0] = starter["maps"][0]
+    save["privateState"].pop("tutorialStep", None)
+    save["privateState"].pop("tutorialProgressLedger", None)
+    save["maps"][0]["items"].append([
+        Constant.ID_BUILDING_HOUSE_1, 60, 60, 0, 1, 0,
+    ])
+    assert sessions._repair_tutorial_progress(save)
+    assert save["privateState"]["tutorialStep"] == 11, \
+        "legacy placed House was not recognized"
+
+    save["privateState"].pop("tutorialStep", None)
+    save["privateState"].pop("tutorialProgressLedger", None)
+    save["maps"][0]["items"] = [
+        item for item in save["maps"][0]["items"]
+        if not (
+            int(item[0]) == Constant.ID_UNIT_TROLL_1
+            and int(item[1]) == 40 and int(item[2]) == 40
+        )
+    ]
+    assert sessions._repair_tutorial_progress(save)
+    assert save["privateState"]["tutorialStep"] == 14, \
+        "legacy defeated Troll was not recognized"
 
 
 def test_natural_resources_use_persisted_random_respawns(tmp):
@@ -2369,6 +2465,8 @@ TESTS = [
     test_orphaned_enemy_camp_gate_recovers_and_can_spawn_again,
     test_split_and_legacy_enemy_camps_require_every_combatant,
     test_tutorial_keeps_its_fixed_tree_and_enemy_targets,
+    test_partial_tutorial_progress_and_irreversible_actions_survive_reload,
+    test_legacy_partial_tutorial_recovers_from_persisted_map_actions,
     test_natural_resources_use_persisted_random_respawns,
     test_legacy_mineral_placeholders_migrate_without_resetting_timer,
     test_mineral_moves_outside_owned_land_after_regen_placeholder,

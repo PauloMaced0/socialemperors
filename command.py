@@ -8,7 +8,8 @@ from sessions import (
     session, save_session, fresh_town_map, neighbor_session, is_friend,
     is_enemy_camp_marker, mark_enemy_camp_active,
     is_natural_resource, is_depleted_resource_placeholder,
-    session_lock,
+    session_lock, sync_discovered_units, advance_tutorial_step,
+    _tutorial_is_incomplete,
 )
 from get_game_config import get_game_config, get_level_from_xp, get_name_from_item_id, get_attribute_from_mission_id, get_xp_from_level, get_attribute_from_item_id, get_item_from_subcat_functional
 from constants import Constant
@@ -935,6 +936,29 @@ def _consume_stored_item(town, item_id):
     return True
 
 
+def _unit_collection_cash_cost(item_id):
+    """Return the authoritative collection-book price for one unit."""
+    item_id = int(item_id)
+    categories = get_game_config().get("units_collections_categories", {})
+    for definition in categories.values():
+        units = [int(value) for value in definition.get("units", [])]
+        if item_id not in units:
+            continue
+        index = units.index(item_id)
+        costs = definition.get("costs")
+        raw_cost = (
+            costs[index]
+            if isinstance(costs, list) and index < len(costs)
+            else definition.get("cost")
+        )
+        try:
+            cost = int(raw_cost)
+        except (TypeError, ValueError):
+            cost = int(definition.get("cost", 0) or 0)
+        return max(0, cost)
+    return None
+
+
 def _stash_stored_staff(town, item_id, attrs):
     """Preserve a staffed building's opened/staffing state while it sits in
     storage. ``map.store`` only tracks a count per id, so without this a stored
@@ -1506,6 +1530,15 @@ def do_command(USERID, cmd, args):
         if _social_item(id) is not None:
             placed += [[], {"si": []}]
         map["items"].append(placed)
+        if (
+            _tutorial_is_incomplete(save)
+            and not bool_dont_modify_resources
+            and int(id) == Constant.ID_BUILDING_HOUSE_1
+        ):
+            # The House is an irreversible tutorial action. Record its stable
+            # post-placement checkpoint even if the following client tutorial
+            # command has not been flushed before a browser reload.
+            advance_tutorial_step(save, 11)
         if int(id) == Constant.ID_BUILDING_UNIT_WAREHOUSE:
             _initialize_unit_warehouse(map)
         if int(id) == Constant.ID_BUILDING_MONSTERS_NEST:
@@ -1517,13 +1550,7 @@ def do_command(USERID, cmd, args):
     elif cmd == Constant.CMD_COMPLETE_TUTORIAL:
         tutorial_step = int(args[0])
         print("Tutorial step", tutorial_step, "reached.")
-        # TutorialMain ends its mandatory starter sequence at step 15.  The
-        # old handler waited until the later mission-guidance step 31, so a
-        # reload restarted the starter tutorial after its trees/trolls had
-        # already been consumed.  The client itself treats any non-zero value
-        # as completed on load; persist that state at the actual end point.
-        if tutorial_step >= 15:
-            save["playerInfo"]["completed_tutorial"] = 1
+        advance_tutorial_step(save, tutorial_step)
         if tutorial_step >= 31: # 31 is Dragon choosing. After that, you have some freedom. There's at least until step 45.
             print("Tutorial COMPLETED!")
             save["privateState"]["dragonNestActive"] = 1 
@@ -1731,6 +1758,15 @@ def do_command(USERID, cmd, args):
         type = args[4]
         print("Kill", str(get_name_from_item_id(id)), "from", f"({x},{y}).")
         map = save["maps"][town_id]
+        if (
+            _tutorial_is_incomplete(save)
+            and int(town_id) == 0
+            and int(id) == Constant.ID_UNIT_TROLL_1
+        ):
+            # Killing either of the two starter Trolls is the stock trigger for
+            # the congratulations step. Persist it independently of the UI so
+            # a reload cannot leave an arrow pointing at a dead target.
+            advance_tutorial_step(save, 14)
         # CMD_KILL only ever fires for enemy (non-PLAYER_SELF) elements in the
         # home village (IsoFightingElement.kill). The client credits the player
         # +5 gold (+xp/collectible) for EVERY such kill via Token(TOKEN_GOLD,5),
@@ -2200,6 +2236,39 @@ def do_command(USERID, cmd, args):
         for raw_id in item_ids:
             _add_gifts(save, int(raw_id))
         print("Store add items:", item_ids)
+
+    elif cmd == Constant.CMD_BUY_STORED_ITEM_CASH:
+        # Unit Collection purchase: [town_id, unit_id, displayed_cash_cost].
+        # The client creates the storage card locally, but this is its only
+        # persistence command. Validate against collection config instead of
+        # trusting the displayed price, then store the owned unit server-side.
+        try:
+            town_id, item_id = int(args[0]), int(args[1])
+            town = save["maps"][town_id]
+        except (IndexError, TypeError, ValueError):
+            print("Collection unit purchase rejected - invalid arguments.")
+            return False
+        cost = _unit_collection_cash_cost(item_id)
+        if (
+            cost is None
+            or str(get_attribute_from_item_id(item_id, "type")) != "u"
+        ):
+            print("Collection unit purchase rejected - unknown unit.")
+            return False
+        cash = int(save["playerInfo"].get("cash", 0) or 0)
+        if cash < cost:
+            print(
+                f"Collection unit purchase rejected - needs {cost} cash, "
+                f"has {cash}."
+            )
+            return False
+        save["playerInfo"]["cash"] = cash - cost
+        _add_stored_item(town, item_id)
+        print(
+            f"Bought collection unit {get_name_from_item_id(item_id)} for "
+            f"{cost} cash."
+        )
+        return True
 
     elif cmd == Constant.CMD_END_SURVIVAL:
         # Survival arena finished: [survival_map_id, time_survived, json({id:count})].
@@ -3064,11 +3133,31 @@ def do_command(USERID, cmd, args):
         return True
 
     elif cmd == Constant.CMD_UNIT_COLLECTION_COMPLETED:
-        collection_id = args[0]
+        try:
+            collection_id = int(args[0])
+        except (IndexError, TypeError, ValueError):
+            print("Unit collection rejected - invalid collection id.")
+            return False
         print("Unit collection completed:", collection_id)
         pState = save["privateState"]
         if not isinstance(pState.get("unitCollectionsCompleted"), list):
             pState["unitCollectionsCompleted"] = []
+        definition = get_game_config().get(
+            "units_collections_categories", {}
+        ).get(str(collection_id))
+        sync_discovered_units(save)
+        discovered = {
+            int(value) for value in pState.get("boughtUnits", []) or []
+        }
+        required = {
+            int(value) for value in (definition or {}).get("units", [])
+        }
+        if not definition or not required.issubset(discovered):
+            print(
+                "Unit collection rejected - missing discovered units:",
+                sorted(required - discovered),
+            )
+            return False
         # +1 cash reward, but only the first time this collection is completed
         # (the client shows sendCommand=false, so no apply_rewards_ranking fires
         # for collections; the cash must be granted here or it is lost).

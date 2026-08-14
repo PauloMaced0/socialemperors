@@ -38,6 +38,28 @@ from tools.patch_enemy_camp_timer_swf import (
     MARKER as ENEMY_CAMP_TIMER_MARKER,
     patched as enemy_camp_timer_patched,
 )
+from tools.patch_tutorial_resume_swf import (
+    CAMERA_MARKER as TUTORIAL_CAMERA_MARKER,
+    MARKER as TUTORIAL_RESUME_MARKER,
+    patched as tutorial_resume_patched,
+)
+from tools.patch_tutorial_build_hitarea_swf import (
+    MARKER as TUTORIAL_BUILD_HITAREA_MARKER,
+    patched as tutorial_build_hitarea_patched,
+)
+from tools.patch_tutorial_decoration_hitarea_swf import (
+    MARKER as TUTORIAL_DECORATION_HITAREA_MARKER,
+    patched as tutorial_decoration_hitarea_patched,
+)
+from tools.patch_tutorial_levelup_order_swf import (
+    MARKER as TUTORIAL_LEVELUP_ORDER_MARKER,
+    patched as tutorial_levelup_order_patched,
+)
+from tools.patch_tutorial_store_reopen_swf import (
+    GUI_MARKER as TUTORIAL_STORE_REOPEN_MARKER,
+    ITEM_MARKER as TUTORIAL_STORE_REPICK_MARKER,
+    patched as tutorial_store_reopen_patched,
+)
 
 
 def test_enemy_click_dispatches_an_attack_instead_of_a_ground_move():
@@ -255,6 +277,72 @@ def test_live_enemy_camp_shows_enemy_count_without_respawning():
         "the active-camp timer patch is missing or duplicated"
 
 
+def test_tutorial_resumes_and_enemy_click_advances_combat_lesson():
+    data = DEFAULT_SWF.read_bytes()
+    assert tutorial_resume_patched(data), (
+        "the client still starts every partial tutorial at step zero or the "
+        "explicit enemy attack dispatcher does not advance tutorial step 12"
+    )
+    if data[:3] == b"CWS":
+        data = b"FWS" + data[3:8] + zlib.decompress(data[8:])
+    assert data.count(TUTORIAL_RESUME_MARKER) == 1, \
+        "the tutorial resume patch is missing or duplicated"
+    assert data.count(TUTORIAL_CAMERA_MARKER) == 1, \
+        "the resumed combat lesson does not restore its tutorial camera"
+
+
+def test_tutorial_construction_highlights_do_not_block_their_controls():
+    data = DEFAULT_SWF.read_bytes()
+    assert tutorial_build_hitarea_patched(data), (
+        "the dark tutorial mask can still consume clicks on the highlighted "
+        "Build, House I, or placement controls"
+    )
+    if data[:3] == b"CWS":
+        data = b"FWS" + data[3:8] + zlib.decompress(data[8:])
+    assert data.count(TUTORIAL_BUILD_HITAREA_MARKER) == 1, \
+        "the tutorial Build hit-area fix is missing or duplicated"
+
+
+def test_tutorial_arrow_and_host_never_consume_gameplay_clicks():
+    data = DEFAULT_SWF.read_bytes()
+    assert tutorial_decoration_hitarea_patched(data), (
+        "Arthur or the tutorial arrow can still cover the highlighted Build "
+        "control at a large client size"
+    )
+    if data[:3] == b"CWS":
+        data = b"FWS" + data[3:8] + zlib.decompress(data[8:])
+    assert data.count(TUTORIAL_DECORATION_HITAREA_MARKER) == 1, \
+        "the tutorial-decoration hit-area fix is missing or duplicated"
+
+
+def test_tutorial_congratulations_precedes_level_up_popup():
+    data = DEFAULT_SWF.read_bytes()
+    assert tutorial_levelup_order_patched(data), (
+        "a tutorial XP level-up can still replace Congratulations before "
+        "the player presses Next"
+    )
+    if data[:3] == b"CWS":
+        data = b"FWS" + data[3:8] + zlib.decompress(data[8:])
+    assert data.count(TUTORIAL_LEVELUP_ORDER_MARKER) == 1, \
+        "the tutorial/level-up popup ordering fix is missing or duplicated"
+    assert data.count(b"releaseTutorialLevelUp") >= 1, \
+        "TutorialMain cannot release the deferred level after Next"
+
+
+def test_tutorial_construction_recovers_from_a_closed_store():
+    data = DEFAULT_SWF.read_bytes()
+    assert tutorial_store_reopen_patched(data), (
+        "closing the store on tutorial step 9/18, or dropping the placement "
+        "cursor on step 10/19, still leaves the Build button dead"
+    )
+    if data[:3] == b"CWS":
+        data = b"FWS" + data[3:8] + zlib.decompress(data[8:])
+    assert data.count(TUTORIAL_STORE_REOPEN_MARKER) == 1, \
+        "the tutorial Build-button reopen fix is missing or duplicated"
+    assert data.count(TUTORIAL_STORE_REPICK_MARKER) == 1, \
+        "the tutorial placement re-pick fix is missing or duplicated"
+
+
 def test_attack_click_patch_is_idempotent():
     data = DEFAULT_SWF.read_bytes()
     result, changed = patch_swf_bytes(data)
@@ -280,6 +368,11 @@ TESTS = [
     test_one_invalid_neighbor_object_cannot_wedge_map_loading,
     test_daily_tournament_bots_cannot_wedge_the_results_window,
     test_live_enemy_camp_shows_enemy_count_without_respawning,
+    test_tutorial_resumes_and_enemy_click_advances_combat_lesson,
+    test_tutorial_construction_highlights_do_not_block_their_controls,
+    test_tutorial_arrow_and_host_never_consume_gameplay_clicks,
+    test_tutorial_congratulations_precedes_level_up_popup,
+    test_tutorial_construction_recovers_from_a_closed_store,
     test_attack_click_patch_is_idempotent,
 ]
 
